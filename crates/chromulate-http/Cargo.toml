@@ -97,6 +97,20 @@ validator-store = []
 # accident. See `chromulate-cache`'s documentation for the subset implemented
 # and, more importantly, for the list of what it deliberately does not do.
 cache = ["dep:chromulate-cache"]
+# `adaptive::AdaptiveConcurrency`: learn, per origin, how many requests that
+# origin is comfortable serving at once, and stay under it.
+#
+# Off by default, and it should stay off for any caller who has not thought about
+# it. What it changes is *when* requests leave, which is a behaviour a caller
+# should choose rather than inherit — a crawler that issues eight requests and
+# expects eight to be in flight will find the first few queued while the
+# controller establishes a baseline. It also holds per-origin state that a build
+# without the feature does not allocate at all.
+#
+# Nothing in it varies a profile, a fingerprint, a header set or an identity in
+# response to a status code, and nothing in it retries a refusal. See the module
+# documentation and the scope boundary in `CLAUDE.md`.
+adaptive-concurrency = []
 
 [lints]
 workspace = true
