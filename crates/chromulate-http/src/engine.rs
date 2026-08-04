@@ -463,7 +463,24 @@ impl Engine {
                 return Ok((key, connection));
             }
         }
-        self.inner.connector.connect(route, deadline).await
+
+        let (key, connection) = self.inner.connector.connect(route, deadline).await?;
+
+        // A multiplexed connection belongs to the pool from the moment it is
+        // opened, not when a response body ends. An HTTP/1.1 connection is
+        // exclusive for one exchange and comes back through the body
+        // (`body::returning_to_pool`); HTTP/2 serves this request and every
+        // later one at the same time, so nothing would ever hand it over —
+        // which left every HTTP/2 request opening a fresh TCP connection and
+        // repeating the TLS handshake.
+        if let Connection::Http2(sender) = &connection {
+            self.inner
+                .pool
+                .release(&key, Connection::Http2(sender.clone()));
+            tracing::trace!(key = %key, "pooled a new multiplexed connection");
+        }
+
+        Ok((key, connection))
     }
 
     /// Writes the profile's headers onto the request, in the profile's order,
