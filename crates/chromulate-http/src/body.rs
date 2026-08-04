@@ -8,15 +8,11 @@ use bytes::Bytes;
 use chromulate_core::{Body, Error, Phase, Result, body_error};
 use futures_core::Stream;
 use futures_util::StreamExt as _;
+use http_body::Body as _;
 use http_body_util::BodyExt as _;
 
 use crate::deadline::Deadline;
 use crate::pool::{Connection, Pool, PoolKey};
-
-/// A boxed chunk stream. Boxing keeps every wrapper below `Unpin`, which is
-/// what lets them project with `get_mut` instead of a projection macro — the
-/// workspace forbids `unsafe`, and `pin-project-lite`'s expansion contains it.
-type Chunks = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>;
 
 /// Turns hyper's response body into a Chromulate body.
 ///
@@ -29,16 +25,24 @@ pub(crate) fn from_incoming(incoming: hyper::body::Incoming) -> Body {
     Body::stream(stream, None)
 }
 
-/// Decomposes a body back into its chunks.
-pub(crate) fn into_chunks(body: Body) -> Chunks {
-    Box::pin(
-        http_body_util::BodyStream::new(body).filter_map(|frame| async move {
-            match frame {
-                Ok(frame) => frame.into_data().ok().map(Ok),
-                Err(error) => Some(Err(error)),
-            }
-        }),
-    )
+/// Polls the next **data** chunk out of a body, skipping non-data frames.
+///
+/// `Body` is `Unpin` and implements [`http_body::Body`] itself, so the
+/// wrappers below hold it directly and poll its frames — no intermediate
+/// `BodyStream` adapter, no extra boxed stream per response.
+fn poll_data(body: &mut Body, cx: &mut Context<'_>) -> Poll<Option<Result<Bytes>>> {
+    loop {
+        match Pin::new(&mut *body).poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => match frame.into_data() {
+                Ok(data) => return Poll::Ready(Some(Ok(data))),
+                // A trailers frame; nothing here consumes them.
+                Err(_) => {}
+            },
+            Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
+            Poll::Ready(None) => return Poll::Ready(None),
+            Poll::Pending => return Poll::Pending,
+        }
+    }
 }
 
 /// Holds an HTTP/1.1 connection until its response body is finished with.
@@ -76,7 +80,7 @@ pub(crate) fn returning_to_pool(
     let length = body.content_length();
     Body::stream(
         ReleasingStream {
-            inner: into_chunks(body),
+            inner: body,
             slot: Some(PoolSlot {
                 pool,
                 key,
@@ -88,7 +92,7 @@ pub(crate) fn returning_to_pool(
 }
 
 struct ReleasingStream {
-    inner: Chunks,
+    inner: Body,
     slot: Option<PoolSlot>,
 }
 
@@ -97,7 +101,7 @@ impl Stream for ReleasingStream {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
-        match this.inner.as_mut().poll_next(cx) {
+        match poll_data(&mut this.inner, cx) {
             Poll::Ready(None) => {
                 if let Some(mut slot) = this.slot.take() {
                     slot.release();
@@ -125,7 +129,7 @@ pub(crate) fn bounded_by(body: Body, deadline: Deadline) -> Body {
     let length = body.content_length();
     Body::stream(
         BoundedStream {
-            inner: into_chunks(body),
+            inner: body,
             timer: Box::pin(tokio::time::sleep(remaining)),
             expired: false,
         },
@@ -134,7 +138,7 @@ pub(crate) fn bounded_by(body: Body, deadline: Deadline) -> Body {
 }
 
 struct BoundedStream {
-    inner: Chunks,
+    inner: Body,
     timer: Pin<Box<tokio::time::Sleep>>,
     expired: bool,
 }
@@ -151,7 +155,7 @@ impl Stream for BoundedStream {
             this.expired = true;
             return Poll::Ready(Some(Err(Error::Timeout(Phase::ReceiveBody))));
         }
-        this.inner.as_mut().poll_next(cx)
+        poll_data(&mut this.inner, cx)
     }
 }
 
