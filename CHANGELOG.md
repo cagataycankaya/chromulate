@@ -45,6 +45,23 @@ that breaking changes may land in a minor release.
   nothing checked: the file was not wired into rustdoc, and one example used three
   variables it never declared. They are doctests now, so a change that breaks one fails
   `cargo test`.
+- **A caller's rate limit could panic the process.** `RateLimit`'s fields are public, so
+  `RateLimit { per_second: 0.0, burst: 1.0 }` reached a limiter without passing the
+  assertion in `RateLimit::per_second`. `reserve` then divided the token debt by that rate
+  and handed the quotient to `Duration::from_secs_f64`, which panics on infinity and on
+  anything past `Duration`'s range. Observed before the fix for both `0.0` and `1e-300`.
+  The rate is now clamped where every limit funnels through, to one request per hour rather
+  than to an arbitrarily tiny value: a caller who misconfigured a limiter should see a rate
+  limit, not a hang. A misconfigured limiter now runs slowly instead of taking the caller's
+  process with it.
+- **A stalled redirect body could outlive the whole-request deadline.** A redirect body is
+  read off the socket before its connection is reused, and `REDIRECT_DRAIN_LIMIT` caps how
+  many bytes that read accepts — but nothing capped how long it took. A server answering
+  `302` with a `Content-Length` and then no bytes held the request open indefinitely. With
+  `timeout` set to 200 ms the request was still running when the test harness cut it off at
+  3.001 s; it now ends in 0.21 s. Abandoning the drain does not pool a half-read socket:
+  a body that fails takes its connection with it, which is the behaviour `PoolSlot` already
+  documented.
 - **A test that raced on `tracing`'s callsite interest cache.** It failed on Linux while
   macOS and Windows passed, on the release commit. `with_default` installs a thread-local
   subscriber without rebuilding the global interest cache, so a callsite first evaluated
