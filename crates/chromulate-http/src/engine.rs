@@ -72,10 +72,25 @@ pub struct EngineConfig {
     /// The identity every connection is opened with.
     pub profile: Arc<Profile>,
     /// Deadline for a whole request, redirects included.
+    ///
+    /// `None` by default, and deliberately: a large download, a streamed
+    /// response and an SSE stream all run for as long as they run, and no
+    /// default could tell one of those from a hang.
     pub timeout: Option<Duration>,
     /// Deadline for producing a response head on one hop.
+    ///
+    /// `Some(30s)` by default. A response head has a natural bound whatever the
+    /// body ends up costing, so this is what stops a server that accepts a
+    /// connection and then says nothing, without putting a ceiling on a
+    /// download.
+    ///
+    /// Set it to `None` for long polling, or for anything else that withholds
+    /// the head until an event fires. There the silence is the protocol, and a
+    /// deadline on it is a bug.
     pub head_timeout: Option<Duration>,
     /// Deadline for establishing a connection.
+    ///
+    /// `Some(30s)` by default.
     pub connect_timeout: Option<Duration>,
     /// What to do with 3xx responses.
     pub redirect: RedirectPolicy,
@@ -85,12 +100,25 @@ pub struct EngineConfig {
 
 impl EngineConfig {
     /// Defaults for a profile.
+    ///
+    /// Two of the three timeouts are on, both at thirty seconds:
+    /// [`connect_timeout`] and [`head_timeout`]. Between them a server can no
+    /// longer hold a request open by accepting a connection and then going
+    /// quiet. [`timeout`], the bound on a whole request, stays off; see its own
+    /// documentation for why, and [`head_timeout`]'s for the one protocol that
+    /// wants the head wait switched off too.
+    ///
+    /// [`connect_timeout`]: EngineConfig::connect_timeout
+    /// [`head_timeout`]: EngineConfig::head_timeout
+    /// [`timeout`]: EngineConfig::timeout
     #[must_use]
     pub fn new(profile: Arc<Profile>) -> Self {
         Self {
             profile,
             timeout: None,
-            head_timeout: None,
+            // Thirty to match `connect_timeout` below: two bounds a caller has
+            // to reason about together are easier to hold as one number.
+            head_timeout: Some(Duration::from_secs(30)),
             connect_timeout: Some(Duration::from_secs(30)),
             redirect: RedirectPolicy::default(),
             pool: PoolConfig::default(),

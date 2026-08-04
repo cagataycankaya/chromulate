@@ -189,13 +189,29 @@ impl Default for ClientBuilder {
 
 impl ClientBuilder {
     /// A builder with browser defaults.
+    ///
+    /// Two of the three timeouts are on, both at thirty seconds:
+    /// [`connect_timeout`] and [`head_timeout`]. The bound on a whole request,
+    /// [`timeout`], is off, because a large download, a streamed response and
+    /// an SSE stream all legitimately run long and no default could tell one of
+    /// those from a hang. See [`no_head_timeout`] for the protocol that wants
+    /// the head wait switched off as well.
+    ///
+    /// [`connect_timeout`]: ClientBuilder::connect_timeout
+    /// [`head_timeout`]: ClientBuilder::head_timeout
+    /// [`no_head_timeout`]: ClientBuilder::no_head_timeout
+    /// [`timeout`]: ClientBuilder::timeout
     #[must_use]
     pub fn new() -> Self {
         Self {
             profile: Arc::new(Profile::chrome_stable()),
             cookie_store: true,
             timeout: None,
-            head_timeout: None,
+            // Thirty to match `connect_timeout` below, and the same value
+            // `EngineConfig::new` uses: this builder overwrites the engine's
+            // defaults wholesale, so a difference here would be invisible and
+            // would win.
+            head_timeout: Some(Duration::from_secs(30)),
             connect_timeout: Some(Duration::from_secs(30)),
             redirect: RedirectPolicy::default(),
             resolver: None,
@@ -247,10 +263,34 @@ impl ClientBuilder {
         self
     }
 
-    /// Bounds the wait for one response head.
+    /// Bounds the wait for one response head, replacing the thirty-second
+    /// default.
+    ///
+    /// This is a per-hop bound, so a redirect chain gets it once per hop rather
+    /// than once in total. Use [`timeout`](ClientBuilder::timeout) for a bound
+    /// on the whole request.
     #[must_use]
     pub fn head_timeout(mut self, timeout: Duration) -> Self {
         self.head_timeout = Some(timeout);
+        self
+    }
+
+    /// Waits for a response head for as long as the server takes.
+    ///
+    /// Long polling is the case this exists for: a server that deliberately
+    /// withholds the head until an event fires is not stalled, and the
+    /// thirty-second default would cut it off. Anything else that treats
+    /// silence as part of the protocol wants this too.
+    ///
+    /// Nothing else is loosened — [`connect_timeout`] still bounds getting to
+    /// the server, and a [`timeout`] still bounds the whole request if one is
+    /// set.
+    ///
+    /// [`connect_timeout`]: ClientBuilder::connect_timeout
+    /// [`timeout`]: ClientBuilder::timeout
+    #[must_use]
+    pub fn no_head_timeout(mut self) -> Self {
+        self.head_timeout = None;
         self
     }
 

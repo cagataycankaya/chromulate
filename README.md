@@ -191,7 +191,7 @@ repository; the measured claims behind the fidelity rows are in
 | Redirects | Yes, with per-hop cookies and credentials dropped when a hop crosses origins |
 | Decompression | Yes: `gzip`, `deflate`, `br`, `zstd`, streaming, with a decompression-bomb guard |
 | Streaming bodies | Yes, both directions; a 256 MiB response streams at a 1.39 MiB peak |
-| Timeouts | Yes: whole-request, response-head, and connect, separately. Only connect has a default (30s) — set the other two, or a server that stalls after the head holds the request open for as long as it likes |
+| Timeouts | Yes: whole-request, response-head, and connect, separately. Connect and response-head default to 30s, so a silent server cannot hold a request open; whole-request has no default, because a large download or an SSE stream legitimately runs long. Long polling wants `no_head_timeout()` |
 | Retry with backoff and jitter | Yes, idempotent methods by default |
 | Rate limiting | Yes |
 | Middleware | Yes — a `Middleware`/`Next` chain, plus six other extension seams |

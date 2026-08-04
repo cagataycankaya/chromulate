@@ -472,6 +472,79 @@ async fn a_request_timeout_overrides_the_clients_own() {
     assert!(error.is_timeout(), "{error:?}");
 }
 
+/// A server that answers `/prompt` at once and never answers anything else.
+///
+/// The prompt reply warms a pooled connection so the stalling request that
+/// follows reuses it instead of dialling. The tests below pause the clock, and a
+/// paused clock jumps to the next deadline as soon as the runtime idles — a dial
+/// still in flight when it jumps would expire the connect timeout rather than
+/// the one under test.
+fn prompt_then_silent(request: &common::Recorded) -> Reply {
+    if request.target == "/prompt" {
+        Reply::text("here")
+    } else {
+        Reply::ok().delayed(Duration::from_secs(3600))
+    }
+}
+
+#[tokio::test]
+async fn a_default_built_client_gives_up_when_the_head_never_arrives() {
+    let server = TestServer::start(prompt_then_silent).await;
+    // Nothing but the resolver is configured: the timeouts are whatever
+    // `Client::builder()` hands out, which is what this test is about.
+    let client = client_for(&server, &["example.test"]);
+
+    let warm = client
+        .get(server.url_for("example.test", "/prompt"))
+        .send()
+        .await
+        .expect("the first request must succeed");
+    assert_eq!(warm.text().await.expect("the body must decode"), "here");
+
+    tokio::time::pause();
+
+    // The outer bound is the difference between a test that reports and a test
+    // that hangs: with no default head timeout the send below never returns.
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(600),
+        client.get(server.url_for("example.test", "/silent")).send(),
+    )
+    .await
+    .expect("a default-built client must bound the head wait itself, not hang on it");
+
+    let error = outcome.expect_err("the head never arrives, so the request must fail");
+    assert!(error.is_timeout(), "{error:?}");
+}
+
+#[tokio::test]
+async fn a_client_can_opt_out_of_the_default_head_timeout_for_long_polling() {
+    let server = TestServer::start(prompt_then_silent).await;
+    let client = build(&server, &["example.test"], |builder| {
+        builder.no_head_timeout()
+    });
+
+    let warm = client
+        .get(server.url_for("example.test", "/prompt"))
+        .send()
+        .await
+        .expect("the first request must succeed");
+    assert_eq!(warm.text().await.expect("the body must decode"), "here");
+
+    tokio::time::pause();
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(1800),
+        client.get(server.url_for("example.test", "/silent")).send(),
+    )
+    .await;
+
+    assert!(
+        outcome.is_err(),
+        "a caller that opted out must wait as long as it likes: half an hour of \
+         silence must not end the request"
+    );
+}
+
 // -------------------------------------------------------- identity plumbing
 
 #[tokio::test]

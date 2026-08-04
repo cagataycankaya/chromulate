@@ -123,6 +123,11 @@ pub struct RequestOptions {
     /// Deadline for the whole request, including redirects.
     pub timeout: Option<Duration>,
     /// Deadline for producing the response head.
+    ///
+    /// `None` means "whatever the engine is configured with", not "no bound":
+    /// the engine's own default is thirty seconds, so opting one request out of
+    /// it is not something this field can express. Build the client or engine
+    /// without a head timeout instead.
     pub head_timeout: Option<Duration>,
     /// What to do with 3xx responses.
     pub redirect: RedirectPolicy,
