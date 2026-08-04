@@ -248,10 +248,10 @@ mod tests {
 
     #[test]
     fn reads_scheme_specific_proxies_from_uppercase_variables() {
-        let env = ProxyEnvironment::from_lookup(lookup(&[
+        let env = env_from(&[
             ("HTTP_PROXY", "http://http-proxy.example.com:8080"),
             ("HTTPS_PROXY", "http://https-proxy.example.com:8443"),
-        ]));
+        ]);
         assert_eq!(
             env.for_scheme("http").expect("http proxy").url().host(),
             "http-proxy.example.com"
@@ -264,10 +264,10 @@ mod tests {
 
     #[test]
     fn lowercase_variable_takes_precedence_over_uppercase() {
-        let env = ProxyEnvironment::from_lookup(lookup(&[
+        let env = env_from(&[
             ("HTTP_PROXY", "http://uppercase.example.com:8080"),
             ("http_proxy", "http://lowercase.example.com:8080"),
-        ]));
+        ]);
         assert_eq!(
             env.for_scheme("http").expect("http proxy").url().host(),
             "lowercase.example.com"
@@ -276,10 +276,7 @@ mod tests {
 
     #[test]
     fn all_proxy_is_the_fallback_for_both_schemes() {
-        let env = ProxyEnvironment::from_lookup(lookup(&[(
-            "ALL_PROXY",
-            "socks5://proxy.example.com:1080",
-        )]));
+        let env = env_from(&[("ALL_PROXY", "socks5://proxy.example.com:1080")]);
         assert_eq!(
             env.for_scheme("http").expect("http proxy").url().host(),
             "proxy.example.com"
@@ -292,10 +289,10 @@ mod tests {
 
     #[test]
     fn scheme_specific_variable_overrides_all_proxy() {
-        let env = ProxyEnvironment::from_lookup(lookup(&[
+        let env = env_from(&[
             ("ALL_PROXY", "socks5://fallback.example.com:1080"),
             ("HTTPS_PROXY", "http://https-only.example.com:8443"),
-        ]));
+        ]);
         assert_eq!(
             env.for_scheme("https").expect("https proxy").url().host(),
             "https-only.example.com"
@@ -308,10 +305,10 @@ mod tests {
 
     #[test]
     fn no_proxy_variable_is_attached_to_selected_proxies() {
-        let env = ProxyEnvironment::from_lookup(lookup(&[
+        let env = env_from(&[
             ("ALL_PROXY", "http://proxy.example.com:8080"),
             ("NO_PROXY", "internal.example.com"),
-        ]));
+        ]);
         let proxy = env.for_scheme("http").expect("http proxy");
         assert!(proxy.bypasses("internal.example.com"));
         assert!(!proxy.bypasses("external.example.com"));
@@ -319,10 +316,10 @@ mod tests {
 
     #[test]
     fn empty_variable_value_is_treated_as_unset() {
-        let env = ProxyEnvironment::from_lookup(lookup(&[
+        let env = env_from(&[
             ("http_proxy", ""),
             ("HTTP_PROXY", "http://fallback.example.com:8080"),
-        ]));
+        ]);
         assert_eq!(
             env.for_scheme("http").expect("http proxy").url().host(),
             "fallback.example.com"
@@ -331,14 +328,14 @@ mod tests {
 
     #[test]
     fn missing_variables_yield_no_proxy() {
-        let env = ProxyEnvironment::from_lookup(lookup(&[]));
+        let env = env_from(&[]);
         assert!(env.for_scheme("http").is_none());
         assert!(env.for_scheme("https").is_none());
     }
 
     #[test]
     fn malformed_proxy_url_is_ignored_rather_than_panicking() {
-        let env = ProxyEnvironment::from_lookup(lookup(&[("ALL_PROXY", "not a url")]));
+        let env = env_from(&[("ALL_PROXY", "not a url")]);
         assert!(env.for_scheme("http").is_none());
     }
 
@@ -372,15 +369,58 @@ mod tests {
         }
     }
 
+    /// Serialises every test that touches a `tracing` callsite in this module.
+    ///
+    /// `tracing` caches per-callsite interest **globally**. Rust's test harness
+    /// runs tests in one process in parallel, so a test that hits a warning's
+    /// callsite while no subscriber is installed can have that callsite cached
+    /// as uninteresting — after which the capturing test sees nothing, however
+    /// correct the code is. It fails on whichever platform happens to schedule
+    /// the two tests in that order, which is how this was found: green on macOS
+    /// and Windows, red on Linux, on the same commit.
+    ///
+    /// Holding this lock across both the log-capturing tests and the ones that
+    /// merely parse an environment removes the race by removing the
+    /// interleaving.
+    static TRACING_CALLSITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Takes the callsite lock, recovering it if a previous test panicked while
+    /// holding it — a poisoned lock here would turn one failure into every
+    /// later test failing for an unrelated reason.
+    fn callsite_guard() -> std::sync::MutexGuard<'static, ()> {
+        TRACING_CALLSITES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Runs `body` with a subscriber that captures everything it logs.
     fn capture_logs(body: impl FnOnce()) -> String {
+        let _guard = callsite_guard();
         let logs = CapturedLogs::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(logs.clone())
             .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
             .finish();
+
+        // `with_default` installs a *thread-local* dispatcher and does not
+        // rebuild the global callsite interest cache — only
+        // `set_global_default` does. So a callsite first evaluated while no
+        // subscriber was installed stays cached as uninteresting, and this
+        // capture would see nothing however correct the code is. Rebuilding
+        // makes the cache reflect the subscriber that is about to run, which
+        // the lock above then keeps true for the duration.
+        tracing::callsite::rebuild_interest_cache();
+
         tracing::subscriber::with_default(subscriber, body);
         logs.contents()
+    }
+
+    /// Builds an environment under the callsite lock, so a test that does not
+    /// capture logs cannot poison a callsite for one that does.
+    fn env_from(pairs: &[(&'static str, &'static str)]) -> ProxyEnvironment {
+        let _guard = callsite_guard();
+        ProxyEnvironment::from_lookup(lookup(pairs))
     }
 
     #[test]
