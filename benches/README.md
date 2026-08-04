@@ -23,7 +23,12 @@ wave started from), together with the CPU and toolchain they came from.
 | `cargo bench -p chromulate-cookie` | Cookie lookup and storage as the jar grows |
 | `cargo bench -p chromulate-core` | `Body::collect` over a chunked stream |
 | `cargo bench -p chromulate-compression` | Decompression throughput per coding |
+| `cargo run --release -p chromulate-bench --bin multiorigin` | Throughput as the number of distinct origins grows — the shape a single-origin run hides |
+| `cargo run --release -p chromulate-bench --bin profile -- <secs> <concurrency>` | A steady single-client load for a sampling profiler to attach to |
+| `cargo run --release -p chromulate-bench --bin memory -- soak <secs>` | Resident memory sampled over a sustained multi-origin load, so a leak shows as a slope |
 | `cargo run --release -p chromulate-bench --features live --bin live -- …` | Latency against a **real HTTPS origin**, with TLS and HTTP/2 in the picture |
+| `cargo run --release -p chromulate-bench --features live --bin tlsbench` | Concurrent throughput over TLS and HTTP/2 against a **local** origin |
+| `python3 tools/pool-scan-cost.py` | What the amortised pool sweep is worth, by reverting it and re-measuring |
 
 `cargo bench --workspace` runs every criterion suite.
 
@@ -130,6 +135,56 @@ memory every 8 MB consumed. `buffer` reads the same body through
 **`buffer` is the control, and it is not optional.** A flat peak in `stream`
 only means something if the same measurement can be shown to move when memory
 really is being held. Run both or trust neither.
+
+## Many origins, and why one is not enough
+
+```
+cargo run --release -p chromulate-bench --bin multiorigin
+```
+
+A connection pool is keyed by origin, so anything costing *per pool key* — an eviction
+sweep, a capacity count, contention between unrelated hosts — is invisible with one origin
+and grows with the number of them. A crawler is the second shape, not the first.
+
+The harness sweeps the origin count with concurrency and everything else fixed
+(`BENCH_ORIGINS`, default `1,10,50,100`), and runs `reqwest` through the same sweep as a
+control: a bend that appears in both is the machine rather than either client.
+
+`tools/pool-scan-cost.py` is the companion. It reverts the amortised-sweep fix in a working
+copy, runs both versions, prints the two curves side by side, and restores the source —
+which is how the fix stopped being a mechanism and became a number. It reports a missing
+target rather than quietly measuring nothing, in the manner of `cookie-mutation-check.py`.
+
+## Where the CPU goes
+
+```
+./target/release/profile 25 64 &
+sample $! 12 -file /tmp/chromulate.sample     # macOS; use perf on Linux
+```
+
+Every other harness interleaves several clients in one process, which is what makes their
+*ratios* trustworthy and their *profiles* useless — a sample taken during an `e2e` run
+attributes time to whichever client happened to be running. `profile` drives Chromulate and
+nothing else against the loopback origin, so a call tree describes this crate.
+
+Read the result as a share of *busy* samples: threads parked in the scheduler are not work,
+and counting them measures how long the run was rather than what it did.
+
+## Soak
+
+```
+cargo run --release -p chromulate-bench --bin memory -- soak 540
+```
+
+Every other memory phase is a point measurement, and a leak is a slope. This runs a
+sustained multi-origin load and samples resident memory every ten seconds, reporting growth
+over the second half so that startup allocation is not counted as a leak.
+
+**The origin runs in a child process, and that is not incidental.** The first version ran
+the origins in-process and appeared to show memory climbing from 73 MiB to 1.8 GB. That was
+the in-process servers holding connection buffers — the same confound the pooled phase
+already avoids. Measured with the origin isolated: flat at 9.7 MiB across 56 million
+requests.
 
 ## Against a real origin
 

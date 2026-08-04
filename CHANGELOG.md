@@ -7,7 +7,58 @@ that breaking changes may land in a minor release.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **`Client::hsts()`** — access to the HSTS store, so a caller can seed a policy for an
+  origin it already knows is HTTPS-only. Without it the store was learn-only, and the
+  *first* request of a process to such an origin was the one that would have gone out in
+  plaintext.
+- **`RequestBuilder::basic_auth` and `bearer_auth`.** Both mark the header value sensitive,
+  so a credential does not reach a log through `HeaderMap`'s `Debug`. `basic_auth` always
+  sends the colon: `user:` and `user` are different credentials on the wire.
+- **A features table in the README**, saying what ships and what does not, with the
+  fidelity rows pointing at the measurements behind them.
+- **CI: Miri over `chromulate-core`** (verified locally first — 31 tests pass under it,
+  including the `tokio` ones) and **a nightly schedule for the live network tests**, so
+  that "a site changed" and "we broke it" stop looking the same.
+
+### Fixed
+
+- **The README's Rust examples are now compiled.** The status banner claimed they were, and
+  nothing checked: the file was not wired into rustdoc, and one example used three
+  variables it never declared. They are doctests now, so a change that breaks one fails
+  `cargo test`.
+- **A test that raced on `tracing`'s callsite interest cache.** It failed on Linux while
+  macOS and Windows passed, on the release commit. `with_default` installs a thread-local
+  subscriber without rebuilding the global interest cache, so a callsite first evaluated
+  with no subscriber installed stays cached as uninteresting and the capturing test sees
+  nothing. Not reproducible locally — 25 runs pass either way — so the verification was the
+  CI Linux job.
+
+### Documentation
+
+Corrections found by checking claims against the code rather than re-reading them:
+
+- the design document described the connection pool as a **sharded map** and argued against
+  the single mutex that is actually implemented;
+- its pool defaults table said 8 idle per key and 256 total, against the code's 6 and 100,
+  and listed a separate handshake timeout that shares the connect timeout;
+- it claimed eviction on `GOAWAY` and on profile unregistration, neither of which exists;
+- it described a **staggered RFC 8305 connect race** that `dial()` does not do — and says
+  so in a comment at the call site. Corrected in the design document and in the README
+  features table, where the same wrong claim had just been written;
+- several `UNMEASURED` labels predated the harness, including one stating that no benchmark
+  had ever been run;
+- `CONTRIBUTING.md` listed three pre-PR commands where CI now runs six, and did not mention
+  the shell pitfall that let two failures through this session: a piped `cargo clippy`
+  reports the exit status of the pipe's last command.
+
+`CLAUDE.md` gains a **Before every release** section requiring this pass, with these
+examples in it, so the next release does not rediscover them.
+
+Four questions the architecture documents did not answer at all now have sections: the
+tokio task spawn strategy, the pool's ownership model, what backpressure does and does not
+bound, and lock contention with numbers.
 
 ## [0.1.0] — 2026-08-04
 

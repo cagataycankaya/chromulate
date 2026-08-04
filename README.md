@@ -10,7 +10,7 @@ memory footprint and throughput of a native Rust HTTP client.
 It embeds no browser. There is no Chromium, no Blink, no V8, no DOM, no renderer, and no
 JavaScript engine. Chromulate is the networking layer and nothing else.
 
-```
+```text
 Hyper + browser networking behaviour        not        a headless browser
 ```
 
@@ -43,7 +43,11 @@ implement only that.
 A caller picks an identity. Everything else follows.
 
 ```rust
+# use chromulate::Client;
+# fn main() -> Result<(), chromulate::Error> {
 let client = Client::chrome()?;
+# Ok(())
+# }
 ```
 
 That one call configures the TLS shape, the HTTP/2 settings and window sizes, the header
@@ -93,7 +97,7 @@ tokio = { version = "1", features = ["full"] }
 
 A request with a browser identity:
 
-```rust
+```no_run
 use chromulate::Client;
 
 #[tokio::main]
@@ -114,23 +118,34 @@ Configured explicitly:
 use chromulate::{Client, Profile};
 use std::time::Duration;
 
+# fn main() -> Result<(), chromulate::Error> {
 let client = Client::builder()
     .profile(Profile::chrome_stable())
     .cookie_store(true)
     .timeout(Duration::from_secs(30))
     .proxy("socks5h://user:pass@127.0.0.1:1080")?
     .build()?;
+# Ok(())
+# }
 ```
 
 Streaming a large response without buffering it:
 
 ```rust
 use futures_util::StreamExt;
+use tokio::io::AsyncWriteExt;
 
+# async fn example(
+#     client: chromulate::Client,
+#     url: &str,
+#     sink: &mut (impl AsyncWriteExt + Unpin),
+# ) -> Result<(), Box<dyn std::error::Error>> {
 let mut stream = client.get(url).send().await?.bytes_stream();
 while let Some(chunk) = stream.next().await {
     sink.write_all(&chunk?).await?;
 }
+# Ok(())
+# }
 ```
 
 ## Features

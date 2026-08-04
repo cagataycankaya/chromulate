@@ -26,10 +26,32 @@ is a hypothesis; running it is a result.
 cargo fmt --all
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --all-features
+cargo deny check
+cargo run -p chromulate-cli -- verify
 ```
 
-All three must be clean. CI runs the same commands plus a documentation build, an MSRV
-check against Rust 1.85, and tests on Linux, macOS, and Windows.
+All six must be clean, and the last three are the ones people forget:
+
+- **The documentation build is a gate, not a nicety.** CI sets
+  `RUSTDOCFLAGS=-D warnings`, so a broken intra-doc link fails the build while only
+  warning locally. This has already broken `main` once.
+- **`cargo deny`** checks advisories, licences, duplicate versions and source registries
+  against `deny.toml`. It can go red without this repository changing, because an advisory
+  published overnight is exactly what it is for.
+- **`chromulate verify`** rebuilds every profile from its capture. If you touched anything
+  under `chromulate-profile`, this is the check that catches a constant nobody observed.
+
+Run `python3 tools/cookie-mutation-check.py` as well when you have touched
+`chromulate-cookie`; it verifies that the tests would notice if each fix were reverted,
+which a green suite does not tell you.
+
+CI runs all of the above plus an MSRV check against Rust 1.85, Miri over
+`chromulate-core`, and tests on Linux, macOS, and Windows.
+
+**Beware the shell pitfall that has bitten this project twice.** `cargo clippy … | tail -1`
+reports the exit status of `tail`, not of clippy, so a chained `&&` proceeds through a
+failure. Use `set -e` and let each command stand alone, or check `${PIPESTATUS[0]}`.
 
 Tests that need the public internet are gated behind the `network-tests` feature and
 marked `#[ignore]`, so the default test run stays hermetic and offline. Keep it that way:

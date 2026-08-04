@@ -33,6 +33,9 @@ hostile input rather than from hostile users of the library:
   cookie — is a vulnerability.
 - **Redirect handling.** Forwarding credentials or authorization headers across an origin
   boundary during a redirect is a vulnerability.
+- **HSTS bypass.** A plaintext request to an origin with a live policy — or a policy
+  recorded from a response that did not arrive over TLS, which would let anyone able to
+  inject into cleartext pin or unpin an origin — is a vulnerability.
 - **Resource exhaustion** reachable from a single hostile origin: unbounded memory in the
   connection pool, the cookie jar, or the DNS cache.
 - **Memory safety.** The workspace sets `unsafe_code = "forbid"`, so any memory-safety

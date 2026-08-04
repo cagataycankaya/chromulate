@@ -1798,10 +1798,18 @@ its preload list and from `Strict-Transport-Security` headers it has seen. An en
 claiming browser-grade behaviour that skips this makes a plaintext request where a browser
 would not — an observable behavioural difference and a real downgrade exposure.
 
-The design: an HSTS store consulted before the request leaves, populated from response
-headers, with an optional preload list behind a feature flag because the list is large and
-not every user wants it compiled in. This is specified and not yet implemented; the
-roadmap places it before the 1.0 milestone.
+**Implemented** (`chromulate-http/src/hsts.rs`): a store consulted before the request
+leaves, populated from response headers, reachable from the facade as `Client::hsts()` so a
+caller can seed a policy it already knows. Three rules from RFC 6797 carry their own tests
+because each is easy to get wrong in a way nothing would notice — a header arriving over
+cleartext is ignored (§8.1), an IP-literal host takes no policy (§8.1.1), and `max-age=0`
+removes a policy rather than refreshing it (§6.1.1). The upgrade happens before anything is
+sent, which is the whole point: a redirect would already be too late.
+
+**The preload list is not implemented.** It is the part that protects the *first* request
+to an origin this process has never visited, and it belongs behind a feature flag because
+the list is large and not every user wants it compiled in. `Client::hsts()` is the interim
+answer for a caller who knows which origins matter.
 
 ### 13.3 Keeping credentials out of logs
 

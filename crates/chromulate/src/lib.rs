@@ -184,3 +184,18 @@ pub mod header {
 pub use chromulate_core::reexport::{
     HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Url, Version,
 };
+
+/// The README's Rust examples, compiled.
+///
+/// The status banner claims the examples compile. That was an assertion about
+/// a file nothing checked — `README.md` is not otherwise wired into rustdoc, so
+/// its code blocks were prose that happened to look like Rust, and one of them
+/// did not compile, using three variables it never declared.
+///
+/// Attaching the file as documentation turns each Rust block into a doctest, so
+/// a change that breaks an example fails `cargo test` rather than being found
+/// by whoever copies it first. The module is private and hidden: it exists for
+/// the doctests, not to duplicate the README into the API documentation.
+#[doc = include_str!("../../../README.md")]
+#[doc(hidden)]
+mod readme_examples {}

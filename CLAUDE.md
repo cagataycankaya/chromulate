@@ -68,6 +68,44 @@ observed.
 - Public items carry doc comments with a runnable example where the item is an entry
   point.
 
+## Before every release
+
+A release is the moment the documentation stops being notes and starts being a promise, so
+it gets a documentation pass of its own. Do this before tagging, not after.
+
+**Re-read every document against the code, not from memory.** `README.md`,
+`CHANGELOG.md`, `CONTRIBUTING.md`, `SECURITY.md`, `docs/fidelity.md`,
+`docs/performance.md`, `benches/README.md`, and everything under `docs/architecture/`.
+For each claim that can be checked, check it — grep for the function, run the command, read
+the constant. Documents drift silently and in one direction: they describe what someone
+intended, and the code changed.
+
+Three real examples from this repository, each caught only by checking:
+
+- the design document described the connection pool as a *sharded map* and argued against
+  the single mutex that was actually implemented;
+- it listed pool defaults of 8 idle per key and 256 total, against the code's 6 and 100;
+- it claimed a staggered RFC 8305 connect race that `dial()` does not do, and says so in a
+  comment at the call site.
+
+A claim you cannot check in under a minute is a claim to rewrite as what you *can* check.
+
+**Write the changelog in detail, and write it from the diff.** Not "improved performance" —
+which change, what it was worth, and measured how. A reader deciding whether to upgrade
+needs the number and the caveat; a reader debugging a regression needs to know which entry
+to suspect. Every performance claim carries its figure or the label `UNMEASURED`, exactly
+as it would anywhere else in this project. Behaviour changes a caller can observe get their
+own line, including the ones that are corrections rather than features.
+
+**Check the version-shaped statements.** The status banner, the supported-versions table,
+the roadmap's phase statuses, and any "not yet implemented" that has since been
+implemented. A roadmap that still says *Next* for something finished is worse than no
+roadmap, because it is believed.
+
+**Tag only a commit whose CI is green**, all jobs, all platforms. A red job on a released
+commit is a promise broken in public, and moving a published tag afterwards is worse than
+waiting for the build.
+
 ## Scope boundary
 
 Chromulate reproduces standards-compliant browser networking behaviour so that crawlers,
