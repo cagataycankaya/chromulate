@@ -200,7 +200,27 @@ pub struct PoolConfig {
     pub idle_timeout: Duration,
     /// The most connections kept for one pool key.
     pub max_per_host: usize,
-    /// The most connections kept across all keys.
+    /// The most connections kept in each of the pool's two populations: idle
+    /// HTTP/1.1 sockets, and registered HTTP/2 connections.
+    ///
+    /// Each population separately, not their sum, so a pool can hold up to
+    /// `2 * max_total` entries — `100` by default means at most 100 idle
+    /// HTTP/1.1 sockets *and* at most 100 multiplexed connections. In practice
+    /// the second number is bounded far below that by the number of distinct
+    /// HTTP/2 origins in flight, since a key holds one multiplexed connection
+    /// however many requests ride it.
+    ///
+    /// They are counted apart because one number for both was a defect rather
+    /// than a simplification. The only entry this cap can free is an idle
+    /// HTTP/1.1 socket: at its cap the multiplexed population declines to pool
+    /// a new origin rather than evicting one, since deregistering a live
+    /// multiplexed connection would make the next request open a second
+    /// connection to an origin that already has one — a shape no browser
+    /// produces. So every HTTP/2 entry counted here raised the number that
+    /// HTTP/1.1 eviction reacted to while contributing nothing it could
+    /// reclaim. Against `max_total = 10`, twenty HTTP/2 origins left one
+    /// survivor out of five subsequent HTTP/1.1 releases: each release found
+    /// the pool over cap and threw away the one before it.
     pub max_total: usize,
     /// Ceiling for hyper's per-connection HTTP/1.1 read and write buffers, in
     /// bytes. `None` keeps hyper's default of 408 KiB.
@@ -254,11 +274,26 @@ struct PoolState {
     /// HTTP/2 connections, which stay in the map while in use because they are
     /// multiplexed.
     multiplexed: HashMap<PoolKey, Connection>,
-    /// Entries across both maps, kept in step by every insert and remove, so
-    /// asking whether the pool is full does not walk it.
-    held: usize,
+    /// Entries in `idle`, kept in step by every insert and remove, so asking
+    /// whether the idle pool is full does not walk it.
+    ///
+    /// HTTP/1.1 only. The multiplexed population is not counted here and does
+    /// not need a counter of its own: `multiplexed` holds one connection per
+    /// key, so `HashMap::len` already is that count, in O(1) and with no way
+    /// to drift from the map it describes. The one counter this replaced
+    /// tracked both maps by hand and drifted in exactly that way — the HTTP/2
+    /// release path incremented it and then returned above the cap check, so
+    /// it grew without bound while HTTP/1.1 releases paid for the growth.
+    idle_held: usize,
     /// When the last full expiry sweep ran; see [`Pool::sweep_if_due`].
     last_sweep: Instant,
+}
+
+impl PoolState {
+    /// Connections held across both populations.
+    fn held(&self) -> usize {
+        self.idle_held + self.multiplexed.len()
+    }
 }
 
 impl Pool {
@@ -269,7 +304,7 @@ impl Pool {
             inner: Arc::new(Mutex::new(PoolState {
                 idle: HashMap::new(),
                 multiplexed: HashMap::new(),
-                held: 0,
+                idle_held: 0,
                 last_sweep: Instant::now(),
             })),
             config,
@@ -307,7 +342,6 @@ impl Pool {
                 }
             } else {
                 state.multiplexed.remove(key);
-                state.held -= 1;
             }
         }
 
@@ -315,7 +349,7 @@ impl Pool {
         let idle_timeout = self.config.idle_timeout;
         let entries = state.idle.get_mut(key)?;
         while let Some(entry) = entries.pop() {
-            state.held -= 1;
+            state.idle_held -= 1;
             if now.duration_since(entry.since) < idle_timeout && entry.connection.is_usable() {
                 return Some(entry.connection);
             }
@@ -329,7 +363,9 @@ impl Pool {
     /// HTTP/2 connections are stored once and shared; a second one for the same
     /// key replaces a dead entry and is otherwise dropped, since duplicating a
     /// multiplexed connection wastes a handshake and doubles the SETTINGS
-    /// preface a server sees from one client.
+    /// preface a server sees from one client. They are capped separately from
+    /// idle HTTP/1.1 sockets and by a different rule — see
+    /// [`Pool::release_multiplexed`] and [`PoolConfig::max_total`].
     pub(crate) fn release(&self, key: &PoolKey, connection: Connection) {
         if !connection.is_usable() {
             return;
@@ -337,22 +373,23 @@ impl Pool {
         let mut guard = self.lock();
         let state = &mut *guard;
 
+        // Runs on both paths. It used to run only here, below the HTTP/2
+        // branch's early return, which left nothing in the pool ever walking
+        // the multiplexed map: a closed multiplexed connection was reclaimed
+        // only if someone checked its own key out again.
+        self.sweep_if_due(state);
+
         if matches!(connection, Connection::Http2(_)) {
-            match state.multiplexed.get(key) {
-                Some(existing) if existing.is_usable() => {}
-                _ => {
-                    if state.multiplexed.insert(key.clone(), connection).is_none() {
-                        state.held += 1;
-                    }
-                }
-            }
+            self.release_multiplexed(state, key, connection);
             return;
         }
 
-        self.sweep_if_due(state);
-        if state.held >= self.config.max_total {
-            // The globally oldest entry is also the first to expire, so the
-            // at-cap path does not need a separate expiry sweep.
+        // Against `idle_held`, not the total. An HTTP/2 entry cannot be freed
+        // by `evict_oldest`, so counting one here would spend an HTTP/1.1
+        // connection on a slot that was never going to come back.
+        if state.idle_held >= self.config.max_total {
+            // The oldest idle entry is also the first to expire, so the at-cap
+            // path does not need a separate expiry sweep.
             Self::evict_oldest(state);
         }
 
@@ -361,13 +398,70 @@ impl Pool {
             // Bounded by `max_per_host`, so this stays O(one bucket) rather
             // than O(pool).
             entries.remove(0);
-            state.held -= 1;
+            state.idle_held -= 1;
         }
         entries.push(Idle {
             connection,
             since: Instant::now(),
         });
-        state.held += 1;
+        state.idle_held += 1;
+    }
+
+    /// Registers a multiplexed connection, unless the pool already holds
+    /// `max_total` of them.
+    ///
+    /// **At the cap this declines to pool; it never evicts.** That is a
+    /// deliberate answer to a question several answers would fit, so here is
+    /// the reasoning.
+    ///
+    /// Dropping the pool's handle would not close the connection. An in-flight
+    /// request holds its own clone of the `SendRequest` and hyper's driver runs
+    /// until the last clone is gone, so eviction is not the socket-freeing act
+    /// it is for an idle HTTP/1.1 entry. What it *would* do is deregister a
+    /// live connection, so the next request to that origin opens a second one
+    /// alongside it: two concurrent HTTP/2 connections from one client to one
+    /// origin, and a second SETTINGS preface for the server to read. A browser
+    /// coalesces to one connection per origin and never produces that shape,
+    /// which makes eviction a fingerprint regression rather than a capacity
+    /// trade. Declining costs a crawler a handshake per request to origins it
+    /// could not fit, and costs nothing a server can see.
+    ///
+    /// "Evict the multiplexed connection with no active streams" would be the
+    /// better rule if it could be written. It cannot: hyper 1.11's
+    /// `http2::SendRequest` exposes `is_ready` and `is_closed` and no stream
+    /// count, so this pool cannot tell a connection carrying forty streams
+    /// from one carrying none.
+    ///
+    /// The split also matches where a browser draws the line. Chrome's global
+    /// socket ceiling governs its socket pools; HTTP/2 sessions live in a
+    /// separate per-key session pool that socket pressure does not evict.
+    ///
+    /// Two consequences worth stating plainly. A dead entry is replaced even at
+    /// the cap, because replacing does not grow the population — otherwise a
+    /// full map of corpses would refuse the origins that own them. And age
+    /// never expires a multiplexed entry: `idle_timeout` measures a socket with
+    /// nothing on it, which a multiplexed connection is not, so a slot frees
+    /// when the server closes the connection and the sweep notices, not on a
+    /// clock of ours.
+    fn release_multiplexed(&self, state: &mut PoolState, key: &PoolKey, connection: Connection) {
+        match state.multiplexed.get(key) {
+            // This origin already has its one connection and it is alive.
+            Some(existing) if existing.is_usable() => return,
+            // Replacing a dead entry leaves the population the same size, so
+            // the cap has no opinion about it.
+            Some(_) => {}
+            None => {
+                if state.multiplexed.len() >= self.config.max_total {
+                    tracing::debug!(
+                        key = %key,
+                        max_total = self.config.max_total,
+                        "the multiplexed pool is full; this origin will not be pooled"
+                    );
+                    return;
+                }
+            }
+        }
+        state.multiplexed.insert(key.clone(), connection);
     }
 
     /// The number of connections currently held.
@@ -375,9 +469,12 @@ impl Pool {
     /// Counts what the maps hold, which between sweeps can include entries
     /// that have already outlived the idle timeout; they are discarded the
     /// next time their key is checked out or a sweep runs.
+    ///
+    /// Both populations together, so this can reach `2 * max_total`; see
+    /// [`PoolConfig::max_total`].
     #[must_use]
     pub fn len(&self) -> usize {
-        self.lock().held
+        self.lock().held()
     }
 
     /// Whether the pool holds nothing.
@@ -391,7 +488,7 @@ impl Pool {
         let mut state = self.lock();
         state.idle.clear();
         state.multiplexed.clear();
-        state.held = 0;
+        state.idle_held = 0;
     }
 
     /// Runs a full expiry sweep at most once per quarter of the idle timeout.
@@ -424,11 +521,15 @@ impl Pool {
         state
             .multiplexed
             .retain(|_, connection| connection.is_usable());
-        state.held = kept + state.multiplexed.len();
+        state.idle_held = kept;
     }
 
-    /// Drops the connection that has been idle longest, so that reaching the
-    /// total cap costs the least useful entry rather than refusing to pool.
+    /// Drops the HTTP/1.1 connection that has been idle longest, so that
+    /// reaching the cap costs the least useful entry rather than refusing to
+    /// pool.
+    ///
+    /// It walks `idle` and only `idle`, which is the whole reason the cap it
+    /// serves counts `idle` and only `idle`.
     fn evict_oldest(state: &mut PoolState) {
         let oldest = state
             .idle
@@ -446,7 +547,7 @@ impl Pool {
             && let Some(entries) = state.idle.get_mut(&key)
         {
             entries.remove(index);
-            state.held -= 1;
+            state.idle_held -= 1;
             if entries.is_empty() {
                 state.idle.remove(&key);
             }
@@ -461,7 +562,7 @@ impl fmt::Debug for Pool {
             .field("config", &self.config)
             .field("idle_keys", &state.idle.len())
             .field("multiplexed_keys", &state.multiplexed.len())
-            .field("connections", &state.held)
+            .field("connections", &state.held())
             .finish()
     }
 }
@@ -559,6 +660,20 @@ mod tests {
         (Connection::Http1(sender), server)
     }
 
+    /// A live HTTP/2 connection over an in-memory duplex pipe. As with
+    /// [`h1_connection`] the server half is returned so the test controls when
+    /// the connection dies. The client half of an HTTP/2 handshake completes
+    /// once its preface is written, so nothing has to answer on the other end.
+    async fn h2_connection() -> (Connection, tokio::io::DuplexStream) {
+        let (client, server) = tokio::io::duplex(4096);
+        let (sender, driver) = http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+            .handshake::<_, Body>(hyper_util::rt::TokioIo::new(client))
+            .await
+            .expect("an in-memory handshake succeeds");
+        tokio::spawn(driver);
+        (Connection::Http2(sender), server)
+    }
+
     fn small_pool(max_per_host: usize, max_total: usize, idle_timeout: Duration) -> Pool {
         Pool::new(PoolConfig {
             idle_timeout,
@@ -611,6 +726,164 @@ mod tests {
                 pool.len()
             );
         }
+    }
+
+    /// The first of the two probes from the 2026-08-04 review: the total cap
+    /// has to mean something for multiplexed connections too. Before the fix
+    /// the HTTP/2 arm of `release` returned above the cap check, so fifty
+    /// origins produced fifty entries in a pool told to hold ten.
+    #[tokio::test]
+    async fn multiplexed_connections_are_bounded_by_the_total_cap() {
+        let pool = small_pool(6, 10, Duration::from_secs(90));
+        let profile = Profile::chrome_stable();
+
+        let mut io_keepalive = Vec::new();
+        for index in 0..50 {
+            let (connection, io) = h2_connection().await;
+            io_keepalive.push(io);
+            let host = format!("h{index}.example");
+            pool.release(&key_for(&profile, &host, Protocol::Http2), connection);
+        }
+
+        assert!(
+            pool.len() <= 10,
+            "fifty HTTP/2 origins against max_total = 10 left {} pooled",
+            pool.len()
+        );
+    }
+
+    /// The second probe, and the one that says why the counters have to be
+    /// separate. HTTP/2 entries used to inflate the count that HTTP/1.1
+    /// eviction reacts to, while `evict_oldest` can only ever free an HTTP/1.1
+    /// entry — so every HTTP/1.1 release past the cap threw away the previous
+    /// HTTP/1.1 release and one survivor was left out of five.
+    #[tokio::test]
+    async fn http2_pressure_does_not_destroy_http1_pooling() {
+        let pool = small_pool(6, 10, Duration::from_secs(90));
+        let profile = Profile::chrome_stable();
+
+        let mut io_keepalive = Vec::new();
+        for index in 0..20 {
+            let (connection, io) = h2_connection().await;
+            io_keepalive.push(io);
+            let host = format!("h2-{index}.example");
+            pool.release(&key_for(&profile, &host, Protocol::Http2), connection);
+        }
+
+        let mut h1_keys = Vec::new();
+        for index in 0..5 {
+            let (connection, io) = h1_connection().await;
+            io_keepalive.push(io);
+            let key = key_for(&profile, &format!("h1-{index}.example"), Protocol::Http11);
+            pool.release(&key, connection);
+            h1_keys.push(key);
+        }
+
+        let recovered = h1_keys
+            .iter()
+            .filter(|key| pool.checkout(key).is_some())
+            .count();
+        assert_eq!(
+            recovered, 5,
+            "HTTP/2 traffic must not evict HTTP/1.1 connections: {recovered} of 5 came back"
+        );
+    }
+
+    /// The path every ordinary HTTP/2 request takes, which none of the cap
+    /// tests above can reach: they all fill a deliberately tiny pool, so the
+    /// below-cap behaviour is untested by construction in each of them.
+    #[tokio::test]
+    async fn a_multiplexed_connection_is_pooled_and_reused_below_the_cap() {
+        let pool = Pool::new(PoolConfig::default());
+        let profile = Profile::chrome_stable();
+        let key = key_for(&profile, "a.example", Protocol::Http2);
+
+        let (connection, _io) = h2_connection().await;
+        pool.release(&key, connection);
+        assert_eq!(pool.len(), 1, "an HTTP/2 connection must be pooled");
+
+        // Checking one out clones it and leaves it pooled, because it
+        // multiplexes.
+        assert!(pool.checkout(&key).is_some(), "it must be reusable");
+        assert_eq!(pool.len(), 1, "and checking it out must not remove it");
+
+        // A second connection for a key that already has a live one is
+        // dropped: one connection per origin is what a browser shows a server.
+        let (second, _second_io) = h2_connection().await;
+        pool.release(&key, second);
+        assert_eq!(pool.len(), 1, "an origin keeps one multiplexed connection");
+    }
+
+    /// A closed multiplexed entry is replaced by a live one for the same key
+    /// even when the pool is at its cap, because replacing does not grow the
+    /// population. Without that, an origin whose connection died would be
+    /// locked out of the pool by its own corpse.
+    ///
+    /// The idle timeout is the default ninety seconds so the expiry sweep —
+    /// which runs at most once per quarter of it — cannot fire during the
+    /// test and clear the entry instead. Only the replacement makes this pass.
+    #[tokio::test]
+    async fn a_dead_multiplexed_entry_is_replaced_at_the_cap() {
+        let pool = small_pool(6, 1, Duration::from_secs(90));
+        let profile = Profile::chrome_stable();
+        let key = key_for(&profile, "a.example", Protocol::Http2);
+
+        let (first, first_io) = h2_connection().await;
+        pool.release(&key, first);
+        assert_eq!(pool.len(), 1);
+
+        drop(first_io);
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let (second, _second_io) = h2_connection().await;
+        pool.release(&key, second);
+        assert_eq!(pool.len(), 1, "the pool must not grow past its cap");
+        assert!(
+            pool.checkout(&key).is_some(),
+            "the live connection must have replaced the dead one"
+        );
+    }
+
+    /// The expiry sweep has to run on the HTTP/2 release path too. It used to
+    /// sit below that path's early return, so nothing in the pool ever walked
+    /// the multiplexed map: a pool whose multiplexed entries had all closed
+    /// stayed full of them and refused every new origin.
+    ///
+    /// The idle timeout is short so the sweep's once-per-quarter-timeout gate
+    /// opens during the test. Without the sweep the third release finds two
+    /// corpses filling a cap of two and is declined.
+    #[tokio::test]
+    async fn the_sweep_reclaims_closed_multiplexed_entries() {
+        let pool = small_pool(6, 2, Duration::from_millis(200));
+        let profile = Profile::chrome_stable();
+
+        let mut dead_io = Vec::new();
+        for host in ["a.example", "b.example"] {
+            let (connection, io) = h2_connection().await;
+            dead_io.push(io);
+            pool.release(&key_for(&profile, host, Protocol::Http2), connection);
+        }
+        assert_eq!(pool.len(), 2, "the multiplexed pool starts full");
+
+        drop(dead_io);
+        tokio::task::yield_now().await;
+        // Past a quarter of the idle timeout, so the next release sweeps.
+        tokio::time::sleep(Duration::from_millis(120)).await;
+
+        let fresh = key_for(&profile, "c.example", Protocol::Http2);
+        let (connection, _io) = h2_connection().await;
+        pool.release(&fresh, connection);
+
+        assert_eq!(
+            pool.len(),
+            1,
+            "the two closed entries must be gone, leaving only the new one"
+        );
+        assert!(
+            pool.checkout(&fresh).is_some(),
+            "a new origin must be poolable once dead entries are reclaimed"
+        );
     }
 
     #[tokio::test]
