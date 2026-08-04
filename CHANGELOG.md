@@ -7,6 +7,19 @@ that breaking changes may land in a minor release.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.0] — 2026-08-04
+
+The first release. Everything below was measured or tested before it was written down;
+where something is unverified it says so, and the two documents that carry the numbers are
+[`docs/performance.md`](docs/performance.md) and [`docs/fidelity.md`](docs/fidelity.md).
+
+**Read [Honest limitations](README.md#honest-limitations) before depending on this.** The
+short version: the HTTP layer reproduces the captured browser closely, the TLS ClientHello
+does not match and is distinguishable at a glance, there is no HTTP/3, and one profile
+ships.
+
 ### Added — initial implementation
 
 The first working version of the engine: twelve crates covering the fingerprint algebra,
@@ -256,3 +269,6 @@ failing test before the fix. The ones worth recording:
 - The capture covers one navigation request, so per-destination `Accept` and `priority`
   values, the subresource header order, and the `cookie` header's position are modelled
   rather than observed, and are marked as such in the source.
+
+[Unreleased]: https://github.com/cagataycankaya/chromulate/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/cagataycankaya/chromulate/releases/tag/v0.1.0
