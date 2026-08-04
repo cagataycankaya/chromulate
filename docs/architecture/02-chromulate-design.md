@@ -12,9 +12,15 @@ that observable behaviour. The delivery plan is in
 
 Two conventions run through the whole document. Claims about the codebase carry a
 `path:line` citation and were checked against the file at the cited line. Claims about
-performance are labelled **UNMEASURED**, without exception, because no benchmark has been
-run against this codebase and inventing numbers would make the rest of the document
-untrustworthy.
+performance are labelled **UNMEASURED** where no benchmark has settled them, because
+inventing numbers would make the rest of the document untrustworthy.
+
+This document was written before any benchmark existed, so it once carried that label
+without exception. A harness exists now, and where a measurement has replaced a prediction
+the number lives in [`../performance.md`](../performance.md) — with the fingerprint
+comparison in [`../fidelity.md`](../fidelity.md) — rather than being copied here, so there
+is one place for a reader to check whether a figure is current. The `UNMEASURED` labels
+that remain below are the ones still genuinely open.
 
 ---
 
@@ -35,6 +41,28 @@ untrustworthy.
 13. [Security and scope](#13-security-and-scope)
 14. [Engineering review](#14-engineering-review)
 15. [Open questions](#15-open-questions)
+
+## Quick answers
+
+The questions this document gets asked most, and where each is answered. The one-line
+answers are summaries, not substitutes — every one of them has a reason attached, and the
+reason is usually the useful part.
+
+| Question | Short answer | Section |
+|---|---|---|
+| How many layers is the engine? | Five on the request path: facade → middleware chain → retry → redirect loop → per-hop exchange, over a transport stack of pool → connector → TLS/proxy/DNS. | [4.2](#42-the-pipeline), [4.3](#43-what-each-stage-owns) |
+| Where are traits used? | At the extension points only: `Exchange`, `Middleware`/`Next`, `CookieStore`, `Resolve`, `ProxyProvider`, `Clock`. Everything else is concrete. | [3.4](#34-why-the-extension-traits-return-boxed-futures), [9](#9-extensibility) |
+| What do the async boundaries look like? | `BoxFuture` at each trait boundary, because async fn in traits is not object-safe; one boxed future per extension point per request. | [3.4](#34-why-the-extension-traits-return-boxed-futures) |
+| Is cancellation safe? | Yes, and structurally: dropping the response future drops the whole tree; there is no token to forget to check. A body dropped early takes its connection with it rather than pooling a socket at an unknown read position. | [4.4](#44-cancellation-and-deadlines), [7.4](#74-lifecycle-limits-and-eviction) |
+| Is there a Tower-like middleware layer? | Yes in shape, no in type: `Middleware` + `Next`, not `tower::Service`. Retry deliberately sits below the chain rather than in it. | [9.2](#92-middleware) |
+| What is the pool's ownership model? | HTTP/1.1 is exclusive and returns through the response body; HTTP/2 is shared and is registered when opened. Two protocols, two doors. | [7.4](#74-lifecycle-limits-and-eviction) |
+| How is backpressure applied? | Flow control and consumer polling bound bytes. Nothing bounds concurrent requests or open sockets — that is the caller's job, and the table says so explicitly. | [10.4](#104-backpressure-and-streaming) |
+| What is the task spawn strategy? | One driver task per connection, one per DNS resolution, none per request. | [10.3.1](#1031-task-spawning) |
+| How does lock contention behave under real load? | One mutex for the pool, measured flat to 100 origins at parity with `reqwest`; the sweep that used to make it bind is fixed and the fix is measured. | [10.3](#103-locks) |
+| Is there unsafe code? | None in any shipped crate — `forbid(unsafe_code)` throughout. One exception in `chromulate-bench`, which is `publish = false`: a counting global allocator cannot be written without it. | [3.3](#33-ownership-borrowing-and-the-cost-of-forbidding-unsafe) |
+
+For what a server actually observes — TLS, HTTP/2 and header fidelity — see
+[`../fidelity.md`](../fidelity.md). For measured performance, [`../performance.md`](../performance.md).
 
 ---
 
@@ -1017,27 +1045,64 @@ Coalescing never crosses an identity or a proxy boundary, for the reasons in 7.2
 
 Defaults, chosen to be browser-like and all adjustable:
 
+Defaults as implemented in `PoolConfig::default()` and `EngineConfig`, all adjustable:
+
 | Parameter | Default | Why |
 |---|---|---|
 | Idle timeout | 90 s | Long enough for a crawl's natural rhythm, short enough not to hold dead NAT bindings |
-| Max idle per key | 8 | Browsers keep around six per origin for HTTP/1.1; the pool holds one for h2 in practice |
-| Max total connections | 256 | A bound that fails loudly rather than exhausting file descriptors |
-| Connect timeout | 10 s | |
-| Handshake timeout | 10 s | Separate, so `Error::Timeout(Phase::Handshake)` is distinguishable |
+| Max idle per host | 6 | What browsers keep per origin for HTTP/1.1; HTTP/2 holds one per key regardless |
+| Max total idle connections | 100 | A bound on retained sockets — see the note below on what it does *not* bound |
+| Connect timeout | 30 s | |
+| Handshake timeout | shares the connect timeout | `Error::Timeout(Phase::Handshake)` still distinguishes *where* it expired |
+| HTTP/1.1 buffer ceiling | hyper's default | Opt-in via `PoolConfig::http1_max_buf_size`; see `docs/performance.md` |
 
-Eviction happens on idle expiry, on `GOAWAY`, on any protocol error, and when the total cap
-is reached — least-recently-used first among idle connections. A connection is also evicted
-when the profile it belongs to is unregistered, because its ClientHello no longer
-corresponds to any live identity.
+**The caps bound idle connections, not requests in flight.** There is no semaphore on
+`Engine::acquire`: a request that finds no pooled connection opens one, whatever the pool
+currently holds. So 256 concurrent requests to one origin produce 256 connections, and
+`max_per_host` decides how many of them are *kept* afterwards rather than how many exist at
+once. This is deliberate — blocking a request behind a connection permit turns a pool
+setting into a latency cliff — but it means the caps are not a file-descriptor guarantee,
+and a caller that needs one has to bound its own concurrency.
+
+Eviction happens on idle expiry, on any protocol error, and when the total cap is reached —
+least-recently-used first among idle connections. A connection is also dropped rather than
+pooled when the response body it carried did not finish cleanly.
+
+`GOAWAY` is handled by the `h2` crate, which marks the sender closed; the pool discards it
+at the next checkout because `Connection::is_usable` consults `is_closed`. There is no
+separate `GOAWAY` path in the pool, and **no eviction on profile unregistration** — the
+identity is part of the pool key, so a connection opened under one profile is simply never
+matched by a request under another.
 
 One invariant is worth stating explicitly because violating it produces a class of bug that
 is very hard to diagnose: **a connection whose body stream was dropped before completion is
 never returned to the pool as reusable.** Its read position is unknown, so the next request
 on it would read the tail of the previous response. For HTTP/1.1 the connection is closed;
-for HTTP/2 the stream is reset with `CANCEL` and the connection survives, because HTTP/2
-multiplexing makes stream state independent of connection state. This asymmetry is the main
-reason the pool must know which protocol a connection speaks, and it is a second argument —
-after the ALPN one in section 2.3 — for HTTP/2 living in the same crate as the pool.
+for HTTP/2 the stream is reset and the connection survives, because HTTP/2 multiplexing
+makes stream state independent of connection state. This asymmetry is the main reason the
+pool must know which protocol a connection speaks, and it is a second argument — after the
+ALPN one in section 2.3 — for HTTP/2 living in the same crate as the pool.
+
+**Ownership follows from that asymmetry, and the two protocols are opposites.**
+
+An HTTP/1.1 connection is *exclusive*: `checkout` removes it from the pool, the request
+owns it for the whole exchange, and it goes back only when the response body ends cleanly.
+The handle travels *inside the response body* (`body.rs`, `PoolSlot`), which is what makes
+the invariant above hold by construction rather than by remembering to call something: a
+body that is dropped early drops the slot, and a dropped slot never releases.
+
+An HTTP/2 connection is *shared*: it is registered with the pool when it is opened
+(`Engine::acquire`) and stays there while it serves requests, because multiplexing means
+"in use" and "available" are the same state. Checkout clones the sender — an mpsc handle —
+rather than removing anything.
+
+That second sentence describes the code only since the fix recorded in the changelog:
+before it, nothing put a newly opened HTTP/2 connection into the pool at all, because the
+h1 path returns connections through the body and the h2 path has no body to return through.
+Every HTTP/2 request therefore re-did the TCP connection and the TLS handshake. It is worth
+knowing as a design hazard rather than only as a fixed bug: **the two protocols enter the
+pool through different doors, and adding a third transport means asking which door it uses
+before assuming either.**
 
 ### 7.5 Address selection
 
@@ -1184,9 +1249,14 @@ What it *does* deliver:
 - Group order and, with a hybrid first group, a matching two-share key exchange.
 - A computed, reportable target fingerprint and a stated delta against what is emitted.
 
-**The exact JA3 and JA4 that Chromulate currently emits are UNMEASURED.** No handshake has
-been performed with this codebase; the analysis above is from reading rustls's source, which
-predicts a mismatch but does not measure its size. Producing that measurement is Phase 4 of
+**This has since been measured, and the prediction held.** Chromulate emits JA4
+`t13d1012h2_61a7ad8aa9b6_69ed562cf35e` where the captured Chrome sends
+`t13d1516h2_8daaf6152771_806a8c22fdea`: ten cipher suites against fifteen, twelve
+extensions against sixteen, no GREASE in any slot, and four extensions absent entirely. The
+full comparison, and the HTTP/2 and header layers alongside it, is in
+[`../fidelity.md`](../fidelity.md). The analysis below is from reading rustls's source and
+predicted a mismatch without measuring its size; the size is now known. Producing that
+measurement was Phase 4 of
 the roadmap and is the highest-value verification work outstanding.
 
 ### 8.5 The same honesty applies to HTTP/2
@@ -1375,7 +1445,11 @@ deliberately.
 
 The design intent is that a request whose connection is already pooled performs a small,
 bounded number of heap allocations, dominated by the boxed futures at the extension
-boundaries (section 3.4) and by the header materialisation. **UNMEASURED.**
+boundaries (section 3.4) and by the header materialisation. **Measured: 48 allocations per
+steady-state request**, against `reqwest`'s 49. The intent was not met when it was first
+measured — 127 allocations, 80 of them the header engine re-deriving profile constants on
+every request — and holds now only because that was fixed; see
+[`../performance.md`](../performance.md).
 
 Three concrete choices support that intent, each visible in the code that exists:
 
@@ -1405,24 +1479,87 @@ stack of the hop loop.
 
 ### 10.3 Locks
 
-Two shared mutable structures exist and each is specified with its contention behaviour.
+Three shared mutable structures exist. What follows is what the code does, with the
+measurement that justifies it — an earlier revision of this section described a sharded
+pool that was never built, and argued against the single lock that was.
 
-The connection pool is a sharded map, sharded on the hash of `PoolKey`, so a checkout
-contends only with other checkouts for the same shard. A single `Mutex` around the whole
-pool would serialise every request in the process at exactly the moment throughput matters.
-**Shard count is unchosen and the contention profile is UNMEASURED**; the harness in 12.5
-is what would set it.
+**The connection pool is one `Mutex<PoolState>`** (`pool.rs`), taken twice per HTTP/1.1
+request: once to check a connection out, once to hand it back when the response body ends.
+The design position stated here previously — that a single lock "would serialise every
+request in the process at exactly the moment throughput matters" — is a reasonable fear and
+it turned out not to be the binding constraint, because the critical section is a hash
+lookup and a `Vec` push rather than any I/O.
 
-The cookie jar uses an `RwLock` over a keyed map, because on a crawl reads vastly outnumber
-writes.
+What *was* binding was the work done inside it. `Pool::release` used to sweep every pooled
+connection for expiry and then re-count the whole pool on every request, which is invisible
+with one origin and O(pool) with many. That is fixed (a running count, and a sweep at most
+once per quarter of the idle timeout), and the fix is measured rather than argued:
+`tools/pool-scan-cost.py` reverts it and re-runs the multi-origin harness.
+
+| Origins | As shipped | Fix reverted |
+|---:|---:|---:|
+| 1 | 106,107 rps | 105,921 rps |
+| 10 | 105,323 rps | 102,681 rps |
+| 50 | 100,284 rps | 85,705 rps |
+| 100 | 103,370 rps | **50,596 rps** |
+
+With the sweep amortised, throughput is flat in origin count and at parity with `reqwest`
+across the sweep, so **the single lock is not the bottleneck at 100 origins and concurrency
+32**. Sharding is therefore not implemented, and would need a measurement showing the lock
+binding before it is worth the second data structure. Run
+`cargo run --release -p chromulate-bench --bin multiorigin` to re-check that on your own
+hardware.
+
+**The cookie jar uses an `RwLock`** over a keyed map, because on a crawl reads vastly
+outnumber writes. Access sequence numbers are `AtomicU64` so `cookies_for` can record a use
+under the read lock rather than escalating to a write.
+
+**The `Accept-CH` store uses an `RwLock`** that the request path does not touch until a
+grant exists: an `AtomicBool` gates it, because most deployments never receive an
+`Accept-CH` header and `RwLock::read` is still an atomic read-modify-write on a shared
+cache line.
 
 No lock is held across an `await`. This is a hard rule, not a preference: holding a
 `std::sync` guard across a yield point can deadlock a work-stealing runtime, and holding an
 async lock across I/O serialises the pool.
 
+### 10.3.1 Task spawning
+
+The request path spawns nothing. One `tokio::spawn` happens per *connection*, not per
+request: hyper's client returns a connection driver future alongside the sender, and that
+driver has to be polled for the connection to make progress, so it is spawned when the
+connection is established (`connect.rs`, both the HTTP/1.1 and HTTP/2 arms). The task lives
+as long as the connection and ends when it closes.
+
+The other spawn is in `chromulate-dns`'s caching resolver, which spawns a lookup so that
+several callers waiting on the same name share one resolution rather than issuing one each.
+
+That is the whole strategy, and the reason it is short: a spawn per request would put every
+request's future on the runtime's global queue and lose the caller's context — the request
+future is already driven by whatever task called `send`, which is the caller's own task.
+
 ### 10.4 Backpressure and streaming
 
 This is the part of the performance model with the largest correctness component.
+
+**What pushes back on what, in one place**, because "backpressure" covers three unrelated
+mechanisms here and only one of them is a queue:
+
+| Pressure | Bounded by | Not bounded |
+|---|---|---|
+| Response bytes in flight | HTTP/2 flow control windows, and the consumer's polling — see below | — |
+| Request bytes in flight | the transport draining `Body::stream` chunk by chunk | — |
+| Response body held in memory | the consumer: `bytes_stream` is constant-memory, `bytes` buffers whole | `bytes` is bounded only by `max_response_size` |
+| Concurrent requests | **nothing in this crate** | the caller must bound its own concurrency |
+| Sockets open at once | **nothing in this crate** | `max_per_host` / `max_total` bound *idle* connections only |
+| Request rate | `RateLimit` middleware, if the caller installs one | off by default |
+
+The last three are the ones that surprise people. `Engine::acquire` has no semaphore: a
+request that finds nothing pooled opens a connection regardless of how many are already
+open, so the pool's caps decide what is *kept* rather than what exists. Blocking a request
+behind a connection permit was rejected because it turns a pool setting into a latency
+cliff that is very hard to attribute from the outside — but it does mean a caller issuing
+10,000 concurrent requests gets 10,000 sockets, and that bounding it is the caller's job.
 
 HTTP/2 flow control is the backpressure mechanism, and it only works if the client releases
 capacity as the consumer consumes rather than as bytes arrive. The response `Body` must poll
@@ -1589,9 +1726,24 @@ the change under test.
 
 ### 12.5 Performance harness
 
-Does not exist. When built it must produce n≥3 runs and report variance, because a single
-run is not a measurement. Three benchmark families: a microbenchmark sweep over middleware
-chain depth to price the boxed futures of section 3.4; a throughput test against a local
+**Built.** `crates/chromulate-bench` plus criterion suites; see
+[`../../benches/README.md`](../../benches/README.md) for what each command answers and
+[`../performance.md`](../performance.md) for what it produced. It reports medians over
+repeated runs with the spread, and pairs its ratios within a round, because a single run is
+not a measurement and two means taken minutes apart on a shared machine are not a
+comparison.
+
+Of the three families specified below, the throughput test and the allocation count exist;
+the middleware chain-depth sweep does not, and the boxed-future cost of section 3.4 stays
+UNMEASURED. Two families the specification did not anticipate turned out to matter more:
+a multi-origin sweep, without which nothing here could see work that scales with pool size,
+and a live harness against a real HTTPS origin, without which the entire HTTP/2 connection
+path went unexercised — and did, for long enough to hide a defect costing a full handshake
+per request.
+
+The original specification follows. Three benchmark families: a microbenchmark sweep over
+middleware chain depth to price the boxed futures of section 3.4; a throughput test against
+a local
 server with pool reuse on and off; and an allocation count per request under a heap
 profiler.
 

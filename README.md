@@ -156,6 +156,9 @@ while let Some(chunk) = stream.next().await {
   specification, with the reasoning and the rejected alternatives.
 - [Roadmap](docs/architecture/03-roadmap.md) — what exists, what is next, what is
   speculative.
+- [Fidelity](docs/fidelity.md) — what a server actually sees, layer by layer, measured
+  against a live capture of the browser being modelled. Read this before assuming the TLS
+  fingerprint matches.
 - [Performance](docs/performance.md) — the measured current state: throughput at parity
   with `reqwest`, 48 allocations per request, constant-memory streaming — and what each
   change in the optimisation wave was worth, with what the measurements do not cover.
@@ -175,12 +178,32 @@ scope; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Honest limitations
 
-Chromulate builds on `rustls`, which does not expose ClientHello extension ordering or
-GREASE placement to its users. The fingerprint crate models and computes the target shape
-exactly, and the golden tests prove the model matches a real browser — but the bytes
-`rustls` puts on the wire are `rustls`'s own. Closing that gap needs either a custom
-ClientHello encoder or a different TLS backend, and the design document says so plainly
-rather than claiming an emulation fidelity the current stack cannot deliver.
+**The TLS fingerprint does not match Chrome's.** Measured, not estimated: Chromulate emits
+JA4 `t13d1012h2_…` where the captured Chrome sends `t13d1516h2_…` — ten cipher suites
+against fifteen, twelve extensions against sixteen, and **no GREASE in any slot**. The
+difference is visible without comparing hashes. Chromulate builds on `rustls`, which does
+not expose ClientHello ordering, GREASE placement, or the extension set to its users: the
+fingerprint crate models and computes the target shape exactly, and the golden tests prove
+the model matches a real browser, but the bytes on the wire are `rustls`'s own. Closing
+that gap needs a custom ClientHello encoder or a different TLS backend.
+
+Also measured, and also not matching:
+
+- **HTTP/2 pseudo-header order** is `m,s,a,p` where Chrome sends `m,a,s,p`, and the first
+  `HEADERS` frame carries no priority fields where Chrome's does. Both are fixed behaviour
+  of the `h2` crate. The SETTINGS and connection window *do* match exactly.
+- **HTTP/3 and QUIC are not supported at all.** Chrome upgrades to HTTP/3 where an origin
+  advertises it; Chromulate stays on HTTP/2.
+- **High-entropy client hints have no values.** The `Accept-CH` round trip works, but the
+  shipped profile carries nothing for `Sec-CH-UA-Arch` and friends, so a server that asks
+  gets nothing where Chrome would answer.
+
+What *does* match, exactly: the request header set, their values, and their order; the
+HTTP/2 SETTINGS and connection window. See [fidelity](docs/fidelity.md) for the full
+layer-by-layer comparison and how to reproduce it in one command.
+
+If your requirement is a matching TLS fingerprint, this crate does not meet it, and no
+configuration of it does.
 
 ## Contributing
 
