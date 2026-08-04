@@ -31,9 +31,15 @@
 //!
 //! - the boundary is the literal `----WebKitFormBoundary` followed by sixteen
 //!   characters drawn from `[0-9A-Za-z]`, redrawn per request;
-//! - exactly three bytes are escaped in a field name or a filename — `"` to
-//!   `%22`, CR to `%0D`, LF to `%0A` — and nothing else is, so a semicolon or a
-//!   colon travels literally;
+//! - exactly three bytes are escaped in a field name or a filename — `"`, CR and
+//!   LF — and nothing else is, so a semicolon or a colon travels literally;
+//!   `"` becomes `%22` in both slots and a CRLF pair becomes `%0D%0A` in both.
+//!   What a *lone* CR or LF becomes is not in sections 1-4: the capture only
+//!   ever submitted a pair, which both of Blink's two rules render identically.
+//!   Section 5 resolves it from Blink's source and is marked as the weaker
+//!   evidence class it is — a field name is newline-normalised before escaping,
+//!   so a lone break widens to `%0D%0A`, and a filename is not, so it stays
+//!   `%0D` or `%0A`;
 //! - non-ASCII filenames are sent as raw UTF-8, and there is no RFC 5987
 //!   `filename*` parameter anywhere in the output;
 //! - a part carries a `Content-Type` if and only if it has a filename, falling
@@ -53,6 +59,14 @@
 //!   prefix. Forty samples cannot show that the draw is uniform or that its
 //!   source is a CSPRNG, so this module claims neither about Chrome. It uses
 //!   `rand`'s thread RNG for its own draw.
+//! - **No newline normalisation of content.** Capture section 5 records that
+//!   Chrome runs a string entry's *value* through `NormalizeLineEndingsToCrLf`,
+//!   so a lone LF typed into a text field reaches the wire as CRLF, while a blob
+//!   entry — the branch that carries a filename — is sent verbatim. This encoder
+//!   sends every part's content verbatim, including [`Form::text`]. Matching
+//!   Chrome here would mean rewriting caller-supplied bytes on the one part
+//!   shape that has no filename, and that is a larger decision than the header
+//!   syntax this module otherwise mirrors.
 //!
 //! # Why a hostile filename cannot forge a header
 //!
@@ -64,6 +78,13 @@
 //! `crlf_in_a_filename_cannot_forge_a_header_or_an_extra_part` and
 //! `crlf_in_a_field_name_cannot_forge_a_header_or_an_extra_part` would have to
 //! be reasoned about separately.
+//!
+//! The two slots take different *branches* of that one function, because Chrome
+//! normalises newlines in a name and not in a filename. That difference is
+//! deliberately confined to which escape a CR or LF maps to: every branch emits
+//! a percent escape and none emits the byte, so the set removed is identical and
+//! the argument above holds for both. `escaping_touches_only_the_quote_and_the_line_breaks`
+//! runs its assertions over both slots for that reason.
 //!
 //! # What the boundary check actually guarantees
 //!
@@ -503,11 +524,11 @@ impl Form {
 fn header_block(name: &str, file_name: Option<&str>, mime: Option<&HeaderValue>) -> Bytes {
     let mut block = BytesMut::with_capacity(64 + name.len());
     block.put_slice(b"Content-Disposition: form-data; name=\"");
-    block.put_slice(escape_parameter(name).as_bytes());
+    block.put_slice(escape_parameter(name, Slot::Name).as_bytes());
     block.put_slice(b"\"");
     if let Some(file_name) = file_name {
         block.put_slice(b"; filename=\"");
-        block.put_slice(escape_parameter(file_name).as_bytes());
+        block.put_slice(escape_parameter(file_name, Slot::FileName).as_bytes());
         block.put_slice(b"\"");
     }
     block.put_slice(b"\r\n");
@@ -520,6 +541,18 @@ fn header_block(name: &str, file_name: Option<&str>, mime: Option<&HeaderValue>)
     block.freeze()
 }
 
+/// Which of the two quoted parameters is being escaped.
+///
+/// The slots differ in one respect only, and only for a line break that is not
+/// already a CRLF pair; see [`escape_parameter`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Slot {
+    /// `name=`, which Blink escapes in its `kNormalizeCRLF` mode.
+    Name,
+    /// `filename=`, which Blink escapes in its `kDoNotNormalizeCRLF` mode.
+    FileName,
+}
+
 /// Percent-escapes the three bytes that could break out of a header parameter.
 ///
 /// `"` closes the quoted string; CR and LF end the header line. Chrome escapes
@@ -527,7 +560,17 @@ fn header_block(name: &str, file_name: Option<&str>, mime: Option<&HeaderValue>)
 /// and a space all travel literally, and non-ASCII travels as raw UTF-8. Doing
 /// more would diverge from the browser; doing less would let a filename forge a
 /// header.
-fn escape_parameter(value: &str) -> Cow<'_, str> {
+///
+/// The two slots share that set, and differ in what a *lone* line break becomes.
+/// A field name is newline-normalised first, so a bare CR or a bare LF widens to
+/// a full `%0D%0A`; a filename is not, so they stay `%0D` and `%0A`. A CRLF pair
+/// comes out `%0D%0A` either way, which is why capture section 2 — which only
+/// ever submitted a pair — could not tell the rules apart. Capture section 5
+/// records where the difference comes from.
+///
+/// Both modes remove every `"`, CR and LF, so neither can forge a header. Only
+/// the mapping differs, never the set.
+fn escape_parameter(value: &str, slot: Slot) -> Cow<'_, str> {
     if !value
         .bytes()
         .any(|byte| matches!(byte, b'"' | b'\r' | b'\n'))
@@ -535,12 +578,22 @@ fn escape_parameter(value: &str) -> Cow<'_, str> {
         return Cow::Borrowed(value);
     }
     let mut escaped = String::with_capacity(value.len() + 8);
-    for character in value.chars() {
-        match character {
-            '"' => escaped.push_str("%22"),
-            '\r' => escaped.push_str("%0D"),
-            '\n' => escaped.push_str("%0A"),
-            other => escaped.push(other),
+    let mut characters = value.chars().peekable();
+    while let Some(character) = characters.next() {
+        match (character, slot) {
+            ('"', _) => escaped.push_str("%22"),
+            // Normalisation folds a CR, the LF that may follow it, or a lone
+            // LF into exactly one CRLF, so `\r\n` does not become two.
+            ('\r', Slot::Name) => {
+                if characters.peek() == Some(&'\n') {
+                    characters.next();
+                }
+                escaped.push_str("%0D%0A");
+            }
+            ('\n', Slot::Name) => escaped.push_str("%0D%0A"),
+            ('\r', Slot::FileName) => escaped.push_str("%0D"),
+            ('\n', Slot::FileName) => escaped.push_str("%0A"),
+            (other, _) => escaped.push(other),
         }
     }
     Cow::Owned(escaped)
@@ -609,10 +662,17 @@ impl Stream for FormStream {
                 Some(content) if !content.is_empty() => return Poll::Ready(Some(Ok(content))),
                 _ => {}
             },
-            Some(Source::Stream { stream, .. }) => match stream.as_mut().poll_next(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Some(item)) => return Poll::Ready(Some(item)),
-                Poll::Ready(None) => {}
+            Some(Source::Stream { stream, .. }) => loop {
+                match stream.as_mut().poll_next(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    // Skipped for the same reason the in-memory arm above skips
+                    // one, and it has to be a loop rather than a `return`: a
+                    // stream may yield several empty chunks in a row, and this
+                    // poll owes its caller either a frame or a registered wake.
+                    Poll::Ready(Some(Ok(chunk))) if chunk.is_empty() => {}
+                    Poll::Ready(Some(item)) => return Poll::Ready(Some(item)),
+                    Poll::Ready(None) => break,
+                }
             },
         }
 
@@ -683,16 +743,41 @@ mod tests {
     fn escaping_touches_only_the_quote_and_the_line_breaks() {
         // Captured: exactly these three, and nothing else. A borrowed return
         // proves the untouched case allocates nothing.
-        assert!(matches!(
-            escape_parameter("plain; name=x: y (é—)"),
-            Cow::Borrowed("plain; name=x: y (é—)")
-        ));
-        assert_eq!(escape_parameter("a\"b"), "a%22b");
-        assert_eq!(escape_parameter("a\r\nb"), "a%0D%0Ab");
-        assert_eq!(
-            escape_parameter("rép\"ort—ünïcode.txt"),
-            "rép%22ort—ünïcode.txt"
-        );
+        for slot in [Slot::Name, Slot::FileName] {
+            assert!(matches!(
+                escape_parameter("plain; name=x: y (é—)", slot),
+                Cow::Borrowed("plain; name=x: y (é—)")
+            ));
+            assert_eq!(escape_parameter("a\"b", slot), "a%22b");
+            // A CRLF *pair* is the one case both slots agree on, which is why
+            // the capture could not distinguish them.
+            assert_eq!(escape_parameter("a\r\nb", slot), "a%0D%0Ab");
+            assert_eq!(
+                escape_parameter("rép\"ort—ünïcode.txt", slot),
+                "rép%22ort—ünïcode.txt"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lone_line_break_widens_in_a_name_and_does_not_in_a_filename() {
+        // Capture section 5: Blink escapes `name=` with `kNormalizeCRLF` and
+        // `filename=` with `kDoNotNormalizeCRLF`. The pair of assertions per
+        // input is the point -- either alone would be satisfied by one rule
+        // applied to both slots, which is the bug this replaced.
+        assert_eq!(escape_parameter("a\rb", Slot::Name), "a%0D%0Ab");
+        assert_eq!(escape_parameter("a\rb", Slot::FileName), "a%0Db");
+        assert_eq!(escape_parameter("a\nb", Slot::Name), "a%0D%0Ab");
+        assert_eq!(escape_parameter("a\nb", Slot::FileName), "a%0Ab");
+
+        // Normalisation must fold a pair, not double it, and must not run two
+        // pairs together.
+        assert_eq!(escape_parameter("a\r\n\r\nb", Slot::Name), "a%0D%0A%0D%0Ab");
+        // An LF followed by a CR is two separate breaks, not one pair.
+        assert_eq!(escape_parameter("a\n\rb", Slot::Name), "a%0D%0A%0D%0Ab");
+        // A trailing CR has no LF to swallow and must not truncate.
+        assert_eq!(escape_parameter("a\r", Slot::Name), "a%0D%0A");
+        assert_eq!(escape_parameter("\r\n", Slot::FileName), "%0D%0A");
     }
 
     #[test]
@@ -758,6 +843,78 @@ mod tests {
             content_type,
             "multipart/form-data; boundary=----WebKitFormBoundaryCLEAN0000"
         );
+    }
+
+    #[test]
+    fn a_boundary_hidden_in_a_filename_or_a_media_type_is_redrawn_too() {
+        // The header block has three caller-controlled slots, not one. The
+        // sibling above covers the name; a search that only looked at names
+        // would leave these two open, and both land in the same block.
+        for hostile in [
+            Part::text("v").file_name("x----WebKitFormBoundaryINBLOCK00y"),
+            Part::text("v")
+                .file_name("f.bin")
+                .mime_str("text/plain; note=----WebKitFormBoundaryINBLOCK00"),
+        ] {
+            let mut drawn = vec![
+                "----WebKitFormBoundaryINBLOCK00".to_owned(),
+                "----WebKitFormBoundaryCLEAN0000".to_owned(),
+            ]
+            .into_iter();
+
+            let (content_type, _) = Form::new()
+                .part("upload", hostile)
+                .encode_with(|| drawn.next().expect("no more boundaries were prepared"))
+                .expect("the form must encode");
+
+            assert_eq!(
+                content_type,
+                "multipart/form-data; boundary=----WebKitFormBoundaryCLEAN0000"
+            );
+        }
+    }
+
+    #[test]
+    fn a_part_whose_content_is_exactly_the_boundary_collides() {
+        // The length boundaries of the window search: content of exactly the
+        // boundary's length must be found, and content one byte short must not
+        // be, since a shorter string cannot contain it.
+        let boundary = b"----WebKitFormBoundary0123456789ABCDEF";
+        let exact = vec![Source::Bytes(Some(Bytes::from_static(
+            b"----WebKitFormBoundary0123456789ABCDEF",
+        )))];
+        assert!(collides(boundary, &[], &exact));
+
+        let one_short = vec![Source::Bytes(Some(Bytes::from_static(
+            b"----WebKitFormBoundary0123456789ABCDE",
+        )))];
+        assert!(!collides(boundary, &[], &one_short));
+
+        // And an empty part cannot contain anything.
+        assert!(!collides(
+            boundary,
+            &[],
+            &[Source::Bytes(Some(Bytes::new()))]
+        ));
+    }
+
+    #[test]
+    fn no_boundary_can_span_the_junction_between_two_searched_regions() {
+        // Why searching each part *separately* is nonetheless complete. Every
+        // region the search inspects is separated from the next by the CRLF
+        // that ends the previous content or the header block, and a boundary
+        // holds no CR, so an occurrence can never straddle a junction. If the
+        // alphabet or the prefix ever gained a CR, `collides` would have to
+        // search the assembled body instead, and this is the assertion that
+        // would say so.
+        assert!(!BOUNDARY_PREFIX.contains(['\r', '\n']));
+        assert!(
+            !BOUNDARY_ALPHABET.contains(&b'\r') && !BOUNDARY_ALPHABET.contains(&b'\n'),
+            "the alphabet must hold no line break"
+        );
+        for _ in 0..16 {
+            assert!(!draw_boundary().contains(['\r', '\n']));
+        }
     }
 
     #[test]
@@ -843,6 +1000,38 @@ mod tests {
         );
         let (_, body) = form.into_body().expect("the form must encode");
         assert_eq!(body.content_length(), None);
+    }
+
+    #[test]
+    fn a_single_part_declaring_u64_max_is_unknown() {
+        // The exact maximum, not one below it: the head is added first, so this
+        // overflows on `head.len()` rather than on the declared length.
+        let form = Form::new().part("a", Part::stream_with_length(FixedStream(None), u64::MAX));
+        let (_, body) = form.into_body().expect("the form must encode");
+        assert_eq!(body.content_length(), None);
+    }
+
+    #[test]
+    fn parts_that_only_overflow_once_summed_are_unknown() {
+        // The two tests above overflow inside the arithmetic for a single part.
+        // This one keeps every individual part representable and overflows only
+        // because the running total carries across iterations, which is the
+        // accumulator rather than either `checked_add` on its own.
+        let form = ["a", "b", "c"].into_iter().fold(Form::new(), |form, name| {
+            form.part(
+                name,
+                Part::stream_with_length(FixedStream(None), u64::MAX / 2),
+            )
+        });
+        let (_, body) = form.into_body().expect("the form must encode");
+        assert_eq!(body.content_length(), None);
+    }
+
+    #[test]
+    fn an_empty_form_still_declares_the_length_it_sends() {
+        let (_, body) = Form::new().into_body().expect("the form must encode");
+        let declared = body.content_length().expect("nothing is unknown");
+        assert_eq!(declared, collect(body).len() as u64);
     }
 
     #[test]
@@ -945,6 +1134,35 @@ mod tests {
             frames.iter().all(|frame| !frame.is_empty()),
             "an empty field must not become an empty frame: {frames:?}"
         );
+    }
+
+    #[test]
+    fn a_streamed_empty_chunk_costs_no_data_frame_either() {
+        // The sibling of `an_empty_field_costs_no_data_frame`, and the same
+        // argument: under chunked encoding an empty frame is a zero-length
+        // chunk, which is the end-of-body marker. hyper drops one before it
+        // reaches the socket, but `Form::into_body` hands back a public `Body`
+        // and not every consumer of it is hyper, so the in-memory path's
+        // guarantee has to hold for a caller's stream too.
+        let chunks = vec![
+            Ok(Bytes::from_static(b"before")),
+            Ok(Bytes::new()),
+            Ok(Bytes::from_static(b"after")),
+        ];
+        let (_, body) = Form::new()
+            .part("upload", Part::stream(ChunkedStream(chunks.into())))
+            .into_body()
+            .expect("the form must encode");
+
+        let frames = frames(body);
+        assert!(
+            frames.iter().all(|frame| !frame.is_empty()),
+            "an empty chunk must not become an empty frame: {frames:?}"
+        );
+        // head, the two non-empty chunks, closing -- and nothing lost.
+        assert_eq!(frames.len(), 4, "{frames:?}");
+        assert_eq!(frames[1], Bytes::from_static(b"before"));
+        assert_eq!(frames[2], Bytes::from_static(b"after"));
     }
 
     #[test]

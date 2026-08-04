@@ -77,8 +77,8 @@ Chrome sent:
 So exactly three bytes are escaped, in both the name and the filename:
 
   "   ->  %22
-  CR  ->  %0D
-  LF  ->  %0A
+  CR  ->  %0D   (see section 5: this is what the pair shows, not what a lone CR does)
+  LF  ->  %0A   (likewise)
 
 and nothing else is. The semicolon, the colon, the space and the equals sign are all
 passed through literally; the injected "; filename=" and "X-Injected:" survive as text
@@ -137,3 +137,71 @@ trailing "--", and it is followed by CRLF. Nothing is emitted after it — no ep
 Part order is the order the fields were added; the file part is not hoisted or reordered.
 Content bytes are verbatim: the uploaded file ended in LF and that LF appears in the body
 immediately before the part-terminating CRLF, giving "...bytes\n\r\n--".
+
+
+5. What section 2 could not see, and where the answer came from
+--------------------------------------------------------------
+
+Evidence class: Blink source, not a wire capture. Recorded separately from sections
+1-4 for that reason, and marked at each use.
+
+  Source       chromium/chromium @ main, read 2026-08-04
+               third_party/blink/renderer/platform/network/form_data_encoder.cc
+               third_party/blink/renderer/core/html/forms/form_data.cc
+
+Section 2 submitted one line break and it was a CRLF *pair*. A pair comes out
+"%0D%0A" under either of the two rules Blink actually has, so that sample cannot
+distinguish them. It was read as "CR -> %0D, LF -> %0A applied byte by byte", and
+that is right for one slot and wrong for the other.
+
+`AppendQuotedString` takes a mode. Verbatim:
+
+  case 0x0a:
+    if (mode == FormDataEncoder::kNormalizeCRLF) { Append(buffer, "%0D%0A"); }
+    else { Append(buffer, "%0A"); }
+    break;
+  case 0x0d:
+    if (mode == FormDataEncoder::kNormalizeCRLF) {
+      Append(buffer, "%0D%0A");
+      if (i + 1 < length && string[i + 1] == 0x0a) { ++i; }
+    } else { Append(buffer, "%0D"); }
+    break;
+  case '"':
+    Append(buffer, "%22");
+    break;
+
+and the two call sites pick opposite modes:
+
+  BeginMultiPartHeader        ... AppendQuotedString(buffer, name,     kNormalizeCRLF);
+  AddFilenameToMultiPartHeader... AppendQuotedString(buffer, filename, kDoNotNormalizeCRLF);
+
+So, for a line break that is not already a pair:
+
+              name=                filename=
+  lone CR     %0D%0A               %0D
+  lone LF     %0D%0A               %0A
+  CRLF pair   %0D%0A               %0D%0A     <- the only case section 2 observed
+
+The quote is escaped identically in both, and every CR and LF is removed in both, so
+the injection argument is unchanged; only the mapping differs.
+
+Everything sections 1-4 do record agrees with this source, which is why it is trusted
+here: `EncodeMultiPartFormData` emits the parts in entry order, writes "\r\n" after each
+part's content and a bare "--boundary\r\n" before each header block (section 4), always
+writes `filename=".."` for a blob "even if the filename is empty" and falls back to
+"application/octet-stream" when the blob has no type (section 3), and encodes the name and
+filename to bytes before escaping, which is why non-ASCII travels as raw UTF-8 (section 2).
+
+What is still NOT observed on the wire here: a lone CR or a lone LF in either slot from a
+real Chrome 151. Settling it would take the section 2 method again with `fd.append("a\rb",
+"v")` and a filename carrying a lone CR, read back through `Request.arrayBuffer()`.
+
+One further consequence of `EncodeMultiPartFormData`, deliberately NOT implemented:
+
+  std::string encoded_value = Encode(NormalizeLineEndingsToCrLf(entry->Value()));
+
+Chrome normalises line endings in a *string* entry's value too — a lone LF in a text
+field's content reaches the wire as CRLF — and does not do so for a blob entry, which is
+the branch that carries a filename. Chromulate sends every part's content verbatim. See
+the note in `multipart.rs`; this is a content change rather than a header-syntax one and
+is left as the maintainer's call.

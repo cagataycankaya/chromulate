@@ -247,6 +247,14 @@ async fn a_part_whose_content_is_itself_a_multipart_document_adds_no_parts() {
     );
 }
 
+// A boundary hidden in a filename or a media type belongs here by subject, but
+// not by construction: an integration test cannot drive it, because the encoder
+// draws a random boundary and a colliding draw is a 62^-16 event, so the
+// assertions would pass whether or not the search ran. Both live as unit tests
+// against `encode_with`, which injects the colliding candidate:
+// `a_boundary_found_in_a_header_block_is_redrawn` and
+// `a_boundary_hidden_in_a_filename_or_a_media_type_is_redrawn_too`.
+
 // ------------------------------------------------- header injection surface
 
 #[tokio::test]
@@ -351,6 +359,37 @@ async fn crlf_in_a_field_name_cannot_forge_a_header_or_an_extra_part() {
 }
 
 #[tokio::test]
+async fn a_lone_line_break_is_normalised_in_a_name_and_left_alone_in_a_filename() {
+    // Capture section 2 tested only a *paired* CRLF, which comes out as
+    // `%0D%0A` from either rule, so it cannot tell the two slots apart. Blink
+    // escapes a name with `kNormalizeCRLF` and a filename with
+    // `kDoNotNormalizeCRLF` (capture section 5), and those disagree on a lone
+    // CR and a lone LF: the name is normalised to a full CRLF first, the
+    // filename is not.
+    let server = TestServer::always(Reply::ok()).await;
+    let client = client_for(&server, "example.test");
+
+    client
+        .post(server.url_for("example.test", "/"))
+        .multipart(
+            Form::new()
+                .text("cr\rhere", "value")
+                .text("lf\nhere", "value")
+                .part("f", Part::text("x").file_name("cr\rlf\nhere")),
+        )
+        .send()
+        .await
+        .expect("the request must succeed");
+
+    let body = server.received()[0].body_text();
+    assert!(body.contains("name=\"cr%0D%0Ahere\"\r\n"), "{body:?}");
+    assert!(body.contains("name=\"lf%0D%0Ahere\"\r\n"), "{body:?}");
+    assert!(body.contains("filename=\"cr%0Dlf%0Ahere\"\r\n"), "{body:?}");
+    // Whatever the mapping, no line break may survive as one.
+    assert_eq!(body.matches("Content-Disposition:").count(), 3, "{body:?}");
+}
+
+#[tokio::test]
 async fn a_non_ascii_filename_is_sent_as_raw_utf8_without_a_filename_star() {
     let server = TestServer::always(Reply::ok()).await;
     let client = client_for(&server, "example.test");
@@ -381,7 +420,137 @@ async fn a_non_ascii_filename_is_sent_as_raw_utf8_without_a_filename_star() {
     );
 }
 
+#[tokio::test]
+async fn control_bytes_other_than_the_line_breaks_travel_literally() {
+    // Blink's escape has a `default:` arm that pushes the byte, so a NUL or a
+    // DEL is not escaped. Pinned because "escape the three that matter" invites
+    // a later "and these other suspicious ones too", which would diverge.
+    let server = TestServer::always(Reply::ok()).await;
+    let client = client_for(&server, "example.test");
+
+    // Both names carry the same control bytes; only the second also carries a
+    // quote. That matters: a name holding none of the three escaped bytes takes
+    // the borrowed fast path and never consults the escape table at all, so a
+    // table that grew a fourth entry would show up only in the second name.
+    client
+        .post(server.url_for("example.test", "/"))
+        .multipart(
+            Form::new()
+                .text("a\0b\x01c\x7fd", "v")
+                .text("a\0b\x01c\x7fd\"", "v"),
+        )
+        .send()
+        .await
+        .expect("the request must succeed");
+
+    let received = &server.received()[0];
+    for expected in [
+        &b"name=\"a\x00b\x01c\x7fd\"\r\n"[..],
+        &b"name=\"a\x00b\x01c\x7fd%22\"\r\n"[..],
+    ] {
+        assert!(
+            received
+                .body
+                .windows(expected.len())
+                .any(|window| window == expected),
+            "{expected:?} is missing from {:?}",
+            received.body_text()
+        );
+    }
+    // They are inert either way: the part count is what a forged header would
+    // change, and it does not.
+    assert_eq!(part_count(received, &boundary_of(received)), 2);
+}
+
 // ------------------------------------------------- length versus chunked
+
+#[tokio::test]
+async fn an_escaped_name_keeps_the_declared_length_honest() {
+    // The escape changes the header block's length, and the block's length is
+    // what `Content-Length` is summed from. A name that escapes to *more* than
+    // three bytes per character -- a lone CR widens to `%0D%0A` -- is the case
+    // where an encoder that measured before escaping would disagree with the
+    // bytes it then wrote.
+    let server = TestServer::always(Reply::ok()).await;
+    let client = client_for(&server, "example.test");
+
+    let hostile = "\"\r\n".repeat(2_000);
+    client
+        .post(server.url_for("example.test", "/"))
+        .multipart(
+            Form::new()
+                .text(hostile.clone(), "v")
+                .part("f", Part::text("y").file_name(hostile)),
+        )
+        .send()
+        .await
+        .expect("the request must succeed");
+
+    let received = &server.received()[0];
+    let body = received.body_text();
+    assert_eq!(received.header("transfer-encoding"), None);
+    assert_eq!(
+        received.header("content-length"),
+        Some(received.body.len().to_string()).as_deref(),
+        "the declared length must match the escaped bytes actually written"
+    );
+    // That comparison alone proves less than it looks: the server reads exactly
+    // `Content-Length` bytes, so an undercount truncates the body and the two
+    // numbers agree on the short value. What an undercount cannot fake is the
+    // tail, so assert the body is whole -- both escaped names in full, and the
+    // closing delimiter present.
+    assert!(
+        body.ends_with(&format!("--{}--\r\n", boundary_of(received))),
+        "an undercounted length would have cut the closing delimiter: {:?}",
+        &body[body.len().saturating_sub(80)..]
+    );
+    let escaped = "%22%0D%0A".repeat(2_000);
+    assert!(body.contains(&format!("name=\"{escaped}\"\r\n")), "name");
+    assert!(
+        body.contains(&format!("filename=\"{escaped}\"\r\n")),
+        "filename"
+    );
+}
+
+#[tokio::test]
+async fn a_stream_that_yields_an_empty_chunk_does_not_truncate_a_chunked_body() {
+    use futures_util::stream;
+
+    // The in-memory path filters an empty frame out itself; the stream path
+    // hands the caller's chunks through untouched and relies on hyper dropping
+    // an empty one before it reaches the socket. Under chunked encoding a
+    // zero-length chunk *is* the end-of-body marker, so if that reliance ever
+    // stops holding, everything after the empty chunk disappears silently.
+    let server = TestServer::always(Reply::ok()).await;
+    let client = client_for(&server, "example.test");
+
+    let chunks = vec![
+        Ok(Bytes::from_static(b"before")),
+        Ok(Bytes::new()),
+        Ok(Bytes::from_static(b"after")),
+    ];
+
+    client
+        .post(server.url_for("example.test", "/"))
+        .multipart(
+            Form::new()
+                .part("upload", Part::stream(stream::iter(chunks)))
+                .text("last", "present"),
+        )
+        .send()
+        .await
+        .expect("the request must succeed");
+
+    let received = &server.received()[0];
+    let body = received.body_text();
+    assert_eq!(received.header("transfer-encoding"), Some("chunked"));
+    assert!(body.contains("\r\n\r\nbeforeafter\r\n--"), "{body:?}");
+    assert!(
+        body.contains("name=\"last\"\r\n\r\npresent\r\n"),
+        "the part after the empty chunk must survive: {body:?}"
+    );
+    assert_eq!(part_count(received, &boundary_of(received)), 2, "{body:?}");
+}
 
 #[tokio::test]
 async fn a_form_of_known_size_parts_declares_a_content_length() {
