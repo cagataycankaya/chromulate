@@ -66,8 +66,10 @@ that breaking changes may land in a minor release.
   otherwise hand-roll and get wrong, and the distinction between "found it", "ran out of
   budget" and "reached the end", without which a fixed byte budget silently extracted only
   12 of 18 pages in the same measurement.
-- **`chromulate-h3`**: RFC 7838 `Alt-Svc` parsing and a per-origin alternative-service cache
-  with expiry, which is how a client learns an origin offers HTTP/3. A QUIC spike behind the
+- **`chromulate-h3`**: RFC 7838 `Alt-Svc` parsing and a per-origin alternative-service cache,
+  bounded at 10,000 origins with expiry-first eviction, which is how a client learns an
+  origin offers HTTP/3. The bound exists because what fills the cache is chosen by the
+  servers a crawl visits rather than by the caller. A QUIC spike behind the
   non-default `quic-spike` feature establishes what the `quinn`/`h3` stack would put on the
   wire. A real HTTP/3 request succeeds, but the handshake omits five extensions the Chrome
   capture carries, emits no GREASE, and its transport-parameter set cannot be changed through

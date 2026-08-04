@@ -312,21 +312,59 @@ impl CachedAlternative {
     }
 }
 
+/// How many origins a cache remembers before it starts forgetting.
+///
+/// `Alt-Svc` is a response header, so the set of origins in here is chosen by
+/// the servers a crawl visits rather than by the caller. An unbounded map is
+/// memory those servers can make a long-running process spend and never give
+/// back. Ten thousand matches the bound the HSTS store carries for the same
+/// reason.
+pub const DEFAULT_ORIGIN_CAPACITY: usize = 10_000;
+
 /// Per-origin memory of advertised alternative services.
 ///
 /// This is the state a browser keeps so that the *second* request to an origin can go
 /// over HTTP/3 when the first one learned that it could. It holds no clock: callers
 /// pass `now`, which is what lets the expiry rules be tested without waiting.
-#[derive(Debug, Default)]
+///
+/// Bounded at [`DEFAULT_ORIGIN_CAPACITY`] origins, because what fills it is
+/// chosen by the servers visited rather than by the caller.
+#[derive(Debug)]
 pub struct AltSvcCache {
     entries: HashMap<Origin, Vec<CachedAlternative>>,
+    capacity: usize,
+}
+
+impl Default for AltSvcCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AltSvcCache {
-    /// An empty cache.
+    /// An empty cache holding at most [`DEFAULT_ORIGIN_CAPACITY`] origins.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self::with_capacity(DEFAULT_ORIGIN_CAPACITY)
+    }
+
+    /// An empty cache holding at most `capacity` origins.
+    ///
+    /// A capacity of zero is raised to one: a cache that cannot hold the entry it
+    /// was just given would drop every write, which is a configuration mistake
+    /// rather than an instruction.
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            capacity: capacity.max(1),
+        }
+    }
+
+    /// The most origins this cache will hold.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.capacity
     }
 
     /// Records an `Alt-Svc` field observed on a response from `origin`.
@@ -375,6 +413,7 @@ impl AltSvcCache {
         if cached.is_empty() {
             self.entries.remove(origin);
         } else {
+            self.make_room_for(origin, now);
             self.entries.insert(origin.clone(), cached);
         }
         Ok(())
@@ -399,6 +438,41 @@ impl AltSvcCache {
             .get(origin)?
             .iter()
             .find(|entry| entry.is_live(now) && entry.alternative.protocol_id() == H3_ALPN)
+    }
+
+    /// Makes space for `origin` if the cache is full and does not already hold it.
+    ///
+    /// Expiry first: an entry nobody can use any more is the cheapest thing to
+    /// lose, and on a long crawl it is usually enough. Only when that frees
+    /// nothing does an entry get dropped that is still live, and the one chosen
+    /// is the soonest to expire — it is the one whose loss costs the least
+    /// remaining usefulness. There is no recency here because the cache records
+    /// no reads; adding a clock to rank them would cost more than it saves for a
+    /// hint that a request can simply re-learn from the next response.
+    fn make_room_for(&mut self, origin: &Origin, now: SystemTime) {
+        if self.entries.len() < self.capacity || self.entries.contains_key(origin) {
+            return;
+        }
+
+        self.purge_expired(now);
+        if self.entries.len() < self.capacity {
+            return;
+        }
+
+        let soonest = self
+            .entries
+            .iter()
+            .filter_map(|(key, list)| {
+                list.iter()
+                    .map(|entry| entry.expires_at())
+                    .min()
+                    .map(|at| (at, key.clone()))
+            })
+            .min_by(|left, right| left.0.cmp(&right.0))
+            .map(|(_, key)| key);
+        if let Some(key) = soonest {
+            self.entries.remove(&key);
+        }
     }
 
     /// Drops every entry that has expired at `now`, and every origin left with none.
@@ -435,6 +509,146 @@ mod tests {
             AltSvc::Alternatives(list) => list,
             AltSvc::Clear => panic!("expected alternatives, got `clear`"),
         }
+    }
+
+    #[test]
+    fn the_cache_is_bounded_by_the_number_of_origins() {
+        // `Alt-Svc` is a response header, so the origins in here are chosen by
+        // the servers a crawl visits. Before this bound existed the map grew
+        // without limit and only an explicit `purge_expired` reclaimed anything.
+        let mut cache = AltSvcCache::with_capacity(3);
+        for n in 0..20 {
+            let origin = origin(&format!("https://host{n}.test"));
+            cache
+                .record(&origin, "h3=\":443\"; ma=3600", at(0))
+                .expect("a secure origin may advertise");
+        }
+        assert_eq!(cache.len(), 3, "the cache grew past its capacity");
+    }
+
+    #[test]
+    fn a_full_cache_drops_an_expired_origin_before_a_live_one() {
+        let mut cache = AltSvcCache::with_capacity(2);
+        let short = origin("https://short.test");
+        let long = origin("https://long.test");
+        cache
+            .record(&short, "h3=\":443\"; ma=10", at(0))
+            .expect("secure");
+        cache
+            .record(&long, "h3=\":443\"; ma=100000", at(0))
+            .expect("secure");
+
+        // At this instant `short` has expired and `long` has not, so the arriving
+        // origin must cost the dead entry rather than the live one.
+        let fresh = origin("https://fresh.test");
+        cache
+            .record(&fresh, "h3=\":443\"; ma=3600", at(50))
+            .expect("secure");
+
+        assert!(
+            cache.h3_alternative(&long, at(50)).is_some(),
+            "live entry lost"
+        );
+        assert!(
+            cache.h3_alternative(&fresh, at(50)).is_some(),
+            "new entry lost"
+        );
+        assert!(
+            cache.h3_alternative(&short, at(50)).is_none(),
+            "expired entry kept"
+        );
+    }
+
+    #[test]
+    fn a_sweep_reclaims_every_dead_origin_rather_than_one_per_insert() {
+        // This is what separates the two layers. When a single entry is dead,
+        // sweeping and picking-the-soonest choose the same victim, so a test with
+        // one dead entry passes either way and proves nothing about the sweep.
+        // With several dead, the sweep frees them all at once while the pick frees
+        // exactly one — and a cache that reclaims one slot per insert stays
+        // permanently full of corpses.
+        let mut cache = AltSvcCache::with_capacity(5);
+        for n in 0..5 {
+            let origin = origin(&format!("https://dead{n}.test"));
+            cache
+                .record(&origin, "h3=\":443\"; ma=10", at(0))
+                .expect("secure");
+        }
+        assert_eq!(cache.len(), 5);
+
+        let fresh = origin("https://fresh.test");
+        cache
+            .record(&fresh, "h3=\":443\"; ma=3600", at(50))
+            .expect("secure");
+
+        assert_eq!(
+            cache.len(),
+            1,
+            "the sweep should have reclaimed all five dead origins, not just one"
+        );
+    }
+
+    #[test]
+    fn a_full_cache_of_live_origins_drops_the_one_expiring_soonest() {
+        let mut cache = AltSvcCache::with_capacity(2);
+        let soon = origin("https://soon.test");
+        let later = origin("https://later.test");
+        cache
+            .record(&soon, "h3=\":443\"; ma=100", at(0))
+            .expect("secure");
+        cache
+            .record(&later, "h3=\":443\"; ma=100000", at(0))
+            .expect("secure");
+
+        let fresh = origin("https://fresh.test");
+        cache
+            .record(&fresh, "h3=\":443\"; ma=3600", at(0))
+            .expect("secure");
+
+        assert_eq!(cache.len(), 2);
+        assert!(
+            cache.h3_alternative(&soon, at(0)).is_none(),
+            "soonest should go"
+        );
+        assert!(cache.h3_alternative(&later, at(0)).is_some());
+    }
+
+    #[test]
+    fn re_recording_a_known_origin_does_not_evict_anything() {
+        // The bound must not turn a refresh into a loss: a full cache being told
+        // again about an origin it already holds has nothing to make room for.
+        let mut cache = AltSvcCache::with_capacity(2);
+        let a = origin("https://a.test");
+        let b = origin("https://b.test");
+        cache
+            .record(&a, "h3=\":443\"; ma=3600", at(0))
+            .expect("secure");
+        cache
+            .record(&b, "h3=\":443\"; ma=3600", at(0))
+            .expect("secure");
+        cache
+            .record(&a, "h3=\":8443\"; ma=3600", at(0))
+            .expect("secure");
+
+        assert_eq!(cache.len(), 2);
+        assert!(
+            cache.h3_alternative(&b, at(0)).is_some(),
+            "sibling evicted by a refresh"
+        );
+    }
+
+    #[test]
+    fn a_capacity_of_zero_is_raised_to_one() {
+        let mut cache = AltSvcCache::with_capacity(0);
+        assert_eq!(cache.capacity(), 1);
+        let only = origin("https://only.test");
+        cache
+            .record(&only, "h3=\":443\"; ma=3600", at(0))
+            .expect("secure");
+        assert!(
+            cache.h3_alternative(&only, at(0)).is_some(),
+            "a zero capacity dropped every write"
+        );
     }
 
     fn at(secs: u64) -> SystemTime {
@@ -853,26 +1067,6 @@ mod tests {
             .record(&o, r#"h3=":443"; ma=3600"#, at(0))
             .expect_err("a plaintext ws origin must be refused");
         assert!(matches!(err, AltSvcError::InsecureOrigin { .. }));
-    }
-
-    #[test]
-    fn the_cache_is_not_bounded_by_the_number_of_origins() {
-        // Finding, not a defect this test guards against: nothing in `AltSvcCache`
-        // caps the number of distinct origins it will remember, and `record` never
-        // evicts on insert. A per-origin `HashMap` filled entirely by a
-        // server-controlled response header is a memory-growth surface once this
-        // cache is wired to a live client that visits many origins; today it is not
-        // wired to anything, which is why this is recorded rather than fixed here.
-        // The caller is responsible for calling `purge_expired` on some cadence, and
-        // nothing enforces that either.
-        let mut cache = AltSvcCache::new();
-        for i in 0..2_000 {
-            let o = origin(&format!("https://host-{i}.example/"));
-            cache
-                .record(&o, r#"h3=":443"; ma=3600"#, at(0))
-                .expect("https origin is allowed to advertise");
-        }
-        assert_eq!(cache.len(), 2_000, "no cap was enforced on origin count");
     }
 
     #[test]
