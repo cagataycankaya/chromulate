@@ -50,8 +50,15 @@ observed.
 
 - Rust 2024 edition. `cargo fmt` and `cargo clippy --all-targets -- -D warnings` must be
   clean before any commit.
-- `#![forbid(unsafe_code)]` in every crate unless a documented, benchmarked exception is
-  approved; `unsafe` requires a `SAFETY:` comment stating the invariant.
+- `#![forbid(unsafe_code)]` in every crate unless a documented, approved exception is
+  recorded here; `unsafe` requires a `SAFETY:` comment stating the invariant.
+  **There is exactly one exception today:** `crates/chromulate-bench` omits
+  `[lints] workspace = true` because a counting global allocator cannot be written without
+  `unsafe impl GlobalAlloc`, and measuring allocations per request is that crate's purpose.
+  It is `publish = false`, nothing a user runs links it, and every file in it except
+  `src/bin/allocs.rs` carries its own `#![forbid(unsafe_code)]`. Adding a second exception
+  needs the same treatment: a reason that cannot be worked around, containment, and a line
+  in this list.
 - Prefer `bytes::Bytes` over `Vec<u8>` on data paths. Stream by default; buffer only when
   the API contract demands a complete body.
 - Avoid `Arc<Mutex<_>>` on hot paths. Reach for ownership, `&mut`, or a sharded structure
