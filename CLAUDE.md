@@ -106,6 +106,14 @@ roadmap, because it is believed.
 commit is a promise broken in public, and moving a published tag afterwards is worse than
 waiting for the build.
 
+**Read a check's exit status, not its output.** `cargo clippy … | tail -3` exits with
+`tail`'s status, so the pipeline succeeds while clippy fails — `set -e` does not save you,
+and neither does a following `&&`. This has now put a red commit on `main` three times, most
+recently while fixing the two bugs this rule sits below. Run each check on its own line with
+no pipe, redirect to a file if the output is long, and read `$?`. CONTRIBUTING.md carries
+the same warning for contributors; it is repeated here because this is the file that is
+open when the mistake gets made.
+
 ## Scope boundary
 
 Chromulate reproduces standards-compliant browser networking behaviour so that crawlers,
@@ -113,7 +121,7 @@ monitors, and research tools observe the same protocol surface a browser would. 
 built to defeat security controls, and contributions framed around evading detection are
 out of scope.
 
-## Two testing rules learned the hard way
+## Three testing rules learned the hard way
 
 **A test that has never failed is not known to guard anything.** Write the failing test
 first and watch it fail; if you are adding a test to protect an existing fix, remove the fix
@@ -141,6 +149,19 @@ was caught by pre-existing facade tests, not by the new ones.
 When you add tests for a case, ask what those tests structurally cannot reach. If every new
 test sets some field, the absent-field path is untested by construction, and that is usually
 the path most callers take.
+
+**When a fix has two layers, mutate them one at a time.** The rate limiter panic fix landed
+as a clamp on the rate plus a total `Duration` conversion where the panic was. Reverting
+either one alone left the suite green — the clamp made the conversion unreachable, and the
+conversion returned the same number the clamp would have produced. Mutating both together
+would have shown red and proved nothing about either.
+
+Take the green seriously when it comes. Here it meant one of the two was untested and the
+other was unreachable, which is worth knowing before shipping both. The fix was a test that
+distinguishes them — advancing the clock to show the bucket still refills, which only the
+clamp can deliver — and a comment on the surviving layer saying plainly that no test reaches
+it and why it stays anyway. A comment claiming a protection that no test can demonstrate is
+the thing this section exists to prevent.
 
 ## Testing layout
 
