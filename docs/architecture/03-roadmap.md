@@ -339,7 +339,7 @@ client hints.
 and is populated from `Strict-Transport-Security` responses; a header arriving over
 cleartext is ignored, IP literals take no policy, and `max-age=0` removes one. The preload
 list ships behind the off-by-default `hsts-preload` feature and is the part that protects
-the *first* request to an origin this process has never visited — `Client::hsts()` remains
+the *first* request to an origin this process has never visited — `Client::with_hsts()` remains
 the lighter answer, letting a caller seed a
 policy it already knows.
 

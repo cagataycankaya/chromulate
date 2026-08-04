@@ -1867,7 +1867,7 @@ claiming browser-grade behaviour that skips this makes a plaintext request where
 would not — an observable behavioural difference and a real downgrade exposure.
 
 **Implemented** (`chromulate-http/src/hsts.rs`): a store consulted before the request
-leaves, populated from response headers, reachable from the facade as `Client::hsts()` so a
+leaves, populated from response headers, reachable from the facade as `Client::with_hsts()` so a
 caller can seed a policy it already knows. Three rules from RFC 6797 carry their own tests
 because each is easy to get wrong in a way nothing would notice — a header arriving over
 cleartext is ignored (§8.1), an IP-literal host takes no policy (§8.1.1), and `max-age=0`
@@ -1891,7 +1891,7 @@ cookie jar's use of `psl`. Fifty-seven entries are bare TLDs carrying `includeSu
 `app`, `dev`, `bank`, `page`, `google` — and clamping the walk would mean nothing under
 them was ever protected.
 
-`Client::hsts()` remains the answer for a caller who wants specific origins seeded without
+`Client::with_hsts()` remains the answer for a caller who wants specific origins seeded without
 compiling the list in.
 
 ### 13.3 Keeping credentials out of logs
