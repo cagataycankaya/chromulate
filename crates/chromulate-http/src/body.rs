@@ -38,11 +38,13 @@ pub(crate) fn from_incoming(incoming: hyper::body::Incoming) -> Body {
 fn poll_data(body: &mut Body, cx: &mut Context<'_>) -> Poll<Option<Result<Bytes>>> {
     loop {
         match Pin::new(&mut *body).poll_frame(cx) {
-            Poll::Ready(Some(Ok(frame))) => match frame.into_data() {
-                Ok(data) => return Poll::Ready(Some(Ok(data))),
-                // A trailers frame; nothing here consumes them.
-                Err(_) => {}
-            },
+            // A non-data frame is trailers; nothing here consumes them, so
+            // the loop just polls for the next frame.
+            Poll::Ready(Some(Ok(frame))) => {
+                if let Ok(data) = frame.into_data() {
+                    return Poll::Ready(Some(Ok(data)));
+                }
+            }
             Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
             Poll::Ready(None) => return Poll::Ready(None),
             Poll::Pending => return Poll::Pending,
