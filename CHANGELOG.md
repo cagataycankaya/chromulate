@@ -161,6 +161,60 @@ that breaking changes may land in a minor release.
 
 ### Fixed
 
+Twelve of these came from adversarial audits of the six features above, run after they
+landed. Each audit was told to try to break shipped code rather than review a plan, and to
+re-verify the implementing agent's claims rather than inherit them.
+
+- **A `304` could smuggle a response past every storability rule, including `Set-Cookie`.**
+  The cache re-validated an entry and merged the `304`'s fields into it without re-running
+  §3's checks, so an origin answering a revalidation — rather than a request — could attach
+  `no-store`, `private` or `Set-Cookie` to a stored entry. The `Set-Cookie` case is the sharp
+  one: it was merged into the stored headers and replayed to every later request for that
+  URL, handing one identity's state to another, which the crate's own documentation said
+  never happens. Storability is re-checked on the merged headers now; a refusal removes the
+  entry and still returns what the origin sent.
+- **A `304` naming a different `ETag` relabelled the stored body** (RFC 9111 §4.3.4), after
+  which every later revalidation confirmed the wrong representation. Validators are compared
+  by their opaque part now, past any `W/`.
+- **A `304` changing `Vary` left the entry matching requests it was never fetched for.**
+- **A body disagreeing with its `Content-Length` was stored with the disagreement frozen in**
+  and served that way on every hit; RFC 9110 §6.3 calls such a message malformed.
+- **An entry larger than a shard's share of the memory budget flushed that whole shard** —
+  inserted, then purged along with every other key in it, keeping nothing. The defaults sit
+  in exactly that range: `max_body_bytes` is 8 MiB against a default shard's 2 MiB, so one
+  large response could flush a sixteenth of the cache. Refused now, dropping only the copy it
+  supersedes.
+- **A trailing root label bypassed the HSTS preload list entirely.** `https://gmail.com./`
+  arrives with the host `gmail.com.`, which DNS resolves identically, but it matched no entry
+  — so a request to a preloaded host went out in plaintext. The dynamic store had the mirror
+  defect, keeping two policies for one host.
+- **An empty label invented preload matches.** The ancestor walk stepped over the empty label
+  in `a..app` and reached the `app` entry, forcing HTTPS on a host that never asked. Chromium
+  rejects such names outright. Both are fixed by one canonicalisation in front of `record`,
+  `applies_to` and the preload lookup; it costs about 33 ns per request, which is why the
+  published lookup figure moved from 235 ns to 275.
+- **`Stop::read` read past its budget**, so `Response::bytes_until` could overrun the
+  client's `max_response_size` when a marker arrived in a single chunk. Two layers, each
+  independently mutation-verified: a match ending past the budget no longer sets a target,
+  and the target is clamped to the budget.
+- **`Prefix::matched()` reported a match when the budget cut the marker in half**, so a
+  caller could parse half a marker believing it whole.
+- **`ValidatorStore::remove` took the write lock on an empty store**, and `observe` calls it
+  on every `200` carrying no validator — five origins in six on the workload this feature
+  documents. A store that had never held anything took an exclusive lock on every response.
+- **`ValidatorStore`'s `Debug` printed every stored URL**, with query strings and userinfo;
+  observed output included a password and a session token. It prints a count and a capacity
+  now, matching what `Response`'s own `Debug` omits and why.
+- **A lone CR or LF in a multipart field name was escaped as a filename's would be.** Blink
+  normalises line endings in a name and does not in a filename; the capture could not
+  distinguish the two rules because it contained exactly one line break and it was a pair,
+  which renders identically under both. Corrected against Blink's source, and the capture
+  file now records that this rule rests on a source reading rather than an observation —
+  a weaker class of evidence, labelled as such.
+- **A streamed empty chunk became an empty data frame**, which under chunked encoding is the
+  end-of-body marker. hyper drops one before the socket so nothing broke over hyper, but
+  `Form::into_body` returns a public `Body` and the two part kinds gave different guarantees.
+
 - **A cookie set by a same-origin redirect was never sent on the next hop.** The engine
   consulted the jar only when the request carried no `Cookie` header, and a same-origin
   redirect kept the header computed for the first hop — so the second lookup was suppressed

@@ -53,8 +53,14 @@ entry it was just handed is a silently disabled feature rather than a small one.
   stable across connections for a single browser build. Cipher suite order *is* stable.
   Profiles model the extension set plus its permutation rules, not one frozen order.
 - GREASE values must be drawn from the reserved `0x?A?A` set and placed where the real
-  browser places them (first cipher, first extension, first supported group, first key
-  share, last extension).
+  browser places them. The Chrome 151 capture records **six** positions: first cipher,
+  first extension, last extension, first supported group, first key share, and first
+  supported version. `GreasePlacement` models these as five booleans because the
+  `extensions` flag covers both the first and last slot — so "five" and "six" are both
+  right about different things, and prose that says one while enumerating the other is
+  how `docs/fidelity.md` came to omit the supported-version slot entirely. Count
+  positions against `client_hello.grease_positions` in the capture, not against the
+  struct.
 - `pre_shared_key`, when present, must be the final extension (RFC 8446 §4.2.11).
 - HTTP/2 pseudo-header order is part of the fingerprint: `:method`, `:authority`,
   `:scheme`, `:path`.
