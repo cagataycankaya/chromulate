@@ -16,6 +16,7 @@ use chromulate_profile::Profile;
 use chromulate_proxy::ProxyProvider;
 use chromulate_tls::TlsEngine;
 use http::header::SET_COOKIE;
+use http::{HeaderName, HeaderValue};
 use tracing::Instrument as _;
 use url::Url;
 
@@ -414,9 +415,9 @@ impl Engine {
         // to be settled before headers are built. That is why the connection is
         // acquired first even though nothing has been sent yet.
         *request.version_mut() = protocol.version();
-        self.apply_headers(request, url, options)?;
+        let ordered = self.apply_headers(request, url, options)?;
 
-        let outgoing = outgoing_request(request, url, protocol, body)?;
+        let outgoing = outgoing_request(request, url, protocol, body, ordered)?;
 
         let response = deadline
             .run(
@@ -441,20 +442,22 @@ impl Engine {
         self.inner.connector.connect(route, deadline).await
     }
 
-    /// Writes the profile's headers onto the request, in the profile's order.
+    /// Writes the profile's headers onto the request, in the profile's order,
+    /// and returns the authoritative wire order.
     ///
-    /// `HeaderEngine::apply` returns the authoritative order as a list, because
-    /// a `HeaderMap` cannot express "this name comes before that one" on its
-    /// own. The map is rebuilt from that list rather than merged into, because
-    /// `HeaderMap::insert` leaves an existing name where it already sits: a
-    /// caller-set header would otherwise pin itself to the front and displace
-    /// everything the profile specifies.
+    /// `HeaderEngine::apply` returns that order as a list, because a
+    /// `HeaderMap` cannot express "this name comes before that one" on its
+    /// own. It also rebuilds the request's own map from scratch in the same
+    /// pass — insertion order, which is what the next hop's caller-override
+    /// semantics and any inspection of the request read — so nothing has to
+    /// be rebuilt here. The returned list is what goes on the wire; see
+    /// [`outgoing_request`].
     fn apply_headers(
         &self,
         request: &mut Request,
         url: &Url,
         options: &RequestOptions,
-    ) -> Result<()> {
+    ) -> Result<Vec<(HeaderName, HeaderValue)>> {
         if let Some(cookies) = &self.inner.cookies
             && !request.headers().contains_key(http::header::COOKIE)
             && let Some(value) = cookies.cookies_for(url, &options.cookie_context())
@@ -462,21 +465,12 @@ impl Engine {
             request.headers_mut().insert(http::header::COOKIE, value);
         }
 
-        let ordered = {
-            let store = self
-                .inner
-                .accept_ch
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            self.inner.headers.apply(request, url, options, &store)?
-        };
-
-        let headers = request.headers_mut();
-        headers.clear();
-        for (name, value) in ordered {
-            headers.append(name, value);
-        }
-        Ok(())
+        let store = self
+            .inner
+            .accept_ch
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.inner.headers.apply(request, url, options, &store)
     }
 
     /// Records everything a response teaches the client about the origin.
@@ -556,12 +550,17 @@ async fn send_on(
 /// Builds the request that actually goes on the wire.
 ///
 /// The caller's request is left intact so the redirect loop can still read its
-/// method and headers after the hop.
+/// method and headers after the hop; `ordered` — the header engine's
+/// authoritative wire order, whose entries the engine already wrote onto the
+/// caller's request too — is **moved** onto the outgoing request rather than
+/// the map being cloned, because hyper writes headers in map insertion order
+/// and every entry is a reference-counted handle that a move keeps free.
 fn outgoing_request(
     request: &Request,
     url: &Url,
     protocol: Protocol,
     body: Body,
+    ordered: Vec<(HeaderName, HeaderValue)>,
 ) -> Result<Request> {
     // HTTP/1.1 puts the path on the request line and the authority in `Host`;
     // HTTP/2 needs the whole URL so hyper can derive `:scheme` and
@@ -586,7 +585,10 @@ fn outgoing_request(
         .uri(uri);
 
     if let Some(headers) = builder.headers_mut() {
-        headers.clone_from(request.headers());
+        headers.reserve(ordered.len());
+        for (name, value) in ordered {
+            headers.append(name, value);
+        }
     }
 
     builder
@@ -686,11 +688,11 @@ mod tests {
             .body(Body::empty())
             .expect("a valid request");
 
-        let h1 = outgoing_request(&request, &url, Protocol::Http11, Body::empty())
+        let h1 = outgoing_request(&request, &url, Protocol::Http11, Body::empty(), Vec::new())
             .expect("an h1 request must build");
         assert_eq!(h1.uri().to_string(), "/search?q=rust");
 
-        let h2 = outgoing_request(&request, &url, Protocol::Http2, Body::empty())
+        let h2 = outgoing_request(&request, &url, Protocol::Http2, Body::empty(), Vec::new())
             .expect("an h2 request must build");
         assert_eq!(h2.uri().to_string(), "https://example.com/search?q=rust");
     }
