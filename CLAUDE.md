@@ -106,6 +106,20 @@ roadmap, because it is believed.
 commit is a promise broken in public, and moving a published tag afterwards is worse than
 waiting for the build.
 
+**Run the checks in CI's environment, not in yours.** CI sets `RUSTFLAGS: -D warnings`
+globally and pins each job's toolchain. A local `cargo check` without that variable passes
+on dead code that fails the build on a runner, and a local check on stable says nothing
+about the MSRV job. Both happened in the same push: a constant used only inside an anonymous
+`const` block is dead code to Rust 1.88 and not to stable, so the lint fired on the MSRV job
+alone. Export `RUSTFLAGS="-D warnings"` and run `cargo +<msrv> check --workspace
+--all-features` before pushing, or the local battery is a weaker test than the one that
+gates the merge.
+
+The same applies to platform-specific behaviour. `File::open` succeeds on a directory on
+Unix and fails on Windows, so a test asserting one of those passes locally and fails on a
+third of the matrix. Assert the property both platforms must satisfy, and let the test say
+which path it took.
+
 **Read a check's exit status, not its output.** `cargo clippy … | tail -3` exits with
 `tail`'s status, so the pipeline succeeds while clippy fails — `set -e` does not save you,
 and neither does a following `&&`. This has now put a red commit on `main` three times, most

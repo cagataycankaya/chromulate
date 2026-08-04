@@ -898,15 +898,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_directory_has_no_declarable_length() {
-        // `File::open` succeeds on a directory on Unix, and its metadata
-        // carries a size that is not a byte count. Declaring it would put a
-        // `Content-Length` on the wire that the body cannot honour, so the
-        // length has to come back unknown and the request fall to chunked.
-        let part = Part::file(std::env::temp_dir())
-            .await
-            .expect("a directory opens");
-        assert_eq!(part.source.length(), None);
+    async fn a_directory_never_declares_a_length_it_cannot_honour() {
+        // The property is the same on every platform — a directory must not put
+        // a `Content-Length` on the wire that the body cannot honour — but the
+        // two families reach it differently, and asserting one of them fails on
+        // the other. On Unix `File::open` succeeds on a directory and its
+        // metadata carries a size that is not a byte count, so the length has to
+        // come back unknown and the request fall to chunked. On Windows the open
+        // itself fails with `ERROR_PATH_NOT_FOUND`, which satisfies the property
+        // earlier and just as well.
+        match Part::file(std::env::temp_dir()).await {
+            Ok(part) => assert_eq!(
+                part.source.length(),
+                None,
+                "a directory that opens must not declare a length"
+            ),
+            Err(error) => assert!(
+                matches!(error, Error::Builder(_)),
+                "a directory that cannot be opened must fail as a builder error, got {error:?}"
+            ),
+        }
     }
 
     #[tokio::test]

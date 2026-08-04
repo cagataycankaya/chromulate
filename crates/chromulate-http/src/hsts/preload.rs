@@ -105,6 +105,13 @@ const fn word_at(at: usize) -> u32 {
 pub const ENTRY_COUNT: usize = word_at(8) as usize;
 
 /// Total bytes of concatenated names.
+///
+/// Used only by the compile-time checks below, which is a real use — but Rust
+/// 1.88, this crate's minimum, does not count uses inside an anonymous `const`
+/// item's initializer and reports the constant as dead. Later toolchains do see
+/// it, so the lint fires on the MSRV job alone. The allow is narrower than
+/// dropping the assertion it feeds.
+#[allow(dead_code)]
 const NAMES_LEN: usize = word_at(12) as usize;
 
 /// Where the name blob starts: past the header and the `ENTRY_COUNT + 1` index
