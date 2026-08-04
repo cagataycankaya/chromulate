@@ -1,0 +1,99 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/chromulate",
+    "crates/chromulate-core",
+    "crates/chromulate-fingerprint",
+    "crates/chromulate-profile",
+    "crates/chromulate-header",
+    "crates/chromulate-cookie",
+    "crates/chromulate-compression",
+    "crates/chromulate-dns",
+    "crates/chromulate-proxy",
+    "crates/chromulate-tls",
+    "crates/chromulate-http",
+    "crates/chromulate-cli",
+    "crates/chromulate-bench",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/cagataycankaya/chromulate"
+homepage = "https://github.com/cagataycankaya/chromulate"
+authors = ["The Chromulate Authors"]
+keywords = ["http", "client", "tls", "browser", "networking"]
+categories = ["network-programming", "web-programming::http-client"]
+
+[workspace.dependencies]
+chromulate-core = { version = "0.1.0", path = "crates/chromulate-core" }
+chromulate-fingerprint = { version = "0.1.0", path = "crates/chromulate-fingerprint" }
+chromulate-profile = { version = "0.1.0", path = "crates/chromulate-profile" }
+chromulate-header = { version = "0.1.0", path = "crates/chromulate-header" }
+chromulate-cookie = { version = "0.1.0", path = "crates/chromulate-cookie" }
+chromulate-compression = { version = "0.1.0", path = "crates/chromulate-compression" }
+chromulate-dns = { version = "0.1.0", path = "crates/chromulate-dns" }
+chromulate-proxy = { version = "0.1.0", path = "crates/chromulate-proxy" }
+chromulate-tls = { version = "0.1.0", path = "crates/chromulate-tls" }
+chromulate-http = { version = "0.1.0", path = "crates/chromulate-http" }
+chromulate = { version = "0.1.0", path = "crates/chromulate", default-features = false }
+
+bytes = "1.12"
+http = "1.5"
+http-body = "1.0"
+http-body-util = "0.1"
+hyper = "1.11"
+hyper-util = "0.1"
+tokio = "1.53"
+tokio-util = "0.7"
+futures-core = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+thiserror = "2.0"
+tracing = "0.1"
+url = "2.5"
+percent-encoding = "2.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_urlencoded = "0.7"
+encoding_rs = "0.8"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-compression = "0.4"
+flate2 = "1.1"
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring", "logging"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12", "ring", "logging"] }
+rustls-pki-types = "1.15"
+rustls-native-certs = "0.8"
+webpki-roots = "1.0"
+sha2 = "0.10"
+md-5 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+rand = "0.9"
+psl = "2.1"
+clap = { version = "4.6", features = ["derive"] }
+
+# Benchmark-only dependencies. `reqwest` is the baseline the end-to-end harness
+# compares against; a throughput number without a comparison is not a
+# measurement of anything.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support", "async_tokio"] }
+reqwest = { version = "0.13", default-features = false }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+todo = "warn"
+dbg_macro = "warn"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1

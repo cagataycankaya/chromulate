@@ -1,0 +1,115 @@
+# Changelog
+
+All notable changes to this project are recorded here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html) — with the usual pre-1.0 caveat
+that breaking changes may land in a minor release.
+
+## [Unreleased]
+
+### Added — initial implementation
+
+The first working version of the engine: twelve crates covering the fingerprint algebra,
+browser profiles, header construction, cookies, compression, DNS, proxies, TLS, the HTTP
+engine, the public client, and a CLI.
+
+- **Fingerprint model and computation.** JA3, JA4, JA4_r, and the Akamai HTTP/2 fingerprint,
+  golden-tested against a live capture of a real Chrome 151 on macOS. A profile models its
+  extensions as a *set plus permutation rules* rather than one frozen order, because two
+  captures from the same browser minutes apart produced different JA3 hashes
+  (`a0442bdf…` and `43b2a31e…`) with an identical cipher list — Chrome permutes its
+  ClientHello extension order on every connection, so JA3 is not a stable identifier for a
+  browser build and JA4, which sorts before hashing, is.
+- **Header engine** reproducing the captured navigation header order exactly, with
+  `Sec-Fetch-*` derivation, client-hint escalation via `Accept-CH`, and per-destination
+  `Accept` values.
+- **Cookie jar** with domain and path matching, the lenient browser date parser, `SameSite`,
+  `Secure`, `__Host-`/`__Secure-` prefixes, and bounded eviction.
+- **HTTP engine** with an identity-aware connection pool, the redirect loop, streaming
+  decompression, and retry and rate-limiting middleware.
+- **TLS engine** over rustls, with a `fidelity` module that reports the gap between the
+  profile's target ClientHello and what rustls actually emits, as a value a caller can read
+  and log rather than a caveat in prose.
+- **CLI**: `get`, `fingerprint`, and `profiles`.
+
+### Measured — performance
+
+A benchmark harness (`crates/chromulate-bench`, plus criterion suites) was added and run on
+an Apple M1 Pro. See [`benches/README.md`](benches/README.md) to reproduce.
+
+- **Throughput: 0.77–0.88x of `reqwest`**, i.e. 12–23% slower, measured against a loopback
+  origin at concurrency 1, 8, 64, and 256, as the median of paired per-round ratios. Three
+  independent runs agree. A browser-identity engine doing more work per request than a plain
+  client is expected; the specific cost is not, see below.
+- **127 heap allocations per steady-state request**, against reqwest's 49 — 2.59x. **80 of
+  those 127 are `HeaderEngine::apply`**, which costs 4.32 µs per request. The design
+  documents' low-allocation claim is **not currently supported by measurement**, and the
+  reason is that per-request work re-derives values that are constants of the profile.
+  This is the single largest identified optimisation and it has not been applied.
+- **Constant-memory streaming confirmed, with a control.** A 256 MiB body streams at a
+  1.44 MiB peak; the identical body read through `Response::bytes` peaks at 260.7 MiB. The
+  measurement can see buffering, and did not see it in the streaming path.
+- Idle client ≈0.55 MiB over a tokio runtime; ≈38.8 KiB per pooled connection at the
+  64→512 margin.
+- Per-connection fingerprint work is negligible: generating a fresh extension permutation
+  is 183 ns, JA4 3.2 µs, the Akamai string 453 ns.
+- The cookie jar is flat, not linear: `store` ≈545 ns and `cookies_for` ≈1.14 µs across jars
+  of 10, 1,000, and 10,000 cookies.
+
+### Measured — fidelity
+
+Against a live echo endpoint, the engine reproduces Chrome 151's HTTP/2 preface in 3 of the
+Akamai fingerprint's 4 fields and its request header order exactly, where an ordinary `curl`
+matches 1 of 4 and none of the order. The one HTTP/2 field that differs is the pseudo-header
+order, hard-coded in `h2`, and it is reported by `Http2Fidelity::unsupported` rather than
+hidden.
+
+Its TLS JA4 does **not** match Chrome's, and is no closer than `curl`'s. A JA4 either matches
+or it does not; "closer" buys nothing for a hash comparison. See
+[the design document](docs/architecture/02-chromulate-design.md) §8 for exactly which rustls
+limits cause this and what would have to change.
+
+### Fixed — from the first review pass
+
+A review of the initial implementation found and reproduced 24 defects, every one with a
+failing test before the fix. The ones worth recording:
+
+- **A hostile server could abort the client process.** An oversized `Content-Encoding`
+  response header built an unbounded chain of nested decoders; polling it overflowed the
+  stack and aborted with `SIGABRT`, which no supervisor can recover. A ~2.4 KB header
+  sufficed in a debug build and ~12 KB in release. The coding list is now bounded and
+  decoders are no longer built eagerly.
+- **A retried `POST` could silently send an empty body.** `Body::try_clone` reported a
+  drained fixed body as replayable, returning `Some` of an empty body, and
+  `Error::is_retryable` classified send-phase body errors as retryable. Together a dropped
+  connection produced a replay with no payload and `Content-Length: 0`. `try_clone` now
+  returns `None` once the bytes have gone, and body errors are never retryable.
+- **`Accept-CH` was treated as additive.** RFC 8942 §3.1 specifies that an opt-in *overrides*
+  the persisted set, so a site could not narrow the hints it received, and an empty
+  `Accept-CH` — the documented way to clear the set — was a no-op. Now replaces.
+- **`__Host-` and `__Secure-` cookie name prefixes were not enforced**, on either the parse
+  path or the snapshot-import path. Both now share one predicate.
+- **A cancelled DNS lookup poisoned its hostname** for the life of the process and leaked the
+  cache entry.
+- **Two unrelated IP literals computed as `Sec-Fetch-Site: same-site`.**
+- **`SameSite=Strict` cookies were never sent**, not even same-origin, because the
+  `CookieStore` trait carried no fetch context.
+- **A plaintext response could delete a `Secure` cookie** with `Max-Age=0`, though it could
+  not overwrite one.
+- **`Jar::store` was quadratic.** One response carrying 50,000 `Set-Cookie` headers took
+  7,653 ms; it now takes 28 ms (mean of three runs). A crawl over 16,000 distinct sites went
+  from 1,857 ms to 238 ms. At the top end this was a denial of service, not just a slow path.
+- Plus SOCKS5 credential truncation, a `Jar::import` overflow panic, an expansion-ratio guard
+  weakened by nested codings, and several parser leniencies.
+
+### Known gaps
+
+- The emitted ClientHello is not byte-identical to the captured browser's: no GREASE, no
+  ALPS, no SCT, 9 of 15 cipher suites, and rustls appends an SCSV Chrome does not send. The
+  `fidelity` module enumerates these at runtime.
+- HTTP/2 pseudo-header order cannot be set through `h2`.
+- Only the Chrome profile ships with captured data. Others need a capture; nothing is
+  fabricated.
+- The capture covers one navigation request, so per-destination `Accept` and `priority`
+  values, the subresource header order, and the `cookie` header's position are modelled
+  rather than observed, and are marked as such in the source.

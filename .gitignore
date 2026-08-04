@@ -1,0 +1,24 @@
+# Rust build artefacts
+/target
+**/*.rs.bk
+*.pdb
+
+# Agent working notes. These can contain raw capture output and internal briefs, and
+# they are not part of the published project.
+/.superpowers/
+
+# Local tooling state, not project configuration
+/.claude/.pending-md-review.json
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Local coverage and profiling output
+/coverage
+*.profraw
+*.profdata
+perf.data*
+flamegraph.svg

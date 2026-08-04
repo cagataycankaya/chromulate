@@ -1,0 +1,27 @@
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # Bumping one of these alone usually fails to build, so they travel together.
+      rustls:
+        patterns:
+          - rustls
+          - tokio-rustls
+          - rustls-pki-types
+          - webpki-roots
+      hyper:
+        patterns:
+          - hyper
+          - hyper-util
+          - http
+          - http-body
+          - http-body-util
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
