@@ -620,6 +620,29 @@ mod tests {
         assert_eq!(store.stats().bytes, 0);
     }
 
+    /// The budget is divided evenly among the shards, so the bound only holds
+    /// across the whole store if it holds in every shard at once — and keys
+    /// land in shards by a hash nothing here controls. Ten thousand stores at
+    /// the default shard count is what makes that an observation.
+    #[test]
+    fn the_bound_holds_across_every_shard_under_sustained_pressure() {
+        let store = MemoryStore::with_limits(MemoryLimits {
+            max_bytes: 256 * 1024,
+            shards: 16,
+        });
+        for index in 0..10_000 {
+            store
+                .put(&key(&index.to_string()), entry(index % 512))
+                .expect("put succeeds");
+        }
+        assert!(
+            store.stats().bytes <= 256 * 1024,
+            "the store held {} bytes against a 262144 byte budget",
+            store.stats().bytes
+        );
+        assert!(store.stats().evictions > 0, "the pressure was real");
+    }
+
     #[test]
     fn sharding_keeps_keys_apart_without_losing_them() {
         let store = MemoryStore::with_limits(MemoryLimits {

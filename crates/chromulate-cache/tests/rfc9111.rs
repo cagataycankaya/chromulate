@@ -9,7 +9,8 @@ use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use chromulate_cache::{
-    CacheConfig, CacheStatus, HttpCache, ManualClock, MemoryLimits, MemoryStore,
+    CacheConfig, CacheKey, CacheStatus, CacheStorage, HttpCache, ManualClock, MemoryLimits,
+    MemoryStore,
 };
 use chromulate_core::{Body, Request, Response};
 use url::Url;
@@ -720,6 +721,96 @@ async fn a_304_that_adds_a_tag_to_an_entry_that_had_none_is_accepted() {
 
     assert_eq!(store.stats().keys, 1);
     assert!(lookup(&cache, request(&[])).1.is_some());
+}
+
+/// `before` hands `after` the entry it found, so the entry outlives its own
+/// eviction. Re-storing it is the right answer — the origin has just confirmed
+/// it — and the thing to check is that the store agrees about what it now
+/// holds rather than counting the resurrected entry twice.
+#[tokio::test]
+async fn a_304_for_an_entry_evicted_between_request_and_response_is_still_coherent() {
+    let (cache, clock, store) = cache_at(epoch());
+    seed(&cache).await;
+
+    clock.advance(Duration::from_secs(120));
+    let mut stale = request(&[]);
+    let (pending, hit) = cache.before(&mut stale, &url());
+    assert!(hit.is_none());
+
+    // The store loses it while the request is in flight.
+    cache.invalidate(&url());
+    assert_eq!(store.stats().keys, 0);
+
+    let served = cache.after(
+        pending,
+        &url(),
+        response(
+            304,
+            &[("cache-control", "max-age=600"), ("etag", "\"v1\"")],
+            "",
+        ),
+    );
+    let body = served
+        .into_body()
+        .collect(1024)
+        .await
+        .expect("the caller still gets the body the 304 confirmed");
+    assert_eq!(body, Bytes::from_static(b"payload"));
+
+    assert_eq!(store.stats().keys, 1);
+    let variants = store
+        .get(&CacheKey::new(&http::Method::GET, &url()))
+        .expect("get succeeds");
+    assert_eq!(
+        variants.len(),
+        1,
+        "one confirmed representation is one stored variant, not two"
+    );
+    assert!(lookup(&cache, request(&[])).1.is_some());
+}
+
+/// Two requests for one key both find the entry stale, both revalidate, and
+/// both come back. Nothing here is atomic, so what matters is that the loser
+/// leaves the store holding one coherent entry rather than two copies of the
+/// same representation.
+#[tokio::test]
+async fn two_revalidations_of_one_key_leave_a_single_variant() {
+    let (cache, clock, store) = cache_at(epoch());
+    seed(&cache).await;
+    clock.advance(Duration::from_secs(120));
+
+    let mut first = request(&[]);
+    let (first_pending, hit) = cache.before(&mut first, &url());
+    assert!(hit.is_none());
+    let mut second = request(&[]);
+    let (second_pending, hit) = cache.before(&mut second, &url());
+    assert!(hit.is_none(), "both saw the same stale entry");
+
+    let not_modified = |max_age: &str| {
+        response(
+            304,
+            &[
+                ("cache-control", &format!("max-age={max_age}")),
+                ("etag", "\"v1\""),
+            ],
+            "",
+        )
+    };
+    let _ = cache.after(first_pending, &url(), not_modified("600"));
+    let _ = cache.after(second_pending, &url(), not_modified("900"));
+
+    assert_eq!(store.stats().keys, 1);
+    let variants = store
+        .get(&CacheKey::new(&http::Method::GET, &url()))
+        .expect("get succeeds");
+    assert_eq!(variants.len(), 1, "one representation, one variant");
+
+    let hit = lookup(&cache, request(&[])).1.expect("the entry is fresh");
+    assert_eq!(
+        hit.headers()["cache-control"],
+        "max-age=900",
+        "the last revalidation to land is the one that is stored"
+    );
 }
 
 // --- Vary -----------------------------------------------------------------
@@ -1487,6 +1578,72 @@ async fn hostile_freshness_arithmetic_produces_an_answer_rather_than_a_panic() {
             *servable,
             "{headers:?} was expected to be servable={servable}"
         );
+    }
+}
+
+/// The sweep behind the table above. Every field in it is server-controlled
+/// and unbounded, and every one of them lands in a subtraction against the
+/// clock; the combinations are where the arithmetic that is total on its own
+/// stops being total. This asserts nothing about the answers — only that there
+/// is one, from every corner of the cross product, at three different clocks.
+#[tokio::test]
+async fn no_combination_of_hostile_dates_panics_the_arithmetic() {
+    const EXTREMES: &[&str] = &[
+        "Thu, 01 Jan 1970 00:00:00 GMT",
+        "Mon, 01 Jan 1601 00:00:00 GMT",
+        "Fri, 31 Dec 9999 23:59:59 GMT",
+        "Sun, 06 Nov 1994 08:49:37 GMT",
+        "0",
+        "-1",
+        "",
+        "not a date",
+    ];
+    const LIFETIMES: &[&str] = &[
+        "max-age=0",
+        "max-age=18446744073709551615",
+        "max-age=99999999999999999999999",
+        "max-age=-1",
+        "max-age=",
+        "no-cache, max-age=600",
+        "s-maxage=18446744073709551615",
+    ];
+    const AGES: &[&str] = &["0", "18446744073709551615", "99999999999999999999999", "-1"];
+
+    for date in EXTREMES {
+        for expires in EXTREMES {
+            for lifetime in LIFETIMES {
+                for age in AGES {
+                    for start in [
+                        SystemTime::UNIX_EPOCH,
+                        SystemTime::UNIX_EPOCH + Duration::from_secs(86_400 * 365 * 56),
+                        SystemTime::UNIX_EPOCH - Duration::from_secs(86_400 * 365 * 56),
+                    ] {
+                        let (cache, clock, _) = cache_at(start);
+                        exchange(
+                            &cache,
+                            request(&[]),
+                            response(
+                                200,
+                                &[
+                                    ("date", date),
+                                    ("expires", expires),
+                                    ("cache-control", lifetime),
+                                    ("age", age),
+                                    ("last-modified", date),
+                                    ("etag", "\"v1\""),
+                                ],
+                                "payload",
+                            ),
+                        )
+                        .await;
+                        // The answer is not asserted; that it exists is.
+                        let _ = lookup(&cache, request(&[]));
+                        clock.advance(Duration::from_secs(u64::MAX / 2));
+                        let _ = lookup(&cache, request(&[]));
+                    }
+                }
+            }
+        }
     }
 }
 
