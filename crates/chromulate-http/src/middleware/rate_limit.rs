@@ -74,6 +74,44 @@ impl fmt::Debug for RateLimiter {
     }
 }
 
+/// The longest wait a limiter will report.
+///
+/// Reached only when a rate is so small that the honest answer overflows a
+/// `Duration`. An hour is long enough that a caller notices it is rate limited
+/// and short enough that the number stays printable.
+const MAX_WAIT: Duration = Duration::from_secs(3600);
+
+/// Replaces a rate that cannot describe a rate.
+///
+/// Zero, negative, subnormal and non-finite values all arrive through
+/// [`RateLimit`]'s public fields. Clamping rather than panicking is the right
+/// answer for a client library: a misconfigured limiter that runs slowly is a
+/// bug the caller can see and fix, and a panic is one that takes their process
+/// with it.
+fn sanitise(limit: RateLimit) -> RateLimit {
+    /// What a rate that is not a rate becomes: one request per hour.
+    ///
+    /// Chosen to be comprehensible rather than merely safe. Clamping to
+    /// something like `1e-5` is equally panic-free and puts twenty-seven hours
+    /// between requests, which reads as a hang; an hour is slow enough that a
+    /// caller who wrote `per_second: 0.0` notices immediately, and short enough
+    /// that what they see is a rate limit rather than a stall.
+    const SLOWEST: f64 = 1.0 / 3600.0;
+
+    RateLimit {
+        per_second: if limit.per_second.is_finite() && limit.per_second >= SLOWEST {
+            limit.per_second
+        } else {
+            SLOWEST
+        },
+        burst: if limit.burst.is_finite() && limit.burst >= 0.0 {
+            limit.burst
+        } else {
+            0.0
+        },
+    }
+}
+
 impl RateLimiter {
     /// A limiter that starts with a full bucket.
     ///
@@ -85,9 +123,18 @@ impl RateLimiter {
     }
 
     /// A limiter running against a specific clock.
+    ///
+    /// The limit is sanitised here rather than trusted. [`RateLimit`]'s fields
+    /// are public, so `RateLimit { per_second: 0.0, burst: 1.0 }` reaches this
+    /// point without ever passing the assertion in [`RateLimit::per_second`] —
+    /// and a zero or subnormal rate makes the wait computation in
+    /// [`RateLimiter::reserve`] divide by something that is not a rate. This is
+    /// the one funnel every limit passes through, which is why the check lives
+    /// here and not at each use.
     #[must_use]
     pub fn with_time_source(limit: RateLimit, time: TimeSource) -> Self {
         let now = time.now();
+        let limit = sanitise(limit);
         Self {
             bucket: Mutex::new(Bucket {
                 tokens: limit.burst,
@@ -138,10 +185,22 @@ impl RateLimiter {
         bucket.tokens -= 1.0;
 
         if bucket.tokens >= 0.0 {
-            Duration::ZERO
-        } else {
-            Duration::from_secs_f64(-bucket.tokens / self.limit.per_second)
+            return Duration::ZERO;
         }
+
+        // The total conversion rather than `Duration::from_secs_f64`, which
+        // panics on a negative, infinite or out-of-range value.
+        //
+        // No input reaches it today: `sanitise` keeps the rate finite and at
+        // least `1/3600`, and the debt would have to pass -5e15 tokens to
+        // overflow a `Duration` at that rate. Mutating this line back does not
+        // turn any test red, and the honest reading of that is "unreachable",
+        // not "guarded". It stays because the partial function's failure mode
+        // is a panic in a library, and because it is the line that stops
+        // mattering the moment someone widens `sanitise` — which is precisely
+        // when nobody will be looking here.
+        let seconds = -bucket.tokens / self.limit.per_second;
+        Duration::try_from_secs_f64(seconds).unwrap_or(MAX_WAIT)
     }
 }
 
@@ -179,12 +238,99 @@ pub fn middleware_error(name: &'static str, source: impl Into<chromulate_core::B
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// The rates that reach a limiter without passing `RateLimit::per_second`'s
+    /// assertion, because the fields are public and a struct literal skips it.
+    /// Every one of them used to panic inside `Duration::from_secs_f64` — a
+    /// client library taking a caller's process down over its configuration.
+    const NOT_A_RATE: [f64; 6] = [
+        0.0,
+        -1.0,
+        1e-300,
+        f64::NAN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ];
+
+    #[test]
+    fn a_rate_that_cannot_describe_a_rate_does_not_panic() {
+        for per_second in NOT_A_RATE {
+            let time = ManualTime::new();
+            let limiter = raw_limiter(per_second, 1.0, &time);
+            // Two reserves: the first spends the burst, the second is the one
+            // that has to compute a wait and divide by the rate.
+            let _ = limiter.reserve();
+            let wait = limiter.reserve();
+            assert!(
+                wait <= MAX_WAIT,
+                "per_second={per_second} produced a wait of {wait:?}"
+            );
+        }
+    }
+
+    /// The guard in `reserve` alone makes the panic go away, so it alone is not
+    /// enough: without `sanitise`, a rate of `0.0` survives into the refill on
+    /// line one of `reserve` and adds `elapsed * 0.0` tokens forever. The bucket
+    /// never recovers, and the limiter reports its ceiling wait until the
+    /// process ends. Clamping the rate is what makes the recovery below happen,
+    /// which is why this test — not the one above — is the one that holds
+    /// `sanitise` in place.
+    #[test]
+    fn a_clamped_rate_still_refills() {
+        for per_second in NOT_A_RATE {
+            let time = ManualTime::new();
+            let limiter = raw_limiter(per_second, 1.0, &time);
+            assert_eq!(limiter.reserve(), Duration::ZERO, "burst token");
+            assert!(limiter.reserve() > Duration::ZERO, "burst is spent");
+
+            // Two hours is more than the clamped rate of one per hour needs.
+            time.advance(Duration::from_secs(7200));
+            assert_eq!(
+                limiter.reserve(),
+                Duration::ZERO,
+                "per_second={per_second} left a limiter that never refills"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pathological_burst_does_not_panic() {
+        for burst in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            let time = ManualTime::new();
+            let limiter = raw_limiter(10.0, burst, &time);
+            let _ = limiter.reserve();
+            let _ = limiter.reserve();
+        }
+    }
+
+    #[test]
+    fn a_sane_rate_is_left_exactly_as_given() {
+        // The clamp must not quietly alter a limit a caller meant, or a crawler
+        // tuned to a site's published rate would run at a different one.
+        let limit = sanitise(RateLimit {
+            per_second: 2.5,
+            burst: 7.0,
+        });
+        assert_eq!(limit.per_second, 2.5);
+        assert_eq!(limit.burst, 7.0);
+    }
+
     use chromulate_core::{Body, Exchange};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::*;
     use crate::time::testing::ManualTime;
+
+    /// Builds a limiter from a struct literal, which is how these values
+    /// actually arrive: `RateLimit`'s fields are public, so a caller can skip
+    /// [`RateLimit::per_second`] and its assertion entirely. The `limiter`
+    /// helper below goes through that constructor and so cannot express any of
+    /// them — it would panic in the test harness rather than in the code under
+    /// test.
+    fn raw_limiter(per_second: f64, burst: f64, time: &Arc<ManualTime>) -> RateLimiter {
+        RateLimiter::with_time_source(RateLimit { per_second, burst }, time.source())
+    }
 
     fn limiter(per_second: f64, burst: f64, time: &Arc<ManualTime>) -> RateLimiter {
         RateLimiter::with_time_source(
