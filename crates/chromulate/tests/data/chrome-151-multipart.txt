@@ -1,0 +1,139 @@
+Captured multipart/form-data as Chrome sends it
+===============================================
+
+Provenance
+----------
+
+  Browser      Chrome 151.0.0.0 (stable)
+  User agent   Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36
+               (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+  Platform     macOS (Darwin 25.5.0, arm64)
+  Captured     2026-08-04
+  Method       A loopback HTTP server served a page with an enctype="multipart/form-data"
+               form and wrote the raw request body to disk. A second capture read the body
+               Chrome builds for `new Request(url, {method: 'POST', body: formData})` via
+               `Request.arrayBuffer()`, which is the same encoder without a server in the
+               way. Forty boundaries were sampled from `Request.headers.get('content-type')`.
+
+This file is the evidence behind every "Chrome does X" statement in
+`crates/chromulate/src/multipart.rs`. It is documentation, not a golden test: the
+assertions live in `crates/chromulate/tests/multipart.rs`, which checks Chromulate's
+own output against the shapes recorded here.
+
+CR and LF are written as \r and \n below; every other byte is literal.
+
+
+1. Boundary
+-----------
+
+Header (the boundary is not quoted):
+
+  Content-Type: multipart/form-data; boundary=----WebKitFormBoundaryqU594gTmltsghqDg
+
+Forty consecutive draws, one per line, from a single browser session:
+
+  7UVgKVOOgHA9XelM  AxecpZutS9AQ2XiE  I5vCK0QTwAUJCCJb  DTPeT8rfcsIWDS0r
+  TEAmWie30oTBMUOw  Uy58H5uqw5YggAZ8  E9C7AcgDjHM8SUUn  BB8kFWPfuJFrmUal
+  WPhlbJilkI911wGQ  ypYAMlUZZjdh3xLa  39Byw5PEXoGq8KIh  RFA0etI44AgG2xpb
+  hYPoM2AwDAWCe9sL  6ODLiafFOBwGdMxB  ioIPreW9XAFjKg75  6ne7DZJ3yCKgAAWd
+  a1rSGPIjibQVvEBN  MqFPkp1g3jG6lxGk  YhxvOzwknKAN7f1L  iJteP2HdvfkPolCF
+  WLQm0UZgeizTs03l  dkxtWa0jbPR0EFlk  Jf4WZWgs55XP049q  QdP3Fha2fpZOlY04
+  NwqhH903kLYERZAT  PvXb5KA7zI8VkMxu  eCDp40a5nGBzZado  BcPmrzViy1xGjjW6
+  iFvDbeDAr8idYgnp  TaLAFEfU8MAjTYbg  tR1QzCAza4PO6EI3  dbszpqdvrixWB5Ul
+  H4f9xYqSY740FH6G  2p3A1MipIThAe0vL  86WRV4c7BXBVxaBn  A1jzTs7hrJPpTQPu
+  zeUSzCMijAeog5Dn  ApLMabogxWfOVP90  Rvha9lZTamw2vBX6  vCDDAXWbB9qCip1O
+
+Measured over those 640 characters: every draw is exactly 16 characters long, all 40
+draws are distinct, and the set of characters used is exactly the 62 symbols of
+[0-9A-Za-z] with none missing and none outside it. The fixed prefix is the 22-character
+literal "----WebKitFormBoundary", so the full boundary is 38 characters.
+
+What is NOT established here: that the draw is uniform, or that it comes from a CSPRNG.
+Forty samples cannot show either. Only the length, the alphabet and the prefix are
+observed facts.
+
+
+2. Escaping in Content-Disposition
+----------------------------------
+
+The form was submitted with a text field literally named
+
+  he said "hi"; filename="evil.txt"
+
+a second text field named
+
+  crlf\r\nX-Injected: yes
+
+and a file whose name on disk was
+
+  rép"ort—ünïcode.txt
+
+Chrome sent:
+
+  Content-Disposition: form-data; name="he said %22hi%22; filename=%22evil.txt%22"
+  Content-Disposition: form-data; name="crlf%0D%0AX-Injected: yes"
+  Content-Disposition: form-data; name="upload"; filename="r<C3><A9>p%22ort<E2><80><94><C3><BC>n<C3><AF>code.txt"
+
+So exactly three bytes are escaped, in both the name and the filename:
+
+  "   ->  %22
+  CR  ->  %0D
+  LF  ->  %0A
+
+and nothing else is. The semicolon, the colon, the space and the equals sign are all
+passed through literally; the injected "; filename=" and "X-Injected:" survive as text
+inside the quoted string and change nothing structurally. Non-ASCII is sent as raw UTF-8
+(C3 A9 is é, E2 80 94 is an em dash) — there is no percent-encoding of it, and no
+RFC 5987 `filename*` parameter anywhere in the output.
+
+
+3. Per-part Content-Type
+------------------------
+
+  fd.append('text',            'plain value');
+  fd.append('unknown',         new File(['abc'], 'noextension'));
+  fd.append('typed',           new File(['abc'], 'a.png', {type: 'image/png'}));
+  fd.append('empty_name_file', new File(['abc'], ''));
+
+produced
+
+  ------WebKitFormBoundaryjZSdxW7YSgEKcLv1\r\n
+  Content-Disposition: form-data; name="text"\r\n
+  \r\n
+  plain value\r\n
+  ------WebKitFormBoundaryjZSdxW7YSgEKcLv1\r\n
+  Content-Disposition: form-data; name="unknown"; filename="noextension"\r\n
+  Content-Type: application/octet-stream\r\n
+  \r\n
+  abc\r\n
+  ------WebKitFormBoundaryjZSdxW7YSgEKcLv1\r\n
+  Content-Disposition: form-data; name="typed"; filename="a.png"\r\n
+  Content-Type: image/png\r\n
+  \r\n
+  abc\r\n
+  ------WebKitFormBoundaryjZSdxW7YSgEKcLv1\r\n
+  Content-Disposition: form-data; name="empty_name_file"; filename=""\r\n
+  Content-Type: application/octet-stream\r\n
+  \r\n
+  abc\r\n
+  ------WebKitFormBoundaryjZSdxW7YSgEKcLv1--\r\n
+
+A part without a filename carries no Content-Type. A part with a filename always carries
+one, falling back to application/octet-stream when the browser could not determine a type
+— including when the filename is empty.
+
+
+4. Framing
+----------
+
+  --<boundary>\r\n  headers, each \r\n-terminated  \r\n  content  \r\n
+  ... repeated, in the order the fields appear ...
+  --<boundary>--\r\n
+
+The first delimiter has no leading CRLF; every later one is preceded by the CRLF that
+terminates the previous part's content. The closing delimiter is the boundary with a
+trailing "--", and it is followed by CRLF. Nothing is emitted after it — no epilogue.
+
+Part order is the order the fields were added; the file part is not hoisted or reordered.
+Content bytes are verbatim: the uploaded file ended in LF and that LF appears in the body
+immediately before the part-terminating CRLF, giving "...bytes\n\r\n--".

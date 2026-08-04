@@ -32,9 +32,13 @@ http-body.workspace = true
 tokio = { workspace = true, features = ["time"] }
 url.workspace = true
 
+rand = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 serde_urlencoded = { workspace = true, optional = true }
+# `io` for `ReaderStream`, which is the whole reason this is here: a file part
+# has to reach the socket without the file reaching memory.
+tokio-util = { workspace = true, optional = true, features = ["io"] }
 
 [dev-dependencies]
 flate2.workspace = true
@@ -51,6 +55,9 @@ default = ["json"]
 json = ["dep:serde", "dep:serde_json"]
 # `RequestBuilder::form`.
 form = ["dep:serde", "dep:serde_urlencoded"]
+# `RequestBuilder::multipart` and the `multipart` module. `tokio/fs` is pulled
+# in only here, for `Part::file`.
+multipart = ["dep:rand", "dep:tokio-util", "tokio/fs"]
 # Tests that reach the public internet. Off by default so `cargo test
 # --workspace` stays hermetic.
 network-tests = []
