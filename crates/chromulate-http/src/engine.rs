@@ -221,6 +221,7 @@ impl EngineBuilder {
             inner: Arc::new(EngineInner {
                 headers: HeaderEngine::new(Arc::clone(&profile)),
                 accept_ch: RwLock::new(AcceptChStore::new()),
+                accept_ch_used: std::sync::atomic::AtomicBool::new(false),
                 decompression: self.decompression.unwrap_or_default(),
                 cookies: self.cookies,
                 middleware: self.middleware,
@@ -250,6 +251,15 @@ struct EngineInner {
     pool: Pool,
     headers: HeaderEngine,
     accept_ch: RwLock<AcceptChStore>,
+    /// Whether any response has ever recorded an `Accept-CH` grant.
+    ///
+    /// Most deployments never see one, and `RwLock::read` is still an atomic
+    /// read-modify-write on a shared cache line — coherence traffic on every
+    /// request that scales with worker count. This flag is a plain read; the
+    /// lock is only touched once a grant exists. It never goes back to false:
+    /// a revoked grant leaves an empty store behind the lock, which reads
+    /// correctly, just no longer lock-free.
+    accept_ch_used: std::sync::atomic::AtomicBool,
     cookies: Option<Arc<dyn CookieStore>>,
     decompression: ExpansionGuard,
     middleware: Vec<Arc<dyn Middleware>>,
@@ -478,12 +488,24 @@ impl Engine {
             request.headers_mut().insert(http::header::COOKIE, value);
         }
 
-        let store = self
+        if self
             .inner
-            .accept_ch
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.inner.headers.apply(request, url, options, &store)
+            .accept_ch_used
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            let store = self
+                .inner
+                .accept_ch
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            self.inner.headers.apply(request, url, options, &store)
+        } else {
+            // No grant was ever recorded, so an empty store answers every
+            // origin identically to the locked one — without the lock.
+            self.inner
+                .headers
+                .apply(request, url, options, &AcceptChStore::new())
+        }
     }
 
     /// Records everything a response teaches the client about the origin.
@@ -502,6 +524,10 @@ impl Engine {
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .record(origin, value);
+            // After the write, so a reader that sees the flag finds the grant.
+            self.inner
+                .accept_ch_used
+                .store(true, std::sync::atomic::Ordering::Release);
         }
     }
 
