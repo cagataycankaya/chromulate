@@ -20,9 +20,12 @@ chromulate-cookie = { path = "../crates/chromulate-cookie" }
 chromulate-compression = { path = "../crates/chromulate-compression" }
 chromulate-proxy = { path = "../crates/chromulate-proxy" }
 chromulate-fingerprint = { path = "../crates/chromulate-fingerprint" }
+chromulate-header = { path = "../crates/chromulate-header" }
+chromulate-profile = { path = "../crates/chromulate-profile" }
 
 bytes = "1.12"
 http = "1.5"
+serde_json = "1.0"
 tokio = { version = "1.53", features = ["rt", "time"] }
 url = "2.5"
 
@@ -36,6 +39,13 @@ bench = false
 [[bin]]
 name = "cookie_expires_date"
 path = "fuzz_targets/cookie_expires_date.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cookie_snapshot_import"
+path = "fuzz_targets/cookie_snapshot_import.rs"
 test = false
 doc = false
 bench = false
@@ -64,6 +74,13 @@ bench = false
 [[bin]]
 name = "fingerprint_capture"
 path = "fuzz_targets/fingerprint_capture.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "header_engine_apply"
+path = "fuzz_targets/header_engine_apply.rs"
 test = false
 doc = false
 bench = false
