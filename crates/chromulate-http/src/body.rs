@@ -333,6 +333,16 @@ impl Stop {
     /// The marker is matched against the bytes the caller would have received,
     /// so a `Content-Encoding: gzip` response is searched after it is decoded,
     /// not on the wire.
+    ///
+    /// A marker past the byte budget set by [`Stop::within`] does not count as
+    /// found: the budget is what the caller asked to be looked at, and a match
+    /// outside it would make the answer depend on where the network split the
+    /// body.
+    ///
+    /// An empty marker matches at the front of the first chunk, which stops the
+    /// read having kept nothing. A body that never produces a chunk at all is
+    /// never scanned, so it reports [`StopReason::EndOfBody`] — the condition
+    /// only ever sees bytes that arrived.
     #[must_use]
     pub fn marker(marker: impl Into<Bytes>) -> Self {
         Self::with(Some(Condition::Marker(marker.into())))
@@ -416,7 +426,8 @@ impl Stop {
             .unwrap_or(0);
         let mut buf = BytesMut::with_capacity(hint);
         // Once the condition matches this is the length the prefix must reach
-        // before the read stops: the match point plus the trailing window.
+        // before the read stops: the match point plus the trailing window,
+        // never past the budget.
         let mut target: Option<u64> = None;
 
         loop {
@@ -432,14 +443,11 @@ impl Stop {
             if buf.len() as u64 >= budget {
                 return Ok(Prefix {
                     bytes: cut(buf, budget),
-                    // A match that has already happened outranks the budget:
-                    // the caller asked whether the marker is there, and it is,
-                    // however short the trailing window came out.
-                    reason: if target.is_some() {
-                        StopReason::Matched
-                    } else {
-                        StopReason::Budget
-                    },
+                    // A match inside the budget has already set a target, and
+                    // that target is itself no larger than the budget, so the
+                    // branch above returned it. Reaching here means nothing
+                    // matched within the budget.
+                    reason: StopReason::Budget,
                     complete: false,
                 });
             }
@@ -461,8 +469,17 @@ impl Stop {
 
             if target.is_none()
                 && let Some(point) = self.match_point(&buf, previous)
+                // A chunk arrives whole, so the scan can see a match the budget
+                // said to stop short of. The caller asked about the first
+                // `budget` bytes and this one is not in them: reporting it
+                // would make the answer depend on where the network split the
+                // body, and `matched()` true of bytes the marker is not in.
+                && point as u64 <= budget
             {
-                target = Some((point as u64).saturating_add(self.extra));
+                // Clamped, because the trailing window is not a licence to read
+                // past the budget either — `Response::bytes_until` passes the
+                // client's `max_response_size` through here.
+                target = Some((point as u64).saturating_add(self.extra).min(budget));
             }
         }
     }
@@ -616,6 +633,121 @@ mod tests {
         }
     }
 
+    /// Two chunks is the case the overlap rescan was written for; three is the
+    /// case that catches an overlap measured against the last chunk rather than
+    /// against everything already buffered.
+    #[tokio::test]
+    async fn a_marker_spread_over_three_chunks_is_still_found() {
+        let prefix = Stop::marker("application/ld+json")
+            .read(chunked(&["<head>applicat", "ion/", "ld+json{}"]))
+            .await
+            .expect("the body must read");
+
+        assert_eq!(prefix.reason(), StopReason::Matched);
+        assert_eq!(prefix.bytes(), "<head>application/ld+json");
+    }
+
+    /// A marker whose first byte repeats inside itself, split at every
+    /// boundary. The naive scan restarts past the whole failed candidate and
+    /// misses the match that begins inside it.
+    #[tokio::test]
+    async fn a_marker_that_repeats_its_own_first_byte_is_found_at_every_boundary() {
+        let page = "xaaab";
+        for split in 0..=page.len() {
+            let (head, tail) = page.split_at(split);
+            let chunks: Vec<Result<Bytes>> = vec![
+                Ok(Bytes::copy_from_slice(head.as_bytes())),
+                Ok(Bytes::copy_from_slice(tail.as_bytes())),
+            ];
+            let prefix = Stop::marker("aab")
+                .read(Body::stream(stream::iter(chunks), None))
+                .await
+                .expect("the body must read");
+
+            assert_eq!(
+                prefix.reason(),
+                StopReason::Matched,
+                "a boundary at byte {split} hid a marker that repeats its first byte"
+            );
+            assert_eq!(prefix.bytes(), "xaaab", "boundary at byte {split}");
+        }
+    }
+
+    /// The first chunk is shorter than the marker, so a scan that gives up when
+    /// the buffer is too short to hold the needle must not give up for good.
+    #[tokio::test]
+    async fn a_marker_longer_than_the_first_chunk_is_still_found() {
+        let prefix = Stop::marker("application/ld+json")
+            .read(chunked(&["<", "h", "ead>application/ld+json tail"]))
+            .await
+            .expect("the body must read");
+
+        assert_eq!(prefix.reason(), StopReason::Matched);
+        assert_eq!(prefix.bytes(), "<head>application/ld+json");
+    }
+
+    #[tokio::test]
+    async fn a_marker_at_the_very_first_byte_is_found() {
+        let prefix = Stop::marker("ld+json")
+            .read(chunked(&["ld+json{\"price\":42}"]))
+            .await
+            .expect("the body must read");
+
+        assert_eq!(prefix.reason(), StopReason::Matched);
+        assert_eq!(prefix.bytes(), "ld+json");
+    }
+
+    /// The marker ends on the body's last byte, so the window is empty and the
+    /// stream is never polled again.
+    #[tokio::test]
+    async fn a_marker_in_the_last_two_bytes_is_found() {
+        let prefix = Stop::marker("ab")
+            .read(chunked(&["xxxx", "xxab"]))
+            .await
+            .expect("the body must read");
+
+        assert_eq!(prefix.reason(), StopReason::Matched);
+        assert_eq!(prefix.bytes(), "xxxxxxab");
+        assert!(
+            !prefix.is_complete(),
+            "the stream was never polled to its end, so the connection cannot \
+             be trusted however few bytes were left"
+        );
+    }
+
+    /// An empty marker matches at the front of the first chunk, so the read
+    /// stops having consumed nothing.
+    ///
+    /// The condition is only ever evaluated against bytes that arrived, which
+    /// is why the empty body below reports `EndOfBody` instead: there was never
+    /// a chunk to scan. Both are asserted together because the difference is
+    /// the whole of this edge, and `Stop::marker` says so.
+    #[tokio::test]
+    async fn an_empty_marker_matches_at_the_front_of_the_first_chunk() {
+        let prefix = Stop::marker("")
+            .read(chunked(&["abc", "def"]))
+            .await
+            .expect("the body must read");
+
+        assert_eq!(prefix.reason(), StopReason::Matched);
+        assert!(prefix.bytes().is_empty());
+        assert!(!prefix.is_complete());
+
+        let prefix = Stop::marker("")
+            .read(Body::empty())
+            .await
+            .expect("an empty body must read");
+
+        assert_eq!(
+            prefix.reason(),
+            StopReason::EndOfBody,
+            "a body that never produced a chunk was never scanned, and the read \
+             is complete rather than stopped"
+        );
+        assert!(prefix.bytes().is_empty());
+        assert!(prefix.is_complete());
+    }
+
     #[tokio::test]
     async fn a_trailing_window_is_taken_after_the_marker_and_cut_to_length() {
         let body = chunked(&["aaa", "MARKER", "0123456789", "never read"]);
@@ -690,6 +822,145 @@ mod tests {
             StopReason::Matched,
             "the marker was found; only the window was cut short"
         );
+    }
+
+    /// The budget is a ceiling on what comes back, and where the socket
+    /// happened to split the body may not change the answer.
+    ///
+    /// One chunk or two, the marker starts at byte 7 and the budget stops the
+    /// read at byte 8, so it is not in what was read and the caller must be
+    /// told so. Scanning whatever arrived and only then applying the budget
+    /// makes the same body report `Matched` or `Budget` depending on the
+    /// network.
+    #[tokio::test]
+    async fn a_marker_past_the_budget_is_not_a_match_however_the_chunks_fall() {
+        let page = "0123456MARKER";
+        for split in 0..=page.len() {
+            let (head, tail) = page.split_at(split);
+            let chunks: Vec<Result<Bytes>> = vec![
+                Ok(Bytes::copy_from_slice(head.as_bytes())),
+                Ok(Bytes::copy_from_slice(tail.as_bytes())),
+            ];
+            let prefix = Stop::marker("MARKER")
+                .within(8)
+                .read(Body::stream(stream::iter(chunks), None))
+                .await
+                .expect("the body must read");
+
+            assert_eq!(prefix.bytes(), "0123456M", "boundary at byte {split}");
+            assert_eq!(
+                prefix.reason(),
+                StopReason::Budget,
+                "the marker is past the budget, so a boundary at byte {split} \
+                 must not turn it into a match"
+            );
+        }
+    }
+
+    /// `matched()` is the question a scraper asks, so it may never be true of
+    /// bytes the marker is not in.
+    #[tokio::test]
+    async fn a_budget_that_cuts_the_marker_in_half_is_not_a_match() {
+        let prefix = Stop::marker("MARKER")
+            .plus(1024)
+            .within(6)
+            .read(chunked(&["aaMARKER0123"]))
+            .await
+            .expect("the body must read");
+
+        assert_eq!(prefix.bytes(), "aaMARK");
+        assert!(
+            !prefix.matched(),
+            "the marker is not in what came back, and a caller that parses on \
+             `matched` would parse half a marker"
+        );
+        assert_eq!(prefix.reason(), StopReason::Budget);
+    }
+
+    /// The trailing window is bounded by the budget, whether or not it all
+    /// arrived in one chunk. `within` is what a caller compares against its own
+    /// ceiling — `Response::bytes_until` passes `max_response_size` through it —
+    /// so a prefix longer than the budget is a limit that did not hold.
+    #[tokio::test]
+    async fn a_trailing_window_never_runs_past_the_budget() {
+        let mut page = b"aaMARKER".to_vec();
+        page.resize(2048, b'x');
+        let chunks: Vec<Result<Bytes>> = vec![Ok(Bytes::from(page))];
+
+        let prefix = Stop::marker("MARKER")
+            .plus(1024)
+            .within(12)
+            .read(Body::stream(stream::iter(chunks), None))
+            .await
+            .expect("the body must read");
+
+        assert_eq!(prefix.bytes(), "aaMARKERxxxx");
+        assert_eq!(prefix.reason(), StopReason::Matched);
+    }
+
+    /// The property both of the above are instances of, over every budget and
+    /// every chunk boundary this fixture can produce.
+    #[tokio::test]
+    async fn nothing_read_is_ever_longer_than_the_budget() {
+        let page = "aaMARKERbbbbbbbbbb";
+        for budget in 0..=20u64 {
+            for extra in [0u64, 1, 4, 1024] {
+                for split in 0..=page.len() {
+                    let (head, tail) = page.split_at(split);
+                    let chunks: Vec<Result<Bytes>> = vec![
+                        Ok(Bytes::copy_from_slice(head.as_bytes())),
+                        Ok(Bytes::copy_from_slice(tail.as_bytes())),
+                    ];
+                    let prefix = Stop::marker("MARKER")
+                        .plus(extra)
+                        .within(budget)
+                        .read(Body::stream(stream::iter(chunks), None))
+                        .await
+                        .expect("the body must read");
+
+                    assert!(
+                        prefix.bytes().len() as u64 <= budget,
+                        "budget {budget}, plus {extra}, boundary at {split} \
+                         returned {} bytes",
+                        prefix.bytes().len()
+                    );
+                }
+            }
+        }
+    }
+
+    /// The same body, budget and marker must give the same answer whoever split
+    /// the chunks — the reason as well as the bytes.
+    #[tokio::test]
+    async fn the_outcome_does_not_depend_on_where_the_chunks_fall() {
+        let page = "aaMARKERbbbbbbbbbb";
+        for budget in 0..=20u64 {
+            for extra in [0u64, 1, 4, 1024] {
+                let mut outcomes = Vec::new();
+                for split in 0..=page.len() {
+                    let (head, tail) = page.split_at(split);
+                    let chunks: Vec<Result<Bytes>> = vec![
+                        Ok(Bytes::copy_from_slice(head.as_bytes())),
+                        Ok(Bytes::copy_from_slice(tail.as_bytes())),
+                    ];
+                    let prefix = Stop::marker("MARKER")
+                        .plus(extra)
+                        .within(budget)
+                        .read(Body::stream(stream::iter(chunks), None))
+                        .await
+                        .expect("the body must read");
+                    outcomes.push((prefix.bytes().clone(), prefix.reason()));
+                }
+                let first = &outcomes[0];
+                for (split, outcome) in outcomes.iter().enumerate() {
+                    assert_eq!(
+                        outcome, first,
+                        "budget {budget}, plus {extra}: a boundary at byte \
+                         {split} changed the answer"
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]
