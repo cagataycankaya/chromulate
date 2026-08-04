@@ -735,14 +735,20 @@ impl Engine {
         url: &Url,
         options: &RequestOptions,
     ) -> Result<Vec<(HeaderName, HeaderValue)>> {
+        // A `Cookie` header already on the request is the caller's own, and
+        // theirs wins: the jar is not consulted and the header is left where it
+        // is, so it survives into the next hop the way any other header the
+        // caller set does.
+        let mut from_jar = false;
         if let Some(cookies) = &self.inner.cookies
             && !request.headers().contains_key(http::header::COOKIE)
             && let Some(value) = cookies.cookies_for(url, &options.cookie_context())
         {
             request.headers_mut().insert(http::header::COOKIE, value);
+            from_jar = true;
         }
 
-        if self
+        let ordered = if self
             .inner
             .accept_ch_used
             .load(std::sync::atomic::Ordering::Acquire)
@@ -759,10 +765,29 @@ impl Engine {
             self.inner
                 .headers
                 .apply(request, url, options, &AcceptChStore::new())
+        };
+
+        // The engine's own answer is taken straight back off, which is what
+        // distinguishes it from the caller's. `ordered` already carries its own
+        // copy and is what goes on the wire, so this hop is unaffected; what it
+        // changes is the next one.
+        //
+        // Leaving it on the request made a same-origin redirect send the jar's
+        // answer from *before* the redirect, because `rebuild` keeps credential
+        // headers on a same-origin hop and the check above then found one and
+        // skipped the jar. A `Set-Cookie` on the redirect itself was therefore
+        // never sent — a login that redirects after authenticating lost its
+        // session cookie — and a cookie the redirect deleted was replayed.
+        // Neither is visible from an empty jar, which is what every redirect
+        // test started from.
+        if from_jar {
+            request.headers_mut().remove(http::header::COOKIE);
         }
+        ordered
     }
 
-    /// Exclusive access to the HSTS store.
+    /// Runs `edit` against the HSTS store, with exclusive access, and returns
+    /// what it returned.
     ///
     /// Policies are normally learned from responses, but a caller may want to
     /// seed one — a private origin that is HTTPS-only but has never been
@@ -770,13 +795,41 @@ impl Engine {
     /// empty, and the first request is the one that would go out in plaintext.
     /// It is also how a test establishes a policy without a TLS origin.
     ///
-    /// The returned guard holds a lock that the request path takes, so drop it
-    /// before issuing requests.
-    pub fn hsts(&self) -> std::sync::RwLockWriteGuard<'_, crate::hsts::HstsStore> {
-        self.inner
+    /// ```no_run
+    /// # use std::time::SystemTime;
+    /// # use std::sync::Arc;
+    /// # use chromulate_http::{Engine, EngineConfig};
+    /// # use chromulate_profile::Profile;
+    /// let engine = Engine::builder(EngineConfig::new(Arc::new(Profile::chrome_stable())))
+    ///     .build()?;
+    /// engine.with_hsts(|store| {
+    ///     store.record(
+    ///         "internal.example",
+    ///         "max-age=31536000; includeSubDomains",
+    ///         true,
+    ///         SystemTime::now(),
+    ///     );
+    /// });
+    /// # Ok::<(), chromulate_core::Error>(())
+    /// ```
+    ///
+    /// This took the shape of a closure rather than a `hsts()` returning the
+    /// guard, which is what it used to be. The lock is one the request path
+    /// takes on every request, and a returned guard is a lock a caller can hold
+    /// across an `.await` — at which point the worker stops answering so
+    /// completely that a `tokio::time::timeout` around the request never fires,
+    /// because the future it wraps is never polled again. A documented "drop it
+    /// before issuing requests" is not a fix for that: it is reachable from
+    /// safe code by writing the obvious thing. `edit` is synchronous and the
+    /// borrow does not escape it, so no `.await` can appear between taking the
+    /// lock and releasing it.
+    pub fn with_hsts<R>(&self, edit: impl FnOnce(&mut crate::hsts::HstsStore) -> R) -> R {
+        let mut store = self
+            .inner
             .hsts
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        edit(&mut store)
     }
 
     /// Rewrites `url` to HTTPS when a recorded HSTS policy demands it.
