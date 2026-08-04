@@ -67,10 +67,16 @@ against the same revision should get a byte-identical file.
 ## Refreshing it
 
 Re-run the two commands, then update: the revision, date, sizes, digests and counts in
-this file; `ENTRY_COUNT` and `BLOB.len()` in
+this file; `ENTRY_COUNT`, `BLOB.len()` and the two `include_subdomains` counts in
 `crates/chromulate-http/src/hsts/preload.rs`'s
 `the_blob_is_the_captured_list_and_not_a_sample`; and `SOURCE_REVISION` and `FETCHED_AT`
 in the same module. The test exists so that a refresh cannot be half-done quietly.
+
+The whole of this file has been re-derived once since it was written, and the two
+commands above are all it took: fetching the recorded revision gave back the recorded
+source size and SHA-256, and re-running `generate.py` over it produced a file
+byte-identical to the committed `preload.bin`. If a later reader repeats it and does not
+get that, the document is wrong and the blob is the thing to distrust.
 
 `crates/chromulate-http/tests/hsts_preload.rs` names specific hosts —
 `gmail.com` (preloaded without `includeSubDomains`), `app` (a whole TLD, with them),

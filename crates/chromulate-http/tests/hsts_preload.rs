@@ -180,6 +180,104 @@ fn a_preloaded_host_stays_upgraded_after_its_dynamic_policy_expires() {
     assert!(store.upgrade(&mut target, now() + Duration::from_secs(1_000)));
 }
 
+#[test]
+fn a_preloaded_host_written_with_its_root_label_is_still_upgraded() {
+    // `url` keeps the root label a fully qualified name may be written with, so
+    // `http://gmail.com./` arrives here as the host `gmail.com.` — a name DNS
+    // resolves identically to `gmail.com`. Chromium canonicalises the name to
+    // wire form before it consults either half of its transport security state,
+    // which drops the empty root label; without that the whole preload list is
+    // one keystroke away from being bypassed, and the plaintext request is
+    // already gone by the time anything could correct it.
+    let store = HstsStore::new();
+
+    let mut exact = url("http://gmail.com./");
+    assert!(
+        store.upgrade(&mut exact, now()),
+        "a trailing root label must not take a host off the preload list"
+    );
+    assert_eq!(exact.as_str(), "https://gmail.com./");
+
+    let mut through_a_tld = url("http://example.app./");
+    assert!(
+        store.upgrade(&mut through_a_tld, now()),
+        "the ancestor walk must see `app` through the root label too"
+    );
+
+    // The same canonicalisation must not invent a match: `gmail.com` carries no
+    // `includeSubDomains`, with or without the root label written.
+    let mut subdomain = url("http://mail.gmail.com./");
+    assert!(
+        !store.upgrade(&mut subdomain, now()),
+        "canonicalising the root label must not widen what an entry covers"
+    );
+}
+
+#[test]
+fn a_dynamic_policy_is_the_same_policy_whether_or_not_the_root_label_is_written() {
+    // The other half of the same canonicalisation. A store that keys
+    // `example.com` and `example.com.` separately protects neither reliably: the
+    // policy is learned under whichever form the first response happened to use
+    // and is missed under the other.
+    let mut learned_bare = HstsStore::new();
+    learned_bare.record("example.com", "max-age=100", true, now());
+    assert!(
+        learned_bare.applies_to("example.com.", now()),
+        "a policy learned for example.com must cover example.com."
+    );
+
+    let mut learned_rooted = HstsStore::new();
+    learned_rooted.record("example.com.", "max-age=100", true, now());
+    assert!(
+        learned_rooted.applies_to("example.com", now()),
+        "a policy learned for example.com. must cover example.com"
+    );
+    assert_eq!(
+        learned_rooted.len(),
+        1,
+        "the two spellings must be one entry, not two"
+    );
+}
+
+#[test]
+fn a_host_with_an_empty_label_is_not_upgraded_by_an_ancestor() {
+    // `a..app` is not a name DNS can resolve and Chromium's `CanonicalizeHost`
+    // rejects it outright, but the ancestor walk drops leading labels and so
+    // reaches the `app` entry through the empty one. That is a match invented
+    // out of a malformed name — the false-positive direction, where a host that
+    // never asked for HTTPS is forced onto it.
+    let store = HstsStore::new();
+    for host in ["a..app", ".app", "..app", "a..gmail.com"] {
+        let mut target = url(&format!("http://{host}/"));
+        assert!(
+            !store.upgrade(&mut target, now()),
+            "{host} has an empty label and is not a name any entry covers"
+        );
+    }
+
+    // And the well-formed neighbours it must not have taken down with it.
+    let mut good = url("http://a.example.app/");
+    assert!(store.upgrade(&mut good, now()));
+}
+
+#[test]
+fn an_internationalised_host_is_matched_in_the_punycode_the_list_holds() {
+    // The blob holds 271 `xn--` names because Chromium's source file does, and
+    // `Url` hands the host over already encoded. This is the test that says the
+    // two agree rather than assuming it: `アマゾン` is the entry
+    // `xn--cckwcxetd`, a whole TLD with includeSubDomains.
+    assert_eq!(preload::lookup("xn--cckwcxetd"), Some(true));
+
+    let store = HstsStore::new();
+    let mut target = url("http://shop.アマゾン/");
+    assert_eq!(
+        target.host_str(),
+        Some("shop.xn--cckwcxetd"),
+        "url encodes the name before the store ever sees it"
+    );
+    assert!(store.upgrade(&mut target, now()));
+}
+
 /// What a preload lookup costs, measured rather than asserted.
 ///
 /// Ignored because it is a measurement and not a guard: a timing threshold on a
