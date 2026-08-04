@@ -53,8 +53,16 @@ an Apple M1 Pro. See [`benches/README.md`](benches/README.md) to reproduce.
   64→512 margin.
 - Per-connection fingerprint work is negligible: generating a fresh extension permutation
   is 183 ns, JA4 3.2 µs, the Akamai string 453 ns.
-- The cookie jar is flat, not linear: `store` ≈545 ns and `cookies_for` ≈1.14 µs across jars
-  of 10, 1,000, and 10,000 cookies.
+- Cookie jar lookup is flat, not linear: `cookies_for` ≈1.14 µs and `store` replacing an
+  existing cookie ≈530 ns, both unchanged across jars of 10, 1,000, and 10,000 cookies. Those
+  figures are measured with the capacity limits raised so nothing is evicted.
+- **The exception, and it is the common case for a long-running crawler:** once a jar reaches
+  its default 3,000-cookie limit, a `store` that inserts a *new* cookie costs **21.6 µs**,
+  against 536 ns for one that replaces an existing cookie in the same jar. The difference is
+  eviction — picking the globally least-recently-used cookie means examining all of them.
+  Linear in the cap, not in the number of requests, and a deliberate limit rather than a
+  defect: removing it needs either a purge margin or a global LRU index, and both change what
+  `JarLimits::total` means.
 
 ### Measured — fidelity
 

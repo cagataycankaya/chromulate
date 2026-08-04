@@ -138,10 +138,36 @@ Criterion, fixed sample sizes so runs are comparable. Results land in
 criterion compares against the previous run of the same id automatically, which
 is what makes these useful for checking that a change did what it claimed.
 
-The cookie suite is the one to read carefully. `cookies_for/single_domain` grows
-with the jar because RFC 6265 §5.4 requires the `Cookie` header be sorted, so
-the matching set genuinely has to be walked. `cookies_for/spread` holds the
-queried bucket at ten cookies while the *total* grows, so growth in those rows
-would mean lookup costs something per cookie in the whole jar — which for a
-long-running crawl accumulating cookies across thousands of sites is the
-difference between a flat cost and a rising one.
+The cookie suite is the one to read carefully, and the one whose fixtures can
+lie.
+
+`cookies_for/single_domain` grows with the jar because RFC 6265 §5.4 requires
+the `Cookie` header be sorted, so the matching set genuinely has to be walked.
+`cookies_for/spread` holds the queried bucket at ten cookies while the *total*
+grows, so growth in those rows would mean lookup costs something per cookie in
+the whole jar — which for a long-running crawl accumulating cookies across
+thousands of sites is the difference between a flat cost and a rising one.
+
+`store/at_default_cap/insert` against `store/at_default_cap/replace` is the pair
+to watch. The jar enforces `JarLimits::total` by evicting the global
+least-recently-used cookie, which costs a pass over the jar, so inserting into a
+*full* jar is far more expensive than inserting into one with room. A
+long-running crawler reaches the cap and then stays there, so the full-jar row
+is the one that describes production.
+
+**Two assertions guard fixtures that would otherwise fail silently**, and they
+are the reason to trust these rows rather than merely read them:
+
+- The jar enforces its limits by **evicting, not refusing**. A "10,000-cookie"
+  fixture under default limits is really 3,000 cookies, or 180 for a single
+  domain, and the row would carry a label the jar never held. `fill` asserts the
+  held count matches the label.
+- A `CookieContext` with `is_top_level_navigation: false` and no initiator makes
+  ordinary `SameSite=Lax` cookies ineligible, so `cookies_for` returns `None` in
+  a few hundred nanoseconds — a fast, flat, entirely meaningless line.
+  `check_lookup` asserts a header with the expected cookie count comes back
+  before anything is timed.
+
+If either assertion fires the fixture is wrong and no number from that run means
+anything. That is deliberate: a benchmark that quietly measures an early return
+is worse than one that crashes.
