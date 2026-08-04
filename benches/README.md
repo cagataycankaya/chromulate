@@ -248,11 +248,11 @@ the whole jar — which for a long-running crawl accumulating cookies across
 thousands of sites is the difference between a flat cost and a rising one.
 
 `store/at_default_cap/insert` against `store/at_default_cap/replace` is the pair
-to watch. The jar enforces `JarLimits::total` by evicting the global
-least-recently-used cookie, which costs a pass over the jar, so inserting into a
-*full* jar is far more expensive than inserting into one with room. A
-long-running crawler reaches the cap and then stays there, so the full-jar row
-is the one that describes production.
+to watch. The jar enforces `JarLimits::total` by purging a batch (a tenth of the
+cap) of least-recently-used cookies, so the full-jar scan is amortised over the
+next batch of stores rather than paid per store. The full-jar insert row is
+still the one that describes production, and it should sit within a few times
+the replace row — a return to a ~20 µs figure means the batching regressed.
 
 **Two assertions guard fixtures that would otherwise fail silently**, and they
 are the reason to trust these rows rather than merely read them:

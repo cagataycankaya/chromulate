@@ -51,8 +51,9 @@ there is already an authoritative answer to what it is trying to produce.
 
 **Status: Done.**
 
-The Cargo workspace exists with twelve members (`Cargo.toml:3-16`), shared dependency
-versions, and workspace lints including `unsafe_code = "forbid"` (`Cargo.toml:70-77`).
+The Cargo workspace exists with thirteen members (`Cargo.toml:3-17`) — the twelve published
+crates plus `chromulate-bench`, which is `publish = false` — shared dependency versions, and
+workspace lints including `unsafe_code = "forbid"` (`Cargo.toml:87-90`).
 
 `chromulate-core` is written: the error hierarchy
 (`crates/chromulate-core/src/error.rs`), the streaming body
@@ -63,20 +64,22 @@ versions, and workspace lints including `unsafe_code = "forbid"` (`Cargo.toml:70
 (`crates/chromulate-core/src/lib.rs:3-6`).
 
 **Definition of done, and how it was met.** The crate builds, has no I/O dependency, and
-carries tests beside the code. Counting the test functions in the five modules gives 24
-(`error.rs` 4, `body.rs` 6, `request.rs` 4, `traits.rs` 3, `uri.rs` 7) plus the doc example
-at `lib.rs:8-16`, which matches the 25 the shared API contract records as green. Those tests
-were not run as part of writing this document, so the pass state here is cited, not
-observed.
+carries tests beside the code. Counting the test functions in the six modules gives 38
+(`error.rs` 5, `body.rs` 7, `request.rs` 8, `traits.rs` 4, `uri.rs` 7, `timings.rs` 7) plus
+two doc examples (`lib.rs:8-16` and `timings.rs:51-61`, the latter on `Timings` itself).
+`timings.rs` is the per-phase timings module, added after this document's first count.
+`cargo test -p chromulate-core` was run while writing this revision: 38 unit tests and 2 doc
+tests, all passing.
 
 ---
 
 ## Phase 1: The identity data plane
 
-**Status: Landing.**
+**Status: Done.**
 
-`chromulate-fingerprint` and `chromulate-profile`: the ClientHello and HTTP/2 models, the
-JA3, JA4 and Akamai computations, and the Chrome profile populated from the capture at
+`chromulate-fingerprint` and `chromulate-profile` shipped in 0.1.0 (`CHANGELOG.md:144-161`):
+the ClientHello and HTTP/2 models, the JA3, JA4 and Akamai computations, and the Chrome
+profile populated from the capture at
 `crates/chromulate-fingerprint/tests/data/chrome-151-macos.json`.
 
 This is Phase 1 rather than Phase 3 because it produces the reference every later phase
@@ -108,10 +111,10 @@ model of Chrome rather than against a tested one.
 
 ## Phase 2: Supporting engines
 
-**Status: Landing.**
+**Status: Done.**
 
 Four leaf crates that depend only on core, plus the header engine that depends on the
-profile.
+profile. All five shipped in 0.1.0 (`CHANGELOG.md:144-161`).
 
 `chromulate-cookie` — a browser-grade jar implementing `CookieStore`
 (`crates/chromulate-core/src/traits.rs:71-77`), with the lenient date parser real browsers
@@ -129,7 +132,7 @@ handshakes, and rotation, with credentials redacted from `Debug` and from every 
 message.
 
 `chromulate-header` — the profile plus a request context to an ordered header list, with
-`Sec-Fetch-*` derived from `RequestOptions` (`crates/chromulate-core/src/request.rs:122-139`)
+`Sec-Fetch-*` derived from `RequestOptions` (`crates/chromulate-core/src/request.rs:122-144`)
 and `Referer` from `referrer_for` (`crates/chromulate-core/src/uri.rs:89-107`).
 
 **Definition of done.** Per crate: clippy clean, tests green, with output in the crate's
@@ -160,11 +163,13 @@ from a custom `CryptoProvider`, group order, ALPN, certificate compression, resu
 
 `chromulate-http` provides the connection pool keyed on origin, proxy and identity, the
 HTTP/1.1 and HTTP/2 exchanges, the redirect loop, and the terminal `Exchange`
-implementation (`crates/chromulate-core/src/traits.rs:81-84`).
+implementation (`crates/chromulate-core/src/traits.rs:89-92`).
 
-`chromulate` provides `Client`, its builder, and the request API. `chromulate-cli` provides
-`get`, `fingerprint`, and the profile `diff` and `verify` subcommands that make profile
-maintenance a reviewable process rather than a research project.
+`chromulate` provides `Client`, its builder, and the request API. `chromulate-cli` builds the
+`chromulate` binary, with `get`, `fingerprint`, `profiles`, and `verify` subcommands that make
+profile maintenance a reviewable process rather than a research project. There is no `profile
+diff` subcommand; recomputing a profile from its capture and reporting drift is what `verify`
+does.
 
 **Definition of done.**
 
@@ -181,8 +186,8 @@ maintenance a reviewable process rather than a research project.
 - Dropping a response mid-body does not return the connection to the pool as reusable.
 - `chromulate-cli fingerprint` prints the target fingerprint the profile describes and the
   configuration actually handed to rustls, side by side.
-- `chromulate-cli profile verify` recomputes every shipped profile against its capture and
-  exits non-zero on a mismatch. This runs in CI.
+- `chromulate verify` recomputes every shipped profile against its capture and exits non-zero
+  on a mismatch. This runs in CI (`.github/workflows/ci.yml:113`).
 - Clippy clean across the workspace; `cargo test` green offline, with network tests behind
   the `network-tests` feature.
 
@@ -284,28 +289,38 @@ the emitted frames equals `52d84b11737d980aef856699f885ca86`.
 
 ## Phase 7: Performance
 
-**Status: Next after Phase 3, and strictly in this order.**
+**Status: Done.** The harness came first and the wave followed it; both are recorded in
+[`../performance.md`](../performance.md), with the pre-wave state in
+[`../performance-baseline.md`](../performance-baseline.md). The middleware chain-depth sweep
+is the one specified family that does not exist.
 
-The harness comes first. No optimisation is merged before it exists, and none is merged
-without a before-and-after from it. The design document's section 10 is entirely
-UNMEASURED, and it will stay that way until this phase produces numbers.
+The harness was built before any optimisation was merged, and every merged change cites a
+before-and-after from it. The design document's section 10, once entirely UNMEASURED, now
+carries the measured values.
 
-**Definition of done for the harness.**
+**Definition of done for the harness, as specified.**
 
 - Three benchmark families: a middleware chain-depth sweep, to price the boxed futures at
   the extension boundaries; a throughput test against a local server with pool reuse on and
-  off; and an allocation count per request under a heap profiler.
+  off; and an allocation count per request under a heap profiler. **The chain-depth sweep was
+  not built.** `crates/chromulate-bench/src/bin/` holds `allocs.rs`, `e2e.rs`, `live.rs`,
+  `memory.rs`, `multiorigin.rs`, `profile.rs`, and `tlsbench.rs` — none of them sweeps
+  middleware chain depth. The other two families exist: `e2e.rs` for throughput, `allocs.rs`
+  for the allocation count.
 - Every benchmark reports n≥3 runs with variance. A single run is not a measurement.
-- A documented command that reproduces the numbers on a developer machine.
+- A documented command that reproduces the numbers on a developer machine (`benches/README.md`).
 - Section 10 of the design document is updated with measured values, replacing the targets.
 
 **Definition of done for the optimisation work that follows.** Each merged change cites the
 harness output before and after. Changes that do not improve a measured number are not
 merged, however plausible the reasoning.
 
-Two questions the harness is expected to settle: the pool's shard count, currently
-unchosen; and whether the per-extension-boundary allocation of the boxed-future design
-(design document section 3.4) is measurable at all against the cost of a syscall.
+The pool's concurrency model turned out to be a single `Mutex<PoolState>`
+(`crates/chromulate-http/src/pool.rs:246`), not a shard map, so there was no shard count for
+the harness to settle — §10.3 of the design document found it flat to 100 origins once the
+release-path sweep was amortised. What remains open is whether the per-extension-boundary
+allocation of the boxed-future design (design document section 3.4) is measurable at all
+against the cost of a syscall.
 
 ---
 
@@ -339,7 +354,7 @@ RFC 9111 correctness.
 examples, a plugin guide covering the seven seams, and a performance guide that exists only
 once Phase 7 has produced numbers to put in it.
 
-**CI maturity.** The platform matrix on stable and on the 1.85 MSRV (`Cargo.toml:21`), Miri
+**CI maturity.** The platform matrix on stable and on the 1.85 MSRV (`Cargo.toml:26`), Miri
 over `chromulate-core` only (it has no I/O and is therefore tractable), coverage reporting,
 and a scheduled job running the `network-tests` suite separately from pull-request CI so
 that an unrelated upstream outage does not block a merge.

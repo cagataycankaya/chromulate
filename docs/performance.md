@@ -293,8 +293,8 @@ Worth reading before trusting any number here in another setting.
 
 - **Concurrent throughput over HTTPS.** The live harness measures latency one request at a
   time. The requests-per-second figures are all plaintext loopback.
-- **CPU attribution by a sampling profiler.** The claim that the header engine was about
-  half the original loopback gap was always an inference, and remains one.
+- **CPU attribution on a real network.** The profile above is loopback, where 46.8% of
+  busy time is socket syscalls; a real network moves that time elsewhere.
 - **Multi-origin pool behaviour**, which is what the `Pool::release` change needs before
   its throughput claim can be more than a mechanism.
 - **Memory under a soak test.** Every memory figure is a point measurement.
