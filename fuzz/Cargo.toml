@@ -1,0 +1,69 @@
+[package]
+name = "chromulate-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Its own workspace root, so `cargo +nightly fuzz` never pulls the parent
+# workspace's members, lints, or profiles into a sanitizer build. The parent
+# lists this directory under `exclude` for the same reason from the other side.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+chromulate-core = { path = "../crates/chromulate-core" }
+chromulate-cookie = { path = "../crates/chromulate-cookie" }
+chromulate-compression = { path = "../crates/chromulate-compression" }
+chromulate-proxy = { path = "../crates/chromulate-proxy" }
+chromulate-fingerprint = { path = "../crates/chromulate-fingerprint" }
+
+bytes = "1.12"
+http = "1.5"
+tokio = { version = "1.53", features = ["rt", "time"] }
+url = "2.5"
+
+[[bin]]
+name = "cookie_set_cookie"
+path = "fuzz_targets/cookie_set_cookie.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cookie_expires_date"
+path = "fuzz_targets/cookie_expires_date.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "compression_decode"
+path = "fuzz_targets/compression_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "compression_content_encoding"
+path = "fuzz_targets/compression_content_encoding.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proxy_parse"
+path = "fuzz_targets/proxy_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fingerprint_capture"
+path = "fuzz_targets/fingerprint_capture.rs"
+test = false
+doc = false
+bench = false

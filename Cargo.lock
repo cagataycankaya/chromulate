@@ -295,7 +295,6 @@ dependencies = [
  "chromulate-core",
  "chromulate-dns",
  "chromulate-fingerprint",
- "chromulate-header",
  "chromulate-http",
  "chromulate-profile",
  "chromulate-proxy",
@@ -310,7 +309,6 @@ dependencies = [
  "serde_json",
  "serde_urlencoded",
  "tokio",
- "tracing",
  "url",
 ]
 
@@ -346,7 +344,6 @@ dependencies = [
  "clap",
  "serde_json",
  "tokio",
- "tracing",
  "tracing-subscriber",
 ]
 

@@ -1,0 +1,47 @@
+name: Bug report
+description: Something observably wrong — wrong behaviour, wrong bytes on the wire, a panic.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        This project runs on evidence: what was observed, not what should be true.
+        A report that includes the observation is usually fixed in a fraction of the time.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what did you expect instead?
+      description: One or two sentences of each is enough.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: >
+        The smallest code or `chromulate-cli` invocation that shows the problem.
+        If it needs a specific origin or server behaviour, describe that too.
+      render: rust
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Observed output
+      description: >
+        Error text, panic backtrace, or the observed wire behaviour against the
+        expected one (header order, fingerprint, status line — whatever applies).
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Chromulate version or commit
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform and Rust version
+      placeholder: "macOS 15.5, rustc 1.85.0"

@@ -1,0 +1,7 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Questions and discussion
+    url: https://github.com/cagataycankaya/chromulate/discussions
+    about: >
+      Architecture questions are best answered against docs/architecture/, which is
+      the reference the implementation follows.

@@ -1,0 +1,34 @@
+name: Browser profile request
+description: Ask for, or offer to contribute, a new browser profile (Chrome on Windows, Firefox, …).
+labels: ["profile"]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        Profile constants are captured from a real browser, never hand-written —
+        that is the project's strictest rule. A new profile needs at least two
+        captures on separate connections, with provenance (browser build, platform,
+        endpoint, date). See "Contributing a browser profile" in CONTRIBUTING.md.
+        A request without a capture is still welcome; it documents demand.
+  - type: input
+    id: browser
+    attributes:
+      label: Browser, build, and platform
+      placeholder: "Firefox 145 on Windows 11"
+    validations:
+      required: true
+  - type: textarea
+    id: capture
+    attributes:
+      label: Capture availability
+      description: >
+        Do you have a capture, or can you produce one against an endpoint that
+        echoes the TLS ClientHello and HTTP/2 preface? If not, say so — the
+        request is still useful.
+    validations:
+      required: true
+  - type: textarea
+    id: use-case
+    attributes:
+      label: What is it for?
+      description: The crawler, monitor, or research context that needs this identity.

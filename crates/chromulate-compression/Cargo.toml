@@ -43,3 +43,9 @@ workspace = true
 [[bench]]
 name = "decode"
 harness = false
+
+# `http-body` is referenced only by the intra-doc link to `http_body::Body` in
+# `stream.rs`; cargo-machete cannot see doc links, and dropping the dependency
+# would break that link under `RUSTDOCFLAGS=-D warnings`.
+[package.metadata.cargo-machete]
+ignored = ["http-body"]

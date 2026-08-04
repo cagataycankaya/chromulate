@@ -1,0 +1,30 @@
+name: Feature request
+description: Propose a capability Chromulate should have.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        Scope note: Chromulate reproduces standards-compliant browser networking
+        behaviour. Requests framed around evading a specific security control are
+        out of scope and will be closed — see CONTRIBUTING.md. A JavaScript engine,
+        a DOM, and rendering are permanent exclusions.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: >
+        The situation where the current behaviour falls short, ideally with the
+        request or code you wished had worked.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: What the API or behaviour would look like, if you have a shape in mind.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Including "do it outside the library via the middleware seam", if that was close.

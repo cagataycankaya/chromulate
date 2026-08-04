@@ -15,6 +15,10 @@ members = [
     "crates/chromulate-cli",
     "crates/chromulate-bench",
 ]
+# `fuzz` is a package but not a member. It builds only under `cargo +nightly fuzz`,
+# which needs a nightly compiler and libFuzzer's sanitizer instrumentation, so making
+# it a member would drag both into every ordinary `cargo build` and `cargo test`.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"

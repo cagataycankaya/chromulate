@@ -127,6 +127,62 @@ jobs:
         with:
           command: check
 
+  unused-deps:
+    name: Unused dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      # A dependency nobody uses still costs compile time, still appears in
+      # `cargo deny`'s advisory surface, and still misleads a reader about what
+      # the crate touches. Two false positives are recorded with reasons in
+      # `[package.metadata.cargo-machete]` sections next to the dependency.
+      - run: cargo install cargo-machete --locked
+      - run: cargo machete
+
+  fuzz:
+    name: Fuzz targets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - run: cargo install cargo-fuzz --locked
+      # The workspace excludes `fuzz/`, so the ordinary `fmt` job never sees it.
+      - run: cargo fmt --check --manifest-path fuzz/Cargo.toml
+      # `+nightly` is load-bearing for the same reason it is on the Miri job:
+      # `rust-toolchain.toml` pins this repository to stable, and a toolchain
+      # file wins over whatever the action installed.
+      - run: cargo +nightly fuzz build
+      # Sixty seconds per target catches a target that stopped building or that
+      # panics on its own seeds. It is not a search, and is not meant to read as
+      # one: finding anything deeper takes hours on a machine that has them.
+      # Pull requests stop at the build above; the runs happen on the nightly
+      # schedule, where a slow job blocks nobody.
+      # The scratch directory is first so libFuzzer's discoveries land there and
+      # the seeds committed to git stay read-only.
+      - name: Run each target against its seeds
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: |
+          for target in $(cargo +nightly fuzz list); do
+            echo "::group::$target"
+            cargo +nightly fuzz run "$target" \
+              "$(mktemp -d)" "fuzz/corpus/$target" \
+              -- -max_total_time=60
+            echo "::endgroup::"
+          done
+      - name: Upload crash artefacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
   network:
     name: Live network tests
     runs-on: ubuntu-latest

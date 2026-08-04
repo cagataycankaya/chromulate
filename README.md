@@ -228,6 +228,35 @@ repository; the measured claims behind the fidelity rows are in
 | `chromulate-http` | The engine: connection pool, HTTP/1.1 and HTTP/2, and the redirect loop. |
 | `chromulate-cli` | A command-line client for inspecting behaviour. |
 
+How the crates depend on each other:
+
+```mermaid
+graph TD
+    cli["chromulate-cli"] --> facade["chromulate"]
+    facade --> http["chromulate-http"]
+    http --> tls["chromulate-tls"]
+    http --> header["chromulate-header"]
+    http --> cookie["chromulate-cookie"]
+    http --> compression["chromulate-compression"]
+    http --> dns["chromulate-dns"]
+    http --> proxy["chromulate-proxy"]
+    tls --> profile["chromulate-profile"]
+    tls --> fingerprint["chromulate-fingerprint"]
+    header --> profile
+    profile --> fingerprint
+    profile --> core["chromulate-core"]
+    cookie --> core
+    compression --> core
+    dns --> core
+    proxy --> core
+```
+
+Omitted for legibility: `chromulate-core` is a direct dependency of every crate shown
+except `chromulate-cli` and `chromulate-fingerprint`, and the two top crates
+(`chromulate`, `chromulate-http`) additionally depend on most of the crates beneath them
+directly, for re-exports and plumbing. `chromulate-fingerprint` depends on nothing in the
+workspace — the fingerprint algebra is deliberately free-standing.
+
 ## Documentation
 
 - [Browser networking reference](docs/architecture/01-browser-networking-reference.md) —
@@ -244,6 +273,8 @@ repository; the measured claims behind the fidelity rows are in
   change in the optimisation wave was worth, with what the measurements do not cover.
 - [Performance baseline](docs/performance-baseline.md) — the measured state the wave
   started from, kept unchanged so the two can be compared.
+- [Releasing](RELEASING.md) — versioning, MSRV, and deprecation policy, and the release
+  checklist.
 
 ## What Chromulate does not do
 
