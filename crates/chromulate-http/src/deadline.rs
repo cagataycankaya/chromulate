@@ -21,9 +21,23 @@ pub(crate) struct Deadline {
 impl Deadline {
     /// A budget of `total` starting now, or an unbounded one when `total` is
     /// `None`.
+    ///
+    /// A `total` the clock cannot represent also produces an unbounded budget.
+    /// `ClientBuilder::timeout` and `RequestBuilder::timeout` pass a caller's
+    /// `Duration` here unchecked, so `Duration::MAX` is one public call away,
+    /// and `Instant + Duration` panics on overflow.
+    ///
+    /// Unbounded rather than a saturated instant, for two reasons. `Instant` has
+    /// no epoch, so unlike the `SystemTime` overflow in `hsts.rs` there is no
+    /// portable far-future value to clamp to — the largest representable
+    /// `Instant` differs per platform and cannot be named. And this type already
+    /// carries "no limit" as `at: None`, which every consumer handles: phases
+    /// run untimed and a streaming body is returned unwrapped. A deadline
+    /// further away than the clock can express and no deadline at all are the
+    /// same request, so the honest answer is the one the type already has.
     pub(crate) fn starting_now(total: Option<Duration>) -> Self {
         Self {
-            at: total.map(|total| Instant::now() + total),
+            at: total.and_then(|total| Instant::now().checked_add(total)),
         }
     }
 
@@ -135,6 +149,42 @@ mod tests {
             after < before,
             "a later phase must see less budget: {before:?} then {after:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_budget_too_large_for_the_clock_is_unbounded_rather_than_a_panic() {
+        // `RequestBuilder::timeout` and `ClientBuilder::timeout` hand a caller's
+        // `Duration` here unvalidated, so this is a public API away from any
+        // caller who asks for a timeout larger than the clock can represent.
+        let deadline = Deadline::starting_now(Some(Duration::MAX));
+        assert_eq!(
+            deadline.remaining(),
+            None,
+            "a budget past the end of the clock must read as unbounded"
+        );
+        assert!(!deadline.is_expired());
+        assert!(deadline.check(Phase::Connect).is_ok());
+
+        let value = deadline
+            .run(Phase::Connect, None, async { Ok(7) })
+            .await
+            .expect("an unrepresentable budget must not interfere");
+        assert_eq!(value, 7);
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_budget_is_still_bounded() {
+        // The saturating path must not swallow the common case: a five second
+        // timeout stays a five second timeout, not "no deadline".
+        let deadline = Deadline::starting_now(Some(Duration::from_secs(5)));
+        let remaining = deadline
+            .remaining()
+            .expect("an ordinary budget must stay bounded");
+        assert!(
+            remaining > Duration::from_secs(4) && remaining <= Duration::from_secs(5),
+            "{remaining:?}"
+        );
+        assert!(!deadline.is_expired());
     }
 
     #[tokio::test]
