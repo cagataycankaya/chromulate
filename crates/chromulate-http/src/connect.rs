@@ -91,6 +91,8 @@ pub(crate) struct Connector {
     profile: Arc<Profile>,
     identity: ConnectionIdentity,
     connect_timeout: Option<Duration>,
+    /// See [`crate::PoolConfig::http1_max_buf_size`].
+    http1_max_buf_size: Option<usize>,
     http2_fidelity: Http2Fidelity,
 }
 
@@ -111,6 +113,7 @@ impl Connector {
         resolver: Arc<dyn Resolve>,
         proxies: Option<Arc<dyn ProxyProvider>>,
         connect_timeout: Option<Duration>,
+        http1_max_buf_size: Option<usize>,
     ) -> Self {
         // Configuring a throwaway builder is the only way to learn what hyper
         // will refuse without opening a connection first.
@@ -124,6 +127,7 @@ impl Connector {
             proxies,
             profile,
             connect_timeout,
+            http1_max_buf_size,
             http2_fidelity,
         }
     }
@@ -320,13 +324,20 @@ impl Connector {
                 Ok(Connection::Http2(sender))
             }
             Protocol::Http11 => {
-                let (sender, driver) = http1::Builder::new()
-                    .handshake::<_, Body>(io)
-                    .await
-                    .map_err(|error| Error::Connect {
-                        target: target.clone(),
-                        source: Some(Box::new(error)),
-                    })?;
+                let mut builder = http1::Builder::new();
+                if let Some(max) = self.http1_max_buf_size {
+                    // hyper panics below its 8 KiB floor rather than clamping,
+                    // so the floor is applied here; see the field's docs.
+                    builder.max_buf_size(max.max(8_192));
+                }
+                let (sender, driver) =
+                    builder
+                        .handshake::<_, Body>(io)
+                        .await
+                        .map_err(|error| Error::Connect {
+                            target: target.clone(),
+                            source: Some(Box::new(error)),
+                        })?;
                 tokio::spawn(async move {
                     if let Err(error) = driver.await {
                         tracing::debug!(%error, "http/1.1 connection closed");
@@ -389,6 +400,7 @@ mod tests {
             Arc::new(StaticResolver::empty()),
             proxies,
             Some(Duration::from_secs(5)),
+            None,
         )
     }
 

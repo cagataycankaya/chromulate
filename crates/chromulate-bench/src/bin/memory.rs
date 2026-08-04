@@ -150,18 +150,35 @@ fn idle() -> Result<(), Box<dyn std::error::Error>> {
 
 fn pool(connections: usize) -> Result<(), Box<dyn std::error::Error>> {
     let origin = Origin::spawn()?;
-    let url = Arc::new(origin.url("/"));
+    // `BENCH_POOL_BODY` sets how many bytes each connection downloads before
+    // idling in the pool. The default 1 KiB body never grows hyper's adaptive
+    // read buffer, so the retained-buffer cost this phase exists to expose
+    // stays invisible; a multi-megabyte body grows every connection's buffer
+    // to its ceiling first, which is the state a crawler's pool is really in.
+    let path = std::env::var("BENCH_POOL_BODY")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map_or_else(|| "/".to_owned(), |bytes| format!("/big/{bytes}"));
+    let url = Arc::new(origin.url(&path));
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
         .build()?;
 
+    // `BENCH_H1_MAX_BUF` bounds hyper's per-connection h1 buffers, so the
+    // pooled phase can measure what `PoolConfig::http1_max_buf_size` is worth;
+    // unset means hyper's default, which is what the baseline recorded.
+    let http1_max_buf_size = std::env::var("BENCH_H1_MAX_BUF")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok());
+
     let baseline = rss();
     let client = chromulate::Client::builder()
         .pool(PoolConfig {
             max_per_host: connections.max(1),
             max_total: connections.max(1) * 2,
+            http1_max_buf_size,
             ..PoolConfig::default()
         })
         .build()?;

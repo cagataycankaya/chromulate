@@ -202,6 +202,18 @@ pub struct PoolConfig {
     pub max_per_host: usize,
     /// The most connections kept across all keys.
     pub max_total: usize,
+    /// Ceiling for hyper's per-connection HTTP/1.1 read and write buffers, in
+    /// bytes. `None` keeps hyper's default of 408 KiB.
+    ///
+    /// The read buffer grows adaptively and never shrinks while a connection
+    /// idles in the pool, so a wide pool that once saw fast large responses
+    /// can hold hundreds of kilobytes per connection. Lowering this bounds
+    /// that — but the same ceiling is the largest response **header block**
+    /// hyper will accept before failing the request, so it is a behavioural
+    /// limit, not a free optimisation. Values below hyper's 8 KiB minimum
+    /// are raised to it rather than passed through, because hyper treats a
+    /// smaller value as a caller bug and panics.
+    pub http1_max_buf_size: Option<usize>,
 }
 
 impl Default for PoolConfig {
@@ -213,6 +225,7 @@ impl Default for PoolConfig {
             idle_timeout: Duration::from_secs(90),
             max_per_host: 6,
             max_total: 100,
+            http1_max_buf_size: None,
         }
     }
 }
@@ -551,6 +564,7 @@ mod tests {
             idle_timeout,
             max_per_host,
             max_total,
+            ..PoolConfig::default()
         })
     }
 

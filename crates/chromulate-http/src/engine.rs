@@ -215,6 +215,7 @@ impl EngineBuilder {
             resolver,
             self.proxies,
             self.config.connect_timeout,
+            self.config.pool.http1_max_buf_size,
         );
 
         Ok(Engine {
