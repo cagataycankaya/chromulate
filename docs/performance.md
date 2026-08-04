@@ -89,8 +89,17 @@ the idle timeout; expired entries are still rejected at checkout, and the at-cap
 evicts oldest-first, so cap enforcement is unchanged. Five new pool tests pin the
 invariants; all were run green against the old implementation first.
 
-**Mechanism proven by construction; the multi-origin throughput effect is UNMEASURED
-until the harness grows a multi-origin mode.**
+**Measured since, by `cargo run --release -p chromulate-bench --bin multiorigin`.** Across
+1, 10, 50 and 100 distinct origins at concurrency 32, throughput does not fall as the
+origin count rises and stays level with `reqwest` at every point, with zero errors. That is
+the claim the change needed: a pool mutex that binds would show throughput *dropping* as
+origins multiply, and it does not.
+
+Read the absolute numbers with care. The harness interleaves three repeats and the run-to-
+run spread for one configuration is wide — 43k to 88k rps for the single-origin case on the
+machine these were taken on — because the first repeat is still warming up. The ordering
+within a round is therefore not a clean origin-count signal, and only the absence of
+degradation should be read from it, not a speedup.
 
 ### 6. The response body wrappers poll the body directly
 
@@ -295,8 +304,8 @@ Worth reading before trusting any number here in another setting.
   time. The requests-per-second figures are all plaintext loopback.
 - **CPU attribution on a real network.** The profile above is loopback, where 46.8% of
   busy time is socket syscalls; a real network moves that time elsewhere.
-- **Multi-origin pool behaviour**, which is what the `Pool::release` change needs before
-  its throughput claim can be more than a mechanism.
+- **Multi-origin pool behaviour beyond 100 origins and concurrency 32.** Within that range
+  it is measured, above; what a larger crawl does to the single pool mutex is not.
 - **Memory under a soak test.** Every memory figure is a point measurement.
 - **Any origin but the two the live runs used.** The 1.76x on real pages is a property of
   that origin's behaviour towards a browser identity as much as of this client; another
