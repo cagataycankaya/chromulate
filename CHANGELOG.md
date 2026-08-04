@@ -62,6 +62,9 @@ an Apple M1 Pro. See [`benches/README.md`](benches/README.md) to reproduce.
   its default 3,000-cookie limit, a `store` that inserts a *new* cookie costs **21.6 µs**,
   against 536 ns for one that replaces an existing cookie in the same jar. The difference is
   eviction — picking the globally least-recently-used cookie means examining all of them.
+  That mechanism is measured rather than inferred: a variant where every insert lands on its
+  own domain, so per-domain trimming never runs, costs 22.4 µs — *slower*, not faster, which
+  rules out per-domain trimming and localises the cost to the global scan alone.
   Linear in the cap, not in the number of requests, and a deliberate limit rather than a
   defect: removing it needs either a purge margin or a global LRU index, and both change what
   `JarLimits::total` means.
