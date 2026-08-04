@@ -9,6 +9,39 @@ that breaking changes may land in a minor release.
 
 ### Added
 
+- **Per-origin adaptive concurrency**, behind the off-by-default `adaptive-concurrency`
+  feature. A controller that learns how many concurrent requests an origin serves
+  comfortably and stays there, because there is no single right number: measured on four
+  marketplaces, one HTTP/2 connection carrying eight requests at once cut the per-request
+  cost by 5.2x on one origin and 2.9x on another, and the knee fell in a different place on
+  each.
+
+  **Latency is the primary signal, not status.** Congestion shows in response time long
+  before an origin decides to refuse, so a probe whose mean exceeds its baseline halves the
+  limit at once, while adding a slot takes twenty healthy responses and evidence that
+  something actually queued for one. Overshooting costs milliseconds; being cautious costs
+  almost nothing.
+
+  **A `429` or `503` lowers that origin's ceiling permanently**, to half the level that
+  earned it, rather than halving and climbing back. Classic additive-increase
+  multiplicative-decrease *finds* a limit by hitting it, which means eating a refusal on a
+  schedule forever; re-probing a level known to refuse is choosing to be refused.
+  `Retry-After` is obeyed in both its forms, and an exponential cooldown applies when it is
+  absent.
+
+  **A `403` is not backpressure.** It freezes the limit, surfaces itself, and does nothing
+  else — no halving, no pause, no retry, and nothing varies a profile, a header or an
+  identity in response to it. It is the origin saying no rather than saying how much, and
+  tuning around it would be the scope boundary rather than a control decision.
+
+  The caller's `RateLimiter` is a structural ceiling rather than a checked one: it is a
+  required constructor argument, a token is spent before any permit is granted, and a
+  rate-limited caller queues behind the limiter rather than behind slots — so it cannot
+  produce the saturation evidence an increase requires. Per-origin state is bounded at 4,096
+  authorities with lesson-holding entries outliving idle ones. This cannot promise zero
+  `429`s — a threshold can change, is often shared across clients on one IP, and may not be
+  concurrency-based at all — but it never chooses to find a limit by hitting it.
+
 - **`multipart/form-data` request bodies**, behind the off-by-default `multipart` feature.
   `RequestBuilder::multipart` takes a `Form` of `Part`s and streams it, so a form built from
   `Part::file` sends the file from disk to the socket without buffering it; only a part of

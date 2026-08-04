@@ -181,6 +181,8 @@ pub struct EngineBuilder {
     cache: Option<Arc<chromulate_cache::HttpCache>>,
     #[cfg(feature = "validator-store")]
     validators: Option<Arc<crate::validators::ValidatorStore>>,
+    #[cfg(feature = "adaptive-concurrency")]
+    concurrency: Option<Arc<crate::adaptive::AdaptiveConcurrency>>,
 }
 
 impl fmt::Debug for EngineBuilder {
@@ -210,6 +212,8 @@ impl EngineBuilder {
             cache: None,
             #[cfg(feature = "validator-store")]
             validators: None,
+            #[cfg(feature = "adaptive-concurrency")]
+            concurrency: None,
         }
     }
 
@@ -313,6 +317,21 @@ impl EngineBuilder {
         self
     }
 
+    /// Learns how many concurrent requests each origin serves comfortably.
+    ///
+    /// The controller can only ever stay at or under the ceiling it was built
+    /// with; it has no way to discover that it could go faster than a caller
+    /// allowed. Read
+    /// [`AdaptiveConcurrency`](crate::adaptive::AdaptiveConcurrency)'s
+    /// documentation for what it does with a `429` and why that differs from a
+    /// `403`.
+    #[cfg(feature = "adaptive-concurrency")]
+    #[must_use]
+    pub fn concurrency(mut self, concurrency: Arc<crate::adaptive::AdaptiveConcurrency>) -> Self {
+        self.concurrency = Some(concurrency);
+        self
+    }
+
     /// Builds the engine.
     ///
     /// # Errors
@@ -353,6 +372,8 @@ impl EngineBuilder {
                 cache: self.cache,
                 #[cfg(feature = "validator-store")]
                 validators: self.validators,
+                #[cfg(feature = "adaptive-concurrency")]
+                concurrency: self.concurrency,
                 config: self.config,
                 connector,
                 pool,
@@ -397,6 +418,8 @@ struct EngineInner {
     cache: Option<Arc<chromulate_cache::HttpCache>>,
     #[cfg(feature = "validator-store")]
     validators: Option<Arc<crate::validators::ValidatorStore>>,
+    #[cfg(feature = "adaptive-concurrency")]
+    concurrency: Option<Arc<crate::adaptive::AdaptiveConcurrency>>,
 }
 
 impl fmt::Debug for Engine {
@@ -532,10 +555,23 @@ impl Engine {
             let response = match cached {
                 Some(hit) => cache_hit(hit),
                 None => {
+                    // Per hop rather than per logical request, so a redirect
+                    // that crosses origins is charged to the origin it actually
+                    // reaches. A cache hit takes no permit at all, which is
+                    // correct: nothing was asked of the origin.
+                    #[cfg(feature = "adaptive-concurrency")]
+                    let permit =
+                        crate::adaptive::acquire_from(self.inner.concurrency.as_deref(), &url)
+                            .await;
                     let response = self
                         .hop(&mut request, body, &url, &options, &deadline, &mut timings)
                         .instrument(span)
                         .await?;
+                    // On a transport error the `?` above drops the permit, which
+                    // returns the slot and teaches nothing — a failure to connect
+                    // may be this host's network rather than the origin's load.
+                    #[cfg(feature = "adaptive-concurrency")]
+                    crate::adaptive::complete_from(permit, &response);
                     self.cache_after(pending, &url, response)
                 }
             };
