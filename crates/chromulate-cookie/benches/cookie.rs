@@ -175,10 +175,22 @@ fn benches(c: &mut Criterion) {
     }
 
     // The state a long-running crawler is permanently in: default limits, jar
-    // full. `replace` never evicts; `insert` evicts on nearly every call, since
-    // the cycled names far outnumber what one domain is allowed to hold.
+    // full. Three rows, because "inserting into a full jar is expensive" is not
+    // one cost but two, and they are separable:
+    //
+    // - `replace` never evicts at all — the identity already exists.
+    // - `insert_one_domain` piles new names onto a single domain, so it crosses
+    //   the 180 per-domain cap as well as the 3,000 total, and pays for both.
+    // - `insert_many_domains` puts each new cookie on a domain of its own, so
+    //   per-domain trimming never fires and only the global least-recently-used
+    //   pass runs.
+    //
+    // The last two apart are what separate "eviction is expensive" from "the
+    // *global* scan is what is expensive", which are different claims with
+    // different fixes.
     let default_cap = JarLimits::default().total;
     let fresh: Vec<HeaderValue> = (0..4096).map(set_cookie).collect();
+    let one_each: Vec<Url> = (100_000..104_096).map(site).collect();
 
     {
         let jar = Jar::with_limits(JarLimits::default());
@@ -196,11 +208,29 @@ fn benches(c: &mut Criterion) {
         let held = fill(&jar, default_cap / SPREAD_BUCKET, SPREAD_BUCKET, None);
         assert_eq!(held, default_cap);
         let mut next = 0usize;
-        write.bench_function("at_default_cap/insert", |b| {
+        write.bench_function("at_default_cap/insert_one_domain", |b| {
             b.iter(|| {
                 let header = &fresh[next % fresh.len()];
                 next += 1;
                 jar.store(black_box(&target), &mut std::iter::once(header));
+            });
+        });
+        assert_eq!(
+            jar.export().cookies.len(),
+            default_cap,
+            "the jar must still sit at its cap after the insert benchmark"
+        );
+    }
+    {
+        let jar = Jar::with_limits(JarLimits::default());
+        let held = fill(&jar, default_cap / SPREAD_BUCKET, SPREAD_BUCKET, None);
+        assert_eq!(held, default_cap);
+        let mut next = 0usize;
+        write.bench_function("at_default_cap/insert_many_domains", |b| {
+            b.iter(|| {
+                let url = &one_each[next % one_each.len()];
+                next += 1;
+                jar.store(black_box(url), &mut std::iter::once(&plain));
             });
         });
         assert_eq!(

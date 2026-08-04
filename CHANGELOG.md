@@ -37,10 +37,11 @@ engine, the public client, and a CLI.
 A benchmark harness (`crates/chromulate-bench`, plus criterion suites) was added and run on
 an Apple M1 Pro. See [`benches/README.md`](benches/README.md) to reproduce.
 
-- **Throughput: 0.77–0.88x of `reqwest`**, i.e. 12–23% slower, measured against a loopback
-  origin at concurrency 1, 8, 64, and 256, as the median of paired per-round ratios. Three
-  independent runs agree. A browser-identity engine doing more work per request than a plain
-  client is expected; the specific cost is not, see below.
+- **Throughput: 0.79–0.88x of `reqwest`**, i.e. 12–21% slower, measured against a loopback
+  origin at concurrency 1, 8, 64, and 256, as the median of paired per-round ratios. Four
+  independent runs agree on that range; individual rounds under machine load reach 0.77x, so
+  treat the range as the quiet-machine figure. A browser-identity engine doing more work per
+  request than a plain client is expected; the specific cost is not, see below.
 - **127 heap allocations per steady-state request**, against reqwest's 49 — 2.59x. **80 of
   those 127 are `HeaderEngine::apply`**, which costs 4.32 µs per request. The design
   documents' low-allocation claim is **not currently supported by measurement**, and the
@@ -52,7 +53,8 @@ an Apple M1 Pro. See [`benches/README.md`](benches/README.md) to reproduce.
 - Idle client ≈0.55 MiB over a tokio runtime; ≈38.8 KiB per pooled connection at the
   64→512 margin.
 - Per-connection fingerprint work is negligible: generating a fresh extension permutation
-  is 183 ns, JA4 3.2 µs, the Akamai string 453 ns.
+  is 183 ns, `ja4` 4.2 µs, `ja4_raw` 3.1 µs, the Akamai string 453 ns. None of these runs
+  per request.
 - Cookie jar lookup is flat, not linear: `cookies_for` ≈1.14 µs and `store` replacing an
   existing cookie ≈530 ns, both unchanged across jars of 10, 1,000, and 10,000 cookies. Those
   figures are measured with the capacity limits raised so nothing is evicted.
