@@ -148,11 +148,9 @@ async fn malformed_streams_do_not_panic() {
             0 => compressed.truncate(compressed.len() / 2),
             1 => compressed.truncate(rng.below(compressed.len().max(1))),
             2 => compressed.extend(std::iter::repeat_n(0xff, 1 + rng.below(64))),
-            3 => {
-                if !compressed.is_empty() {
-                    let at = rng.below(compressed.len());
-                    compressed[at] ^= 1 << (rng.below(8));
-                }
+            3 if !compressed.is_empty() => {
+                let at = rng.below(compressed.len());
+                compressed[at] ^= 1 << (rng.below(8));
             }
             // Decode with the wrong coding, which is what a lying
             // `Content-Encoding` header produces.
