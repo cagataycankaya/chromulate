@@ -25,3 +25,14 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    ignore:
+      # `dtolnay/rust-toolchain@1.85.0` in the msrv job is not an action version
+      # to keep current: it is the minimum supported Rust version this workspace
+      # declares in `rust-version`, and the job exists to prove the crate still
+      # builds on it. Dependabot reads it as a version to bump, and taking that
+      # bump would leave the job passing against a newer compiler while
+      # verifying nothing — the MSRV would then drift silently, which is the one
+      # failure this job is here to prevent. Raising the MSRV is a deliberate
+      # decision that changes `rust-version`, this pin, and CONTRIBUTING.md
+      # together.
+      - dependency-name: dtolnay/rust-toolchain
