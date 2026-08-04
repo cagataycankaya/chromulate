@@ -474,6 +474,14 @@ async fn a_304_that_turns_the_response_private_is_not_kept_by_default() {
     assert!(lookup(&cache, request(&[])).1.is_none());
 }
 
+/// Two rules refuse this one, and it is worth saying which: `selects_the_same
+/// _way` sees that the `Vary` changed, and the storability re-check sees that
+/// the name is one this cache cannot select on. Removing either alone leaves
+/// this test green — it only goes red when both go — so it is redundant
+/// coverage of a case that matters rather than the test that distinguishes
+/// either layer. `a_304_that_changes_the_vary_drops_the_entry_rather_than
+/// _matching_everything` is what pins the first, and the `no-store`,
+/// `Set-Cookie` and `private` tests are what pin the second.
 #[tokio::test]
 async fn a_304_that_adds_a_vary_the_cache_cannot_select_on_drops_the_entry() {
     let (cache, clock, store) = cache_at(epoch());

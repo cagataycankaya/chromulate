@@ -50,7 +50,13 @@
 //!   since spent in this cache, are both added.
 //! - **Revalidation** (§4.3): `ETag` becomes `If-None-Match`, `Last-Modified`
 //!   becomes `If-Modified-Since`, and a `304` updates the stored fields — never
-//!   the stored `Content-Length` — and restarts the entry's age.
+//!   the stored `Content-Length` — and restarts the entry's age. A `304` is put
+//!   back through the storability rules after the merge, because it can carry
+//!   `no-store`, `Set-Cookie` or `private` that the stored response did not;
+//!   one that fails them is served to the caller and dropped from the store
+//!   rather than kept. A `304` naming an `ETag` other than the stored one, or a
+//!   `Vary` other than the stored one, updates nothing: §4.3.4 says a validator
+//!   this cache does not hold identifies a representation it does not hold.
 //! - **`Vary`** (§4.1): a stored response only matches a request whose
 //!   selecting fields agree, absence included. `Vary: *` is never stored.
 //! - **`no-cache` versus `no-store`** (§5.2.2): a `no-cache` response is
@@ -121,6 +127,11 @@
 //! The peak cost is therefore one buffered copy per in-flight recordable
 //! response, bounded by `max_body_bytes` each, plus [`MemoryLimits::max_bytes`]
 //! for the store itself.
+//!
+//! A body that arrives shorter or longer than its own `Content-Length` is not
+//! stored. RFC 9110 §6.3 calls such a message malformed, and storing one would
+//! freeze the disagreement: the body becomes [`bytes::Bytes`] and the header
+//! stays a claim about it that nothing downstream re-derives.
 //!
 //! # Locking
 //!

@@ -169,6 +169,13 @@ pub struct MemoryStats {
 /// dropping whole keys — every variant of a key goes together — in ascending
 /// order of last use.
 ///
+/// A record too large for its shard's share of the budget is refused outright
+/// rather than stored and immediately purged. Storing it first would evict
+/// every other key in that shard on the way to evicting it — one large
+/// response flushing a sixteenth of the cache and keeping nothing — so `put`
+/// returns `Ok` having stored nothing, dropping only the copy the refused
+/// entry supersedes.
+///
 /// Staleness is deliberately **not** part of the ranking. The store has no
 /// clock, and a stale entry is not worthless: it still carries the `ETag` that
 /// turns the next request into a conditional one and the next response into a
