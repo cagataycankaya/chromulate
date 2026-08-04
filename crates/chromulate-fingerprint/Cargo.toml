@@ -27,3 +27,8 @@ workspace = true
 [[bench]]
 name = "fingerprint"
 harness = false
+
+# The `md-5` package is used below as `md5` (the Akamai and JA3 hashes);
+# cargo-machete normalises `-` to `_` when searching for usage and misses it.
+[package.metadata.cargo-machete]
+ignored = ["md-5"]
