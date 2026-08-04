@@ -335,11 +335,12 @@ access to browsers and a capture procedure, not code — the loader already exis
 `Accept` values, subresource header order, non-document `priority` values, and high-entropy
 client hints.
 
-**HSTS.** **Done**, except the preload list. A store is consulted before the request leaves
+**HSTS.** **Done**, preload list included. A store is consulted before the request leaves
 and is populated from `Strict-Transport-Security` responses; a header arriving over
 cleartext is ignored, IP literals take no policy, and `max-age=0` removes one. The preload
-list is still open, and is the part that protects the *first* request to an origin this
-process has never visited — `Client::hsts()` is the interim answer, letting a caller seed a
+list ships behind the off-by-default `hsts-preload` feature and is the part that protects
+the *first* request to an origin this process has never visited — `Client::hsts()` remains
+the lighter answer, letting a caller seed a
 policy it already knows.
 
 **HTTP/3.** Architecture only until the open questions in section 15 of the design document
