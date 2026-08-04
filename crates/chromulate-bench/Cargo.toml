@@ -27,6 +27,29 @@ reqwest.workspace = true
 tokio = { workspace = true, features = ["full"] }
 url.workspace = true
 
+[[bin]]
+name = "live"
+required-features = ["live"]
+
+[features]
+# The live harness (`--bin live`) talks to real HTTPS origins, so its baseline
+# needs a TLS stack and the decompression codings Chromulate advertises —
+# otherwise the two clients would not be doing the same work.
+#
+# It is opt-in because enabling it changes how `reqwest` is built, and the
+# loopback harnesses (`e2e`, `allocs`, `memory`) recorded their numbers against
+# a `reqwest` with no TLS stack at all. Run those **without** this feature, or
+# their figures are not comparable with the ones in `docs/performance.md`.
+live = [
+    "reqwest/rustls",
+    "reqwest/http2",
+    "reqwest/charset",
+    "reqwest/gzip",
+    "reqwest/brotli",
+    "reqwest/zstd",
+    "reqwest/deflate",
+]
+
 # This crate deliberately does not carry `[lints] workspace = true`.
 #
 # The workspace forbids `unsafe_code`, and a counting global allocator cannot be

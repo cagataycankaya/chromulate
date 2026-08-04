@@ -23,6 +23,7 @@ wave started from), together with the CPU and toolchain they came from.
 | `cargo bench -p chromulate-cookie` | Cookie lookup and storage as the jar grows |
 | `cargo bench -p chromulate-core` | `Body::collect` over a chunked stream |
 | `cargo bench -p chromulate-compression` | Decompression throughput per coding |
+| `cargo run --release -p chromulate-bench --features live --bin live -- …` | Latency against a **real HTTPS origin**, with TLS and HTTP/2 in the picture |
 
 `cargo bench --workspace` runs every criterion suite.
 
@@ -129,6 +130,48 @@ memory every 8 MB consumed. `buffer` reads the same body through
 **`buffer` is the control, and it is not optional.** A flat peak in `stream`
 only means something if the same measurement can be shown to move when memory
 really is being held. Run both or trust neither.
+
+## Against a real origin
+
+```
+cargo run --release -p chromulate-bench --features live --bin live -- single <url>...
+cargo run --release -p chromulate-bench --features live --bin live -- crawl <file> [limit]
+cargo run --release -p chromulate-bench --features live --bin live -- pool <url>
+cargo run --release -p chromulate-bench --features live --bin live -- dump <url> <prefix>
+cargo run --release -p chromulate-bench --features live --bin live -- links <category-url>
+```
+
+Everything else here is plaintext loopback, which is what isolates client overhead — and
+also what hides everything that only happens over TLS. `live` measures a real origin, and
+it is the harness that found HTTP/2 connections were never being pooled: on loopback ALPN
+never runs, so no offline test in this repository touches that path at all.
+
+`single` reports **cold** (a fresh client per request: DNS, TCP, the TLS handshake, one
+request) separately from **warm** (repeated requests on a pooled connection), because a
+client can be fine at one and broken at the other — which is exactly what happened. Three
+clients are compared: Chromulate, Chromulate with the cookie jar off, and `reqwest`. The
+no-cookie variant is not decoration: it is the only way to tell a slow client from an
+origin that answers a cookied request differently.
+
+`pool` prints what the connection pool holds after each of several requests. A latency
+number cannot distinguish "the client is slow" from "the client re-handshakes every time";
+this can.
+
+`dump` writes each client's body to a file. **Check the sizes before trusting a latency
+comparison.** Real origins serve different clients different pages — one measured origin
+sends non-browser clients an extra 90 KB of hidden SEO markup — and when the bodies differ
+the timings are comparing two different downloads. `single` prints a warning when the
+sizes differ by more than 5%.
+
+The `live` cargo feature is opt-in because it builds `reqwest` with TLS and the four
+content codings, so that both clients do the same work. That is a different `reqwest` from
+the one the loopback harnesses were measured against, so **run `e2e`, `allocs` and
+`memory` without `--features live`** or their numbers are not comparable with the recorded
+ones.
+
+**This talks to somebody else's server.** Requests are paced (`LIVE_PACE_MS`, default
+500 ms) and the counts are deliberately small (`LIVE_ROUNDS`, `LIVE_WARM_REQUESTS`).
+Raising them turns a measurement of your client into a load test of a stranger's origin.
 
 ## Micro-benchmarks
 

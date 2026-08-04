@@ -154,6 +154,63 @@ never grow and the cap saves nothing; that is the workload to size it against. F
 deployments, remember the advertised 15 MiB connection window — part of the Akamai
 fingerprint, so not tunable — is the number to plan per-connection memory against.
 
+## Against a real origin
+
+Everything above is loopback, which isolates client overhead and says nothing about the
+work that distinguishes this crate: the TLS handshake and the HTTP/2 path. The `live`
+harness measures a real HTTPS origin, and the first thing it found was a defect no offline
+benchmark in this repository could have found.
+
+**HTTP/2 connections were never pooled.** An HTTP/1.1 connection returns to the pool when
+its response body ends; an HTTP/2 connection multiplexes, so nothing gave it back — and
+nothing registered the freshly opened one either. Every HTTP/2 request therefore opened a
+new TCP connection and repeated the TLS handshake, against every modern origin, for the
+life of the client. The loopback origin is plaintext, so ALPN never runs and the HTTP/2
+connection path was simply unexercised. Measured against a CDN asset serving all clients
+identical bytes:
+
+| Warm request, 620 KB asset | Before | After |
+|---|---:|---:|
+| Chromulate, total median | 289 ms | **170 ms** |
+| Paired ratio vs `reqwest` | 0.345x (2.9x slower) | **0.992x** (parity) |
+| Pool occupancy after a request | 0 | 1, and stable |
+
+Two network-gated tests in `chromulate-http/tests/live_pooling.rs` pin it; both were
+watched failing first. Run them with
+`cargo test -p chromulate-http --features network-tests -- --ignored`.
+
+### What the live numbers say
+
+Two questions, two different answers, and conflating them is how a benchmark misleads.
+
+**Client overhead is at parity.** On a static CDN asset — where all three clients receive
+byte-identical responses (620,723 B) — Chromulate is 1.009x cold and 0.992x warm against
+`reqwest`. That is the honest client-to-client comparison, because it is the only one where
+both sides did the same work.
+
+**End to end on real pages, Chromulate is faster, and mostly not for a reason in the
+client.** Against Trendyol product pages (16 URLs, alternating order, paired medians):
+1.76x per URL, TTFB 324 ms against 552 ms. But the origin does not serve the two clients
+the same page: it sends `reqwest` an extra ~90 KB hidden `dr-webmenu-links` block — a
+crawler-oriented SEO menu — that a browser-identified client never receives. Chromulate
+downloads 17% less and the origin answers it faster. Product data is identical in both;
+that was checked, not assumed.
+
+So: **presenting a browser identity got a faster answer and a smaller page from this
+origin, while the client itself is neither faster nor slower than `reqwest`.** Both halves
+matter, and only the second is a property of this code.
+
+| Live measurement | Chromulate | `reqwest` | Ratio |
+|---|---:|---:|---|
+| CDN asset, identical bytes, warm | 170 ms | 166 ms | 0.992x (parity) |
+| CDN asset, identical bytes, cold | 457 ms | 463 ms | 1.009x |
+| Product page, warm | 320 ms | 453 ms | 1.444x |
+| Product page, cold | 537 ms | 722 ms | 1.320x |
+| 16-page crawl, per URL median | 353 ms | 628 ms | 1.762x |
+
+Reproduce with `cargo run --release -p chromulate-bench --features live --bin live -- …`;
+see [`../benches/README.md`](../benches/README.md) for the modes and the pacing rules.
+
 ## Deliberate behaviour changes
 
 - `JarLimits::total` and `per_domain` are ceilings the jar purges one batch below
@@ -164,9 +221,16 @@ fingerprint, so not tunable — is the number to plan per-connection memory agai
 
 ## What this still does not measure
 
-Unchanged from the baseline, and worth reading before trusting any number here in another
-setting: throughput against an HTTPS origin and over HTTP/2 (Chromulate's distinguishing
-work is in the handshake, and none of it appears in these figures); CPU attribution by a
-sampling profiler; multi-origin pool behaviour, which is also what the `Pool::release`
-change needs for its throughput claim; real-network behaviour; memory under a soak test;
-and an end-to-end workload whose responses actually set cookies.
+Worth reading before trusting any number here in another setting.
+
+- **Concurrent throughput over HTTPS.** The live harness measures latency one request at a
+  time. The requests-per-second figures are all plaintext loopback.
+- **CPU attribution by a sampling profiler.** The claim that the header engine was about
+  half the original loopback gap was always an inference, and remains one.
+- **Multi-origin pool behaviour**, which is what the `Pool::release` change needs before
+  its throughput claim can be more than a mechanism.
+- **Memory under a soak test.** Every memory figure is a point measurement.
+- **Any origin but the two the live runs used.** The 1.76x on real pages is a property of
+  that origin's behaviour towards a browser identity as much as of this client; another
+  site that serves every client the same bytes should be expected to look like the CDN
+  row, which is parity.

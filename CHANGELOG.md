@@ -118,6 +118,36 @@ same machine and harness as the baseline; the baseline numbers are quoted alongs
   +1.39 MiB peak against a +260 MiB buffering control), and the wire header order still
   matches the capture — both re-verified, not assumed.
 
+### Fixed — HTTP/2 connections were never pooled
+
+Found by measuring a real HTTPS origin for the first time.
+
+An HTTP/1.1 connection returns to the pool when its response body ends. An HTTP/2
+connection multiplexes, so nothing gave it back — and nothing registered the freshly
+opened one either, so **every HTTP/2 request opened a new TCP connection and repeated the
+TLS handshake**, against every modern origin, for the life of the client. No offline
+benchmark here could see it: the loopback origin is plaintext, ALPN never runs, and the
+HTTP/2 connection path was unexercised.
+
+`Engine::acquire` now registers a newly opened multiplexed connection with the pool.
+Measured on a CDN asset serving all clients identical bytes: a warm request went from
+289 ms to **170 ms**, and the paired ratio against `reqwest` from 0.345x — 2.9x slower —
+to **0.992x**. Two network-gated tests (`chromulate-http/tests/live_pooling.rs`) pin it,
+both watched failing first.
+
+### Added — a live benchmark harness
+
+`cargo run -p chromulate-bench --features live --bin live` measures a real HTTPS origin
+with TLS and HTTP/2 in the picture: cold and warm latency against `reqwest`, pool
+occupancy, and a body dump for checking that two clients were actually served the same
+page. See [`benches/README.md`](benches/README.md); the measured results are in
+[`docs/performance.md`](docs/performance.md).
+
+Its first finding beyond the pooling bug is a caveat on every real-page comparison: the
+measured origin serves non-browser clients an extra ~90 KB hidden SEO block, so Chromulate
+downloads 17% less and cannot be compared like for like on those URLs. Where the bytes are
+identical, the two clients are at parity.
+
 ### Measured — fidelity
 
 Against a live echo endpoint, the engine reproduces Chrome 151's HTTP/2 preface in 3 of the
