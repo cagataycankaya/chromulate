@@ -1083,14 +1083,14 @@ Coalescing never crosses an identity or a proxy boundary, for the reasons in 7.2
 
 ### 7.4 Lifecycle, limits and eviction
 
-Defaults as implemented in `PoolConfig::default()` (`pool.rs:225-228`) and `EngineConfig`
+Defaults as implemented in `PoolConfig::default()` (`pool.rs:239-249`) and `EngineConfig`
 (`engine.rs:121`), all adjustable:
 
 | Parameter | Default | Why |
 |---|---|---|
 | Idle timeout | 90 s | Long enough for a crawl's natural rhythm, short enough not to hold dead NAT bindings |
 | Max idle per host | 6 | What browsers keep per origin for HTTP/1.1; HTTP/2 holds one per key regardless |
-| Max total idle connections | 100 | A bound on retained sockets — see the note below on what it does *not* bound |
+| Max total connections, per population | 100 | Bounds idle HTTP/1.1 and multiplexed HTTP/2 *separately*, so a pool may hold up to twice it. They cannot share a counter: only an idle entry can be freed, so one shared budget lets either protocol starve the other. See the note below on what it does *not* bound |
 | Connect timeout | 30 s | |
 | Handshake timeout | shares the connect timeout | `Error::Timeout(Phase::Handshake)` still distinguishes *where* it expired |
 | Response head timeout | 30 s | Bounds a server that accepts and then goes quiet; `ClientBuilder::no_head_timeout` opts long polling out — §4.4 |
@@ -1953,7 +1953,7 @@ a measurement now exists it names the figure or points at
 | 13 | Extension order model | Set plus permutation policy | Frozen wire order | Matches the verified capture finding (`chrome-151-macos.json:12-16`). A frozen order would be less faithful and trivially distinguishable. Costs a more complex type. |
 | 14 | `forbid(unsafe_code)` | Yes (`Cargo.toml:88`) | Allow with review | No `pin-project-lite`; streams are boxed (`body.rs:19`). One allocation per streaming body. Buys an auditable memory-safety story for a library pointed at untrusted input. |
 | 15 | HTTP cache | Not in v1 | `chromulate-cache` | The `Middleware` seam already supports it (`traits.rs:97`); most target users do not want one. Costs feature parity with browser behaviour on repeat fetches. |
-| 16 | Pool concurrency | Single `Mutex<PoolState>` (`pool.rs:246`) | Sharded map; lock-free | Measured flat in origin count to 100 origins, at parity with `reqwest`, once the release sweep was amortised (§10.3). Costs a shared lock on every checkout and release; sharding needs a measurement showing that lock binding before it is worth a second data structure. |
+| 16 | Pool concurrency | Single `Mutex<PoolState>` (`pool.rs:266`) | Sharded map; lock-free | Measured flat in origin count to 100 origins, at parity with `reqwest`, once the release sweep was amortised (§10.3). Costs a shared lock on every checkout and release; sharding needs a measurement showing that lock binding before it is worth a second data structure. |
 | 17 | Body default | Streaming (`body.rs:1-7`) | Buffer, opt into streaming | Constant memory for large downloads; `collect(limit)` (`body.rs:112`) is one call away when a caller wants bytes. Costs a slightly less convenient default for small JSON responses. |
 | 18 | `HostPort` host storage | `Arc<str>` (`traits.rs:29`) | `String`; `Box<str>` | Cheap clones into cache and pool keys. Costs one atomic per clone, which is less than a string copy. |
 | 19 | Facade crate | Yes | Users depend on component crates | One dependency line for the common case; component crates remain independently usable. Costs a re-export layer to maintain. |
