@@ -28,6 +28,14 @@ pub struct CacheConfig {
     /// A response longer than this streams to the caller untouched and is not
     /// stored: a cache that buffered every body would turn a constant-memory
     /// download into a resident one. Eight megabytes by default.
+    ///
+    /// This budget and the store's are set independently and do not have to
+    /// agree, but a body that passes here and does not fit in a shard of
+    /// [`MemoryLimits`](crate::MemoryLimits) is buffered and then refused,
+    /// which is the cost of the buffer for none of the benefit. The defaults
+    /// are in that position: eight megabytes here against a default shard's
+    /// two. Lower this, or raise `max_bytes`, if the origin serves bodies in
+    /// between and the hit is worth having.
     pub max_body_bytes: u64,
     /// Whether a response marked `Cache-Control: private` may be stored.
     ///

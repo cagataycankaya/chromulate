@@ -174,6 +174,234 @@ async fn a_stale_entry_revalidates_and_a_304_returns_the_stored_body() {
     );
 }
 
+// --- responses that must never come back from store -----------------------
+//
+// Each of these has a unit test asserting that the store stayed empty. That
+// proves the flag, not the property: an entry can be absent from `stats()` and
+// still be served, and a hit can be reported without the store having anything
+// to do with it. The only evidence that nothing was served is that the origin
+// was asked again, so every assertion below is on the server's own count.
+
+/// Drives two identical `GET`s through an engine with a cache and returns how
+/// many requests the origin saw. Two means nothing was served from store.
+async fn requests_reaching_the_origin(server: &TestServer, headers: &[(&str, &str)]) -> usize {
+    let (cache, _clock) = cache_at(SystemTime::UNIX_EPOCH);
+    let engine = engine_for(server, Some(cache));
+    let url = server.url_for(HOST, "/asset");
+
+    for _ in 0..2 {
+        let mut builder = http::Request::builder().uri(&url);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        let request = builder.body(Body::empty()).expect("a valid request");
+        let response = engine
+            .send(request)
+            .await
+            .expect("the request must succeed");
+        let _ = text(response).await;
+    }
+    server.request_count()
+}
+
+#[tokio::test]
+async fn a_private_response_is_fetched_again_rather_than_served_from_store() {
+    let server = TestServer::always(
+        Reply::text("mine").with_header("cache-control", "private, max-age=600"),
+    )
+    .await;
+    assert_eq!(
+        requests_reaching_the_origin(&server, &[]).await,
+        2,
+        "`private` is off by default because this engine may be more than one identity"
+    );
+}
+
+#[tokio::test]
+async fn a_response_to_an_authorized_request_is_fetched_again() {
+    let server =
+        TestServer::always(Reply::text("mine").with_header("cache-control", "max-age=600")).await;
+    assert_eq!(
+        requests_reaching_the_origin(&server, &[("authorization", "Bearer token")]).await,
+        2,
+        "RFC 9111 §3.5: without an explicit allowance this response is not shareable"
+    );
+}
+
+#[tokio::test]
+async fn a_set_cookie_response_is_fetched_again() {
+    let server = TestServer::always(
+        Reply::text("welcome")
+            .with_header("cache-control", "max-age=600")
+            .with_header("set-cookie", "session=abc"),
+    )
+    .await;
+    assert_eq!(
+        requests_reaching_the_origin(&server, &[]).await,
+        2,
+        "replaying a stored Set-Cookie re-applies one identity's state to another request"
+    );
+}
+
+#[tokio::test]
+async fn a_vary_star_response_is_fetched_again() {
+    let server = TestServer::always(
+        Reply::text("payload")
+            .with_header("cache-control", "max-age=600")
+            .with_header("vary", "*"),
+    )
+    .await;
+    assert_eq!(
+        requests_reaching_the_origin(&server, &[]).await,
+        2,
+        "`Vary: *` says no future request can be proved equivalent to this one"
+    );
+}
+
+#[tokio::test]
+async fn a_response_varying_on_a_header_the_cache_cannot_see_is_fetched_again() {
+    for unselectable in ["cookie", "accept", "referer", "sec-fetch-dest"] {
+        let server = TestServer::always(
+            Reply::text("per-user")
+                .with_header("cache-control", "max-age=600")
+                .with_header("vary", unselectable),
+        )
+        .await;
+        assert_eq!(
+            requests_reaching_the_origin(&server, &[]).await,
+            2,
+            "a response selecting on `{unselectable}` must not be served to a second request"
+        );
+    }
+}
+
+/// The `Vary` case the cache *can* see. The first request declares a selecting
+/// value, the second declares another, and the second must reach the origin.
+#[tokio::test]
+async fn a_vary_mismatch_on_a_visible_header_reaches_the_origin() {
+    let server = TestServer::start(|request| {
+        let language = request.header("accept-language").unwrap_or("none");
+        Reply::text(language)
+            .with_header("cache-control", "max-age=600")
+            .with_header("vary", "accept-language")
+    })
+    .await;
+    let (cache, _clock) = cache_at(SystemTime::UNIX_EPOCH);
+    let engine = engine_for(&server, Some(cache));
+    let url = server.url_for(HOST, "/asset");
+
+    let send = async |language: &str| {
+        let request = http::Request::builder()
+            .uri(&url)
+            .header("accept-language", language)
+            .body(Body::empty())
+            .expect("a valid request");
+        text(engine.send(request).await.expect("the request")).await
+    };
+
+    assert_eq!(send("tr").await, "tr");
+    assert_eq!(
+        send("tr").await,
+        "tr",
+        "the same selecting value is the same variant"
+    );
+    assert_eq!(server.request_count(), 1, "the second request was a hit");
+
+    assert_eq!(
+        send("en").await,
+        "en",
+        "a different selecting value must not be answered with the stored variant"
+    );
+    assert_eq!(server.request_count(), 2);
+}
+
+/// A `304` is the one path that writes an entry without the response ever
+/// being put to the storability rules. An origin that refreshes a session on
+/// its `304` would, if that merge were unconditional, leave one identity's
+/// `Set-Cookie` in the store to be handed to every later request for the same
+/// URL. The count on the server is what shows it is not.
+#[tokio::test]
+async fn a_304_that_carries_set_cookie_is_not_left_in_the_store() {
+    let server = TestServer::start(|request| {
+        if request.header("if-none-match") == Some("\"v1\"") {
+            Reply::new(304)
+                .with_header("cache-control", "max-age=600")
+                .with_header("set-cookie", "session=leaked")
+        } else {
+            Reply::text("payload")
+                .with_header("cache-control", "max-age=60")
+                .with_header("etag", "\"v1\"")
+        }
+    })
+    .await;
+    let (cache, clock) = cache_at(SystemTime::UNIX_EPOCH);
+    let engine = engine_for(&server, Some(cache));
+    let url = server.url_for(HOST, "/asset");
+
+    let _ = text(engine.send(get(&url)).await.expect("the first request")).await;
+
+    clock.advance(Duration::from_secs(120));
+    let revalidated = engine.send(get(&url)).await.expect("the revalidation");
+    assert_eq!(
+        revalidated.headers()["set-cookie"],
+        "session=leaked",
+        "the caller is still handed the state the origin sent"
+    );
+    assert_eq!(text(revalidated).await, "payload");
+
+    let third = engine.send(get(&url)).await.expect("the third request");
+    assert!(
+        third.extensions().get::<CacheStatus>().is_none(),
+        "the entry the 304 would have refreshed carried a Set-Cookie, so it was not kept"
+    );
+    assert!(!third.headers().contains_key("set-cookie"));
+    let _ = text(third).await;
+
+    assert_eq!(
+        server.request_count(),
+        3,
+        "the third request must reach the origin rather than replay a stored cookie"
+    );
+}
+
+/// RFC 9111 §4.3.4: a `304` naming a validator this cache does not hold updates
+/// nothing here. The stored body must not come back wearing the new tag.
+#[tokio::test]
+async fn a_304_naming_a_different_entity_tag_leaves_nothing_stored() {
+    let server = TestServer::start(|request| {
+        if request.header("if-none-match").is_some() {
+            Reply::new(304)
+                .with_header("cache-control", "max-age=600")
+                .with_header("etag", "\"v2\"")
+        } else {
+            Reply::text("payload")
+                .with_header("cache-control", "max-age=60")
+                .with_header("etag", "\"v1\"")
+        }
+    })
+    .await;
+    let (cache, clock) = cache_at(SystemTime::UNIX_EPOCH);
+    let engine = engine_for(&server, Some(cache));
+    let url = server.url_for(HOST, "/asset");
+
+    let _ = text(engine.send(get(&url)).await.expect("the first request")).await;
+
+    clock.advance(Duration::from_secs(120));
+    let second = engine.send(get(&url)).await.expect("the revalidation");
+    assert_ne!(
+        second.extensions().get::<CacheStatus>(),
+        Some(&CacheStatus::Revalidated),
+        "nothing here was revalidated: the origin confirmed a representation this cache does not \
+         hold"
+    );
+    let _ = text(second).await;
+
+    let third = engine.send(get(&url)).await.expect("the third request");
+    assert!(third.extensions().get::<CacheStatus>().is_none());
+    let _ = text(third).await;
+    assert_eq!(server.request_count(), 3);
+}
+
 #[tokio::test]
 async fn a_no_store_response_is_fetched_again_every_time() {
     let server = TestServer::always(

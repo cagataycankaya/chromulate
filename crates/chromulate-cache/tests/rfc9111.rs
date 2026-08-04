@@ -9,7 +9,8 @@ use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use chromulate_cache::{
-    CacheConfig, CacheStatus, HttpCache, ManualClock, MemoryLimits, MemoryStore,
+    CacheConfig, CacheKey, CacheStatus, CacheStorage, HttpCache, ManualClock, MemoryLimits,
+    MemoryStore,
 };
 use chromulate_core::{Body, Request, Response};
 use url::Url;
@@ -360,6 +361,464 @@ async fn a_revalidation_answered_with_a_new_body_replaces_the_entry() {
     let (_, hit) = lookup(&cache, request(&[]));
     let hit = hit.expect("the replacement is fresh");
     assert_eq!(hit.headers()["etag"], "\"v2\"");
+}
+
+// --- what a 304 may not smuggle into the store ----------------------------
+//
+// A `304` merge is the one path that writes an entry without the request that
+// produced it ever being re-examined. Everything below asks the same question:
+// does the rule that would have refused this response on the way in still hold
+// when the response arrives as a revalidation instead.
+
+/// Stores one entry with a validator and a sixty second lifetime.
+async fn seed(cache: &HttpCache) {
+    exchange(
+        cache,
+        request(&[]),
+        response(
+            200,
+            &[("cache-control", "max-age=60"), ("etag", "\"v1\"")],
+            "payload",
+        ),
+    )
+    .await;
+}
+
+/// Ages the seeded entry past its lifetime and answers its revalidation.
+fn revalidate(cache: &HttpCache, clock: &ManualClock, not_modified: Response) -> Response {
+    clock.advance(Duration::from_secs(120));
+    let mut stale = request(&[]);
+    let (pending, hit) = cache.before(&mut stale, &url());
+    assert!(
+        hit.is_none(),
+        "the entry must be stale enough to revalidate"
+    );
+    assert_eq!(
+        stale.headers()["if-none-match"],
+        "\"v1\"",
+        "the exchange under test is a revalidation of the seeded entry"
+    );
+    cache.after(pending, &url(), not_modified)
+}
+
+#[tokio::test]
+async fn a_304_carrying_no_store_drops_the_entry_rather_than_refreshing_it() {
+    let (cache, clock, store) = cache_at(epoch());
+    seed(&cache).await;
+
+    let _ = revalidate(
+        &cache,
+        &clock,
+        response(304, &[("cache-control", "no-store, max-age=600")], ""),
+    );
+
+    assert_eq!(
+        store.stats().keys,
+        0,
+        "the origin said nobody may keep this, which is not weaker for arriving on a 304"
+    );
+    assert!(
+        lookup(&cache, request(&[])).1.is_none(),
+        "the next request must reach the origin"
+    );
+}
+
+#[tokio::test]
+async fn a_304_carrying_set_cookie_does_not_leave_it_in_the_store() {
+    let (cache, clock, store) = cache_at(epoch());
+    seed(&cache).await;
+
+    let served = revalidate(
+        &cache,
+        &clock,
+        response(
+            304,
+            &[
+                ("cache-control", "max-age=600"),
+                ("set-cookie", "session=abc"),
+            ],
+            "",
+        ),
+    );
+    assert_eq!(
+        served.headers()["set-cookie"],
+        "session=abc",
+        "the caller must still be handed the state the origin sent"
+    );
+
+    assert_eq!(
+        store.stats().keys,
+        0,
+        "a stored Set-Cookie is replayed to every later request, which is one identity's state \
+         handed to another"
+    );
+    assert!(lookup(&cache, request(&[])).1.is_none());
+}
+
+#[tokio::test]
+async fn a_304_that_turns_the_response_private_is_not_kept_by_default() {
+    let (cache, clock, store) = cache_at(epoch());
+    seed(&cache).await;
+
+    let _ = revalidate(
+        &cache,
+        &clock,
+        response(304, &[("cache-control", "private, max-age=600")], ""),
+    );
+
+    assert_eq!(
+        store.stats().keys,
+        0,
+        "`private` is refused on the way in and must be refused on revalidation too"
+    );
+    assert!(lookup(&cache, request(&[])).1.is_none());
+}
+
+/// Two rules refuse this one, and it is worth saying which: `selects_the_same
+/// _way` sees that the `Vary` changed, and the storability re-check sees that
+/// the name is one this cache cannot select on. Removing either alone leaves
+/// this test green — it only goes red when both go — so it is redundant
+/// coverage of a case that matters rather than the test that distinguishes
+/// either layer. `a_304_that_changes_the_vary_drops_the_entry_rather_than
+/// _matching_everything` is what pins the first, and the `no-store`,
+/// `Set-Cookie` and `private` tests are what pin the second.
+#[tokio::test]
+async fn a_304_that_adds_a_vary_the_cache_cannot_select_on_drops_the_entry() {
+    let (cache, clock, store) = cache_at(epoch());
+    seed(&cache).await;
+
+    let _ = revalidate(
+        &cache,
+        &clock,
+        response(
+            304,
+            &[("cache-control", "max-age=600"), ("vary", "cookie")],
+            "",
+        ),
+    );
+
+    assert_eq!(
+        store.stats().keys,
+        0,
+        "an entry that now selects on Cookie cannot be matched, and matching it wrongly is how \
+         one user's page reaches another"
+    );
+    assert!(lookup(&cache, request(&[])).1.is_none());
+}
+
+/// The stored entry was selected by nothing at all; the `304` says the resource
+/// is selected by `Accept-Language`. Keeping the entry under its old selector
+/// would leave a response fetched for `tr` matching a request for `en`, which
+/// is the `Vary` failure with a different name on it.
+#[tokio::test]
+async fn a_304_that_changes_the_vary_drops_the_entry_rather_than_matching_everything() {
+    let (cache, clock, store) = cache_at(epoch());
+    exchange(
+        &cache,
+        request(&[("accept-language", "tr")]),
+        response(
+            200,
+            &[("cache-control", "max-age=60"), ("etag", "\"v1\"")],
+            "merhaba",
+        ),
+    )
+    .await;
+
+    clock.advance(Duration::from_secs(120));
+    let mut stale = request(&[("accept-language", "tr")]);
+    let (pending, hit) = cache.before(&mut stale, &url());
+    assert!(hit.is_none());
+    let _ = cache.after(
+        pending,
+        &url(),
+        response(
+            304,
+            &[
+                ("cache-control", "max-age=600"),
+                ("vary", "accept-language"),
+            ],
+            "",
+        ),
+    );
+
+    assert_eq!(store.stats().keys, 0);
+    assert!(
+        lookup(&cache, request(&[("accept-language", "en")]))
+            .1
+            .is_none(),
+        "the resource now selects on accept-language, and this cache cannot place the body it \
+         holds under the new rule"
+    );
+    assert!(
+        lookup(&cache, request(&[("accept-language", "tr")]))
+            .1
+            .is_none()
+    );
+}
+
+/// The common shape, which must keep working: an origin that repeats the
+/// `Vary` it already sent, and one that omits it altogether. Neither is a
+/// change, so neither may cost the entry.
+#[tokio::test]
+async fn a_304_that_repeats_or_omits_the_stored_vary_still_refreshes_the_entry() {
+    for echoed in [Some("accept-language"), None] {
+        let (cache, clock, store) = cache_at(epoch());
+        exchange(
+            &cache,
+            request(&[("accept-language", "tr")]),
+            response(
+                200,
+                &[
+                    ("cache-control", "max-age=60"),
+                    ("etag", "\"v1\""),
+                    ("vary", "accept-language"),
+                ],
+                "merhaba",
+            ),
+        )
+        .await;
+
+        clock.advance(Duration::from_secs(120));
+        let mut stale = request(&[("accept-language", "tr")]);
+        let (pending, hit) = cache.before(&mut stale, &url());
+        assert!(hit.is_none());
+        let mut headers = vec![("cache-control", "max-age=600")];
+        if let Some(vary) = echoed {
+            headers.push(("vary", vary));
+        }
+        let _ = cache.after(pending, &url(), response(304, &headers, ""));
+
+        assert_eq!(store.stats().keys, 1, "echoed={echoed:?}");
+        assert!(
+            lookup(&cache, request(&[("accept-language", "tr")]))
+                .1
+                .is_some(),
+            "echoed={echoed:?}"
+        );
+        assert!(
+            lookup(&cache, request(&[("accept-language", "en")]))
+                .1
+                .is_none(),
+            "echoed={echoed:?}"
+        );
+    }
+}
+
+/// RFC 9111 §4.3.4: a `304`'s validator says which stored response it updates.
+/// A tag this cache does not hold names a representation this cache does not
+/// hold, and merging it labels the stored body with a validator that was never
+/// its own — after which every later revalidation confirms the wrong one.
+#[tokio::test]
+async fn a_304_naming_a_different_entity_tag_does_not_relabel_the_stored_body() {
+    let (cache, clock, store) = cache_at(epoch());
+    seed(&cache).await;
+
+    let _ = revalidate(
+        &cache,
+        &clock,
+        response(
+            304,
+            &[("cache-control", "max-age=600"), ("etag", "\"v2\"")],
+            "",
+        ),
+    );
+
+    assert_eq!(
+        store.stats().keys,
+        0,
+        "the origin confirmed a representation this cache does not have, so it has nothing left"
+    );
+    assert!(
+        lookup(&cache, request(&[])).1.is_none(),
+        "the next request must reach the origin rather than be answered with the old body under \
+         the new tag"
+    );
+}
+
+#[tokio::test]
+async fn a_304_repeating_the_stored_entity_tag_still_refreshes_it() {
+    let (cache, clock, store) = cache_at(epoch());
+    seed(&cache).await;
+
+    let _ = revalidate(
+        &cache,
+        &clock,
+        response(
+            304,
+            &[("cache-control", "max-age=600"), ("etag", "\"v1\"")],
+            "",
+        ),
+    );
+
+    assert_eq!(store.stats().keys, 1);
+    let hit = lookup(&cache, request(&[]))
+        .1
+        .expect("the same tag is the same representation, so the entry is refreshed");
+    assert_eq!(hit.headers()["age"], "0");
+}
+
+/// A weak tag that changed is still a representation that changed, so the
+/// comparison has to see past the `W/` prefix rather than around it.
+#[tokio::test]
+async fn a_weak_tag_is_compared_by_its_opaque_part() {
+    let (cache, clock, store) = cache_at(epoch());
+    seed(&cache).await;
+    let _ = revalidate(
+        &cache,
+        &clock,
+        response(
+            304,
+            &[("cache-control", "max-age=600"), ("etag", "W/\"v1\"")],
+            "",
+        ),
+    );
+    assert_eq!(
+        store.stats().keys,
+        1,
+        "`W/\"v1\"` and `\"v1\"` are the same opaque tag"
+    );
+
+    let (cache, clock, store) = cache_at(epoch());
+    seed(&cache).await;
+    let _ = revalidate(
+        &cache,
+        &clock,
+        response(
+            304,
+            &[("cache-control", "max-age=600"), ("etag", "W/\"v9\"")],
+            "",
+        ),
+    );
+    assert_eq!(store.stats().keys, 0, "a different opaque tag is not");
+}
+
+/// The overwhelmingly common shape: an origin that revalidates on
+/// `If-Modified-Since` and volunteers an `ETag` on the `304`. There is nothing
+/// to disagree with, so nothing may be refused.
+#[tokio::test]
+async fn a_304_that_adds_a_tag_to_an_entry_that_had_none_is_accepted() {
+    let (cache, clock, store) = cache_at(epoch());
+    exchange(
+        &cache,
+        request(&[]),
+        response(
+            200,
+            &[
+                ("cache-control", "max-age=60"),
+                ("last-modified", "Thu, 01 Jan 1970 00:00:00 GMT"),
+            ],
+            "payload",
+        ),
+    )
+    .await;
+
+    clock.advance(Duration::from_secs(120));
+    let mut stale = request(&[]);
+    let (pending, hit) = cache.before(&mut stale, &url());
+    assert!(hit.is_none());
+    assert!(!stale.headers().contains_key("if-none-match"));
+    let _ = cache.after(
+        pending,
+        &url(),
+        response(
+            304,
+            &[("cache-control", "max-age=600"), ("etag", "\"fresh\"")],
+            "",
+        ),
+    );
+
+    assert_eq!(store.stats().keys, 1);
+    assert!(lookup(&cache, request(&[])).1.is_some());
+}
+
+/// `before` hands `after` the entry it found, so the entry outlives its own
+/// eviction. Re-storing it is the right answer — the origin has just confirmed
+/// it — and the thing to check is that the store agrees about what it now
+/// holds rather than counting the resurrected entry twice.
+#[tokio::test]
+async fn a_304_for_an_entry_evicted_between_request_and_response_is_still_coherent() {
+    let (cache, clock, store) = cache_at(epoch());
+    seed(&cache).await;
+
+    clock.advance(Duration::from_secs(120));
+    let mut stale = request(&[]);
+    let (pending, hit) = cache.before(&mut stale, &url());
+    assert!(hit.is_none());
+
+    // The store loses it while the request is in flight.
+    cache.invalidate(&url());
+    assert_eq!(store.stats().keys, 0);
+
+    let served = cache.after(
+        pending,
+        &url(),
+        response(
+            304,
+            &[("cache-control", "max-age=600"), ("etag", "\"v1\"")],
+            "",
+        ),
+    );
+    let body = served
+        .into_body()
+        .collect(1024)
+        .await
+        .expect("the caller still gets the body the 304 confirmed");
+    assert_eq!(body, Bytes::from_static(b"payload"));
+
+    assert_eq!(store.stats().keys, 1);
+    let variants = store
+        .get(&CacheKey::new(&http::Method::GET, &url()))
+        .expect("get succeeds");
+    assert_eq!(
+        variants.len(),
+        1,
+        "one confirmed representation is one stored variant, not two"
+    );
+    assert!(lookup(&cache, request(&[])).1.is_some());
+}
+
+/// Two requests for one key both find the entry stale, both revalidate, and
+/// both come back. Nothing here is atomic, so what matters is that the loser
+/// leaves the store holding one coherent entry rather than two copies of the
+/// same representation.
+#[tokio::test]
+async fn two_revalidations_of_one_key_leave_a_single_variant() {
+    let (cache, clock, store) = cache_at(epoch());
+    seed(&cache).await;
+    clock.advance(Duration::from_secs(120));
+
+    let mut first = request(&[]);
+    let (first_pending, hit) = cache.before(&mut first, &url());
+    assert!(hit.is_none());
+    let mut second = request(&[]);
+    let (second_pending, hit) = cache.before(&mut second, &url());
+    assert!(hit.is_none(), "both saw the same stale entry");
+
+    let not_modified = |max_age: &str| {
+        response(
+            304,
+            &[
+                ("cache-control", &format!("max-age={max_age}")),
+                ("etag", "\"v1\""),
+            ],
+            "",
+        )
+    };
+    let _ = cache.after(first_pending, &url(), not_modified("600"));
+    let _ = cache.after(second_pending, &url(), not_modified("900"));
+
+    assert_eq!(store.stats().keys, 1);
+    let variants = store
+        .get(&CacheKey::new(&http::Method::GET, &url()))
+        .expect("get succeeds");
+    assert_eq!(variants.len(), 1, "one representation, one variant");
+
+    let hit = lookup(&cache, request(&[])).1.expect("the entry is fresh");
+    assert_eq!(
+        hit.headers()["cache-control"],
+        "max-age=900",
+        "the last revalidation to land is the one that is stored"
+    );
 }
 
 // --- Vary -----------------------------------------------------------------
@@ -769,6 +1228,89 @@ async fn a_body_the_caller_abandons_halfway_is_not_stored() {
     assert_eq!(store.stats().keys, 0);
 }
 
+/// A body that ends in an error is a body whose end this cache never saw.
+#[tokio::test]
+async fn a_body_that_fails_midway_stores_nothing() {
+    let (cache, _clock, store) = cache_at(epoch());
+
+    let chunks = futures_util::stream::iter(vec![
+        Ok(Bytes::from_static(b"half")),
+        Err(chromulate_core::Error::protocol("the connection died")),
+    ]);
+    let streamed = http::Response::builder()
+        .status(200)
+        .header("cache-control", "max-age=600")
+        .body(Body::stream(chunks, None))
+        .expect("a valid response");
+
+    let mut request = request(&[]);
+    let (pending, _) = cache.before(&mut request, &url());
+    let served = cache.after(pending, &url(), streamed);
+    let failed = served.into_body().collect(1024).await;
+
+    assert!(failed.is_err(), "the caller sees the failure");
+    assert_eq!(
+        store.stats().keys,
+        0,
+        "and the cache stores no half response"
+    );
+    assert!(lookup(&cache, request).1.is_none());
+}
+
+/// RFC 9110 §6.3: a message whose declared length is not its length is
+/// malformed. Storing one freezes the disagreement — the body is `Bytes` and
+/// the header is a promise about it, and nothing downstream re-derives the
+/// second from the first.
+#[tokio::test]
+async fn a_body_that_disagrees_with_its_declared_length_is_not_stored() {
+    for (declared, body) in [("100", "payload"), ("2", "payload")] {
+        let (cache, _clock, store) = cache_at(epoch());
+        let (_, seen) = exchange(
+            &cache,
+            request(&[]),
+            response(
+                200,
+                &[
+                    ("cache-control", "max-age=600"),
+                    ("content-length", declared),
+                ],
+                body,
+            ),
+        )
+        .await;
+
+        assert_eq!(
+            seen,
+            Bytes::from_static(b"payload"),
+            "the caller still receives every byte the origin sent"
+        );
+        assert_eq!(
+            store.stats().keys,
+            0,
+            "content-length: {declared} against a {} byte body must not be stored",
+            body.len()
+        );
+        assert!(lookup(&cache, request(&[])).1.is_none());
+    }
+}
+
+#[tokio::test]
+async fn a_body_that_matches_its_declared_length_is_stored_as_usual() {
+    let (cache, _clock, store) = cache_at(epoch());
+    exchange(
+        &cache,
+        request(&[]),
+        response(
+            200,
+            &[("cache-control", "max-age=600"), ("content-length", "7")],
+            "payload",
+        ),
+    )
+    .await;
+    assert_eq!(store.stats().keys, 1);
+    assert!(lookup(&cache, request(&[])).1.is_some());
+}
+
 #[tokio::test]
 async fn hop_by_hop_fields_do_not_survive_into_the_store() {
     let (cache, _clock, _) = cache_at(epoch());
@@ -957,6 +1499,183 @@ async fn a_response_with_no_lifetime_and_no_validator_is_not_stored_at_all() {
     let (cache, _clock, store) = cache_at(epoch());
     exchange(&cache, request(&[]), response(200, &[], "payload")).await;
     assert_eq!(store.stats().keys, 0);
+}
+
+/// Every one of these is server-controlled and unbounded, and every one of
+/// them ends in a subtraction or a comparison against the clock. The property
+/// asserted is the same for all of them: an answer comes back, and it is not a
+/// panic.
+#[tokio::test]
+async fn hostile_freshness_arithmetic_produces_an_answer_rather_than_a_panic() {
+    // (what the origin said, whether a copy may be served back a second later)
+    let cases: &[(&[(&str, &str)], bool)] = &[
+        // An `Age` past the lifetime is stale on arrival.
+        (&[("cache-control", "max-age=60"), ("age", "600")], false),
+        // A negative `Age` is not a `delta-seconds`, so there is no `Age`.
+        (&[("cache-control", "max-age=60"), ("age", "-5")], true),
+        (
+            &[
+                ("cache-control", "max-age=60"),
+                ("age", "99999999999999999999999"),
+            ],
+            false,
+        ),
+        // A `Date` an hour ahead of this clock. The response cannot be older
+        // than nothing, and it must not be fresher than its lifetime either.
+        (
+            &[
+                ("cache-control", "max-age=60"),
+                ("date", "Thu, 01 Jan 1970 01:00:00 GMT"),
+            ],
+            true,
+        ),
+        // No `Date` at all: arrival is the only instant there is.
+        (&[("cache-control", "max-age=60")], true),
+        // RFC 9111 §4.2.1 — `max-age` wins over `Expires`, even a past one.
+        (
+            &[
+                ("cache-control", "max-age=600"),
+                ("date", "Thu, 01 Jan 1970 00:00:00 GMT"),
+                ("expires", "Thu, 01 Jan 1970 00:00:00 GMT"),
+            ],
+            true,
+        ),
+        // ... and the other way round.
+        (
+            &[
+                ("cache-control", "max-age=0"),
+                ("date", "Thu, 01 Jan 1970 00:00:00 GMT"),
+                ("expires", "Fri, 01 Jan 2100 00:00:00 GMT"),
+            ],
+            false,
+        ),
+        // The largest lifetime the grammar can express.
+        (&[("cache-control", "max-age=18446744073709551615")], true),
+        (
+            &[("cache-control", "max-age=99999999999999999999999")],
+            true,
+        ),
+        // A malformed `max-age` is no `max-age`, and with no validator either
+        // there is nothing to store.
+        (&[("cache-control", "max-age=soon")], false),
+        // An `Expires` before the epoch.
+        (
+            &[
+                ("date", "Thu, 01 Jan 1970 00:00:00 GMT"),
+                ("expires", "Mon, 01 Jan 1900 00:00:00 GMT"),
+            ],
+            false,
+        ),
+        // A `Last-Modified` after the `Date` leaves the heuristic nothing to
+        // divide, so there is no lifetime to guess.
+        (
+            &[
+                ("date", "Thu, 01 Jan 1970 00:00:00 GMT"),
+                ("last-modified", "Fri, 01 Jan 2100 00:00:00 GMT"),
+            ],
+            false,
+        ),
+    ];
+
+    for (headers, servable) in cases {
+        let (cache, clock, _) = cache_at(epoch());
+        exchange(&cache, request(&[]), response(200, headers, "payload")).await;
+        clock.advance(Duration::from_secs(1));
+        assert_eq!(
+            lookup(&cache, request(&[])).1.is_some(),
+            *servable,
+            "{headers:?} was expected to be servable={servable}"
+        );
+    }
+}
+
+/// The sweep behind the table above. Every field in it is server-controlled
+/// and unbounded, and every one of them lands in a subtraction against the
+/// clock; the combinations are where the arithmetic that is total on its own
+/// stops being total. This asserts nothing about the answers — only that there
+/// is one, from every corner of the cross product, at three different clocks.
+#[tokio::test]
+async fn no_combination_of_hostile_dates_panics_the_arithmetic() {
+    const EXTREMES: &[&str] = &[
+        "Thu, 01 Jan 1970 00:00:00 GMT",
+        "Mon, 01 Jan 1601 00:00:00 GMT",
+        "Fri, 31 Dec 9999 23:59:59 GMT",
+        "Sun, 06 Nov 1994 08:49:37 GMT",
+        "0",
+        "-1",
+        "",
+        "not a date",
+    ];
+    const LIFETIMES: &[&str] = &[
+        "max-age=0",
+        "max-age=18446744073709551615",
+        "max-age=99999999999999999999999",
+        "max-age=-1",
+        "max-age=",
+        "no-cache, max-age=600",
+        "s-maxage=18446744073709551615",
+    ];
+    const AGES: &[&str] = &["0", "18446744073709551615", "99999999999999999999999", "-1"];
+
+    for date in EXTREMES {
+        for expires in EXTREMES {
+            for lifetime in LIFETIMES {
+                for age in AGES {
+                    for start in [
+                        SystemTime::UNIX_EPOCH,
+                        SystemTime::UNIX_EPOCH + Duration::from_secs(86_400 * 365 * 56),
+                        SystemTime::UNIX_EPOCH - Duration::from_secs(86_400 * 365 * 56),
+                    ] {
+                        let (cache, clock, _) = cache_at(start);
+                        exchange(
+                            &cache,
+                            request(&[]),
+                            response(
+                                200,
+                                &[
+                                    ("date", date),
+                                    ("expires", expires),
+                                    ("cache-control", lifetime),
+                                    ("age", age),
+                                    ("last-modified", date),
+                                    ("etag", "\"v1\""),
+                                ],
+                                "payload",
+                            ),
+                        )
+                        .await;
+                        // The answer is not asserted; that it exists is.
+                        let _ = lookup(&cache, request(&[]));
+                        clock.advance(Duration::from_secs(u64::MAX / 2));
+                        let _ = lookup(&cache, request(&[]));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The clock, not the headers, is what the age is measured against, and it can
+/// be pushed to the end of what the platform represents.
+#[tokio::test]
+async fn a_clock_at_the_end_of_time_does_not_panic_the_age_arithmetic() {
+    let (cache, clock, _) = cache_at(epoch());
+    exchange(
+        &cache,
+        request(&[]),
+        response(
+            200,
+            &[
+                ("cache-control", "max-age=18446744073709551615"),
+                ("age", "18446744073709551615"),
+            ],
+            "payload",
+        ),
+    )
+    .await;
+
+    clock.advance(Duration::MAX);
+    let _ = lookup(&cache, request(&[]));
 }
 
 #[tokio::test]

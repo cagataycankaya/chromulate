@@ -11,7 +11,8 @@ use bytes::{Bytes, BytesMut};
 use chromulate_core::{Body, Request, Response, Result};
 use futures_core::Stream;
 use http::header::{
-    AGE, CONTENT_LOCATION, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, LOCATION, RANGE,
+    AGE, CONTENT_LENGTH, CONTENT_LOCATION, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED,
+    LOCATION, RANGE, VARY,
 };
 use http::{HeaderMap, HeaderValue, Method, StatusCode, Version};
 use http_body::Body as _;
@@ -19,7 +20,7 @@ use url::Url;
 
 use crate::clock::{SystemWallClock, WallClock};
 use crate::directive::CacheControl;
-use crate::entry::{CacheEntry, CacheKey, Selector, strip_hop_by_hop};
+use crate::entry::{CacheEntry, CacheKey, Selector, strip_hop_by_hop, vary_names};
 use crate::policy::{
     CacheConfig, current_age, has_validator, is_fresh, request_forces_revalidation, storable,
 };
@@ -208,14 +209,52 @@ impl HttpCache {
         };
         let received_at = self.clock.now();
 
+        // A `304` that names a representation this cache does not hold, or that
+        // selects its representations by fields other than the ones the stored
+        // entry was selected by, is not a revalidation of anything here.
+        // Falling through rather than merging sends it to the not-storable path
+        // below, which drops the superseded entry — a `304` is not a cacheable
+        // status — and hands the origin's own answer back.
         if let Some(entry) = &state.revalidating
             && response.status() == StatusCode::NOT_MODIFIED
+            && validators_agree(entry.headers(), response.headers())
+            && selects_the_same_way(entry.headers(), response.headers())
         {
             let refreshed =
                 Arc::new(entry.refreshed(response.headers(), state.requested_at, received_at));
-            self.store(&state.key, Arc::clone(&refreshed));
+
+            // The merge produces a response this cache has never applied §3 to.
+            // A `304` may add `no-store`, `Set-Cookie`, or `private`, and every
+            // one of those would have refused the response on the way in; none
+            // of them is weaker for arriving on a revalidation instead.
+            let merged_cc = CacheControl::of(refreshed.headers());
+            match storable(
+                &self.config,
+                &Method::GET,
+                &state.request_headers,
+                &state.request_cc,
+                refreshed.status(),
+                refreshed.headers(),
+                &merged_cc,
+            ) {
+                Ok(_) => {
+                    self.store(&state.key, Arc::clone(&refreshed));
+                    tracing::trace!(key = %state.key, "revalidated a stored response");
+                }
+                // Served, but not kept: the caller still needs the body and
+                // whatever state the `304` carried, and dropping either
+                // silently would lose what the origin sent.
+                Err(reason) => {
+                    tracing::trace!(
+                        key = %state.key,
+                        %reason,
+                        "a 304 refreshed an entry into one that may not be stored"
+                    );
+                    self.remove(&state.key);
+                }
+            }
+
             let age = current_age(&refreshed, received_at);
-            tracing::trace!(key = %state.key, "revalidated a stored response");
             return revalidated(&refreshed, age, response.into_body());
         }
 
@@ -451,6 +490,76 @@ struct PendingInner {
     revalidating: Option<Arc<CacheEntry>>,
 }
 
+/// Whether a `304` names the representation this cache stored.
+///
+/// RFC 9111 §4.3.4: the validator on a `304` identifies which stored response
+/// it updates, and if none of them carries that validator the cache must not
+/// use the `304` to update any of them. An origin that answers
+/// `If-None-Match: "v1"` with a `304` carrying `ETag: "v2"` is confirming a
+/// representation this cache does not hold; merging it would label the stored
+/// body with a tag that was never its own, and every later revalidation would
+/// then confirm the wrong one — a body frozen under a name it does not have.
+///
+/// The comparison is on the opaque tag alone, so `W/"v1"` and `"v1"` are the
+/// same representation and a weak tag that *changed* is still a change. A `304`
+/// carrying no `ETag`, or one answering an entry that had none, is accepted:
+/// the origin validated it against the `Last-Modified` this cache sent, and
+/// refusing there would throw away every `If-Modified-Since` hit.
+fn validators_agree(stored: &HeaderMap, not_modified: &HeaderMap) -> bool {
+    match (stored.get(ETAG), not_modified.get(ETAG)) {
+        (Some(stored), Some(confirmed)) => opaque_tag(stored) == opaque_tag(confirmed),
+        _ => true,
+    }
+}
+
+/// An entity tag without its weakness prefix.
+fn opaque_tag(value: &HeaderValue) -> &[u8] {
+    let bytes = value.as_bytes();
+    bytes.strip_prefix(b"W/").unwrap_or(bytes)
+}
+
+/// Whether a `304` selects its representations the way the stored entry was
+/// selected.
+///
+/// A [`Selector`] records the values the *stored* `Vary` named, taken from the
+/// request that fetched the body. A `304` naming different fields describes a
+/// resource whose selection rules have moved, and this cache cannot place the
+/// body it holds under the new ones: keeping the entry would leave a response
+/// fetched for one `Accept-Language` matching a request for another, and
+/// rebuilding the selector from the current request would leave the same body
+/// stored twice, once under each rule.
+///
+/// A `304` that says nothing about `Vary` is the common case and changes
+/// nothing — RFC 9110 §15.4.5 asks for the field but plenty of origins omit it,
+/// and an omission is not a statement that selection stopped.
+fn selects_the_same_way(stored: &HeaderMap, not_modified: &HeaderMap) -> bool {
+    if !not_modified.contains_key(VARY) {
+        return true;
+    }
+    // A stored entry can never carry `Vary: *`, so the `None` on the left is
+    // unreachable; the `None` on the right — `*`, or a `Vary` this cache cannot
+    // read — never matches it.
+    vary_names(stored).is_some_and(|stored| vary_names(not_modified) == Some(stored))
+}
+
+/// Whether a recorded body is the length its own headers promised.
+///
+/// RFC 9110 §6.3: a message whose declared length is not its length is
+/// malformed. Storing one freezes the disagreement rather than ending it — the
+/// body becomes [`Bytes`] and the `Content-Length` stays a claim about it, and
+/// nothing downstream re-derives the second from the first, so every later hit
+/// serves the same corrupt pair.
+fn declares_its_length(headers: &HeaderMap, length: usize) -> bool {
+    let Some(declared) = headers.get(CONTENT_LENGTH) else {
+        return true;
+    };
+    declared
+        .to_str()
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok())
+        .is_some_and(|declared| declared == length as u64)
+}
+
 /// The methods RFC 9110 §9.2.1 calls safe.
 fn is_safe(method: &Method) -> bool {
     matches!(
@@ -586,11 +695,19 @@ impl Stream for Recording {
                 }
                 Poll::Ready(None) => {
                     if let Some(commit) = this.commit.take() {
+                        let body = std::mem::take(&mut this.buffered).freeze();
+                        if !declares_its_length(&commit.headers, body.len()) {
+                            tracing::debug!(
+                                key = %commit.key,
+                                "not storing a body that is not the length it declared"
+                            );
+                            return Poll::Ready(None);
+                        }
                         let entry = Arc::new(CacheEntry::new(
                             commit.status,
                             commit.version,
                             commit.headers,
-                            std::mem::take(&mut this.buffered).freeze(),
+                            body,
                             commit.selector,
                             commit.requested_at,
                             commit.received_at,
