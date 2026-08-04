@@ -174,6 +174,93 @@ async fn a_stale_entry_revalidates_and_a_304_returns_the_stored_body() {
     );
 }
 
+/// A `304` is the one path that writes an entry without the response ever
+/// being put to the storability rules. An origin that refreshes a session on
+/// its `304` would, if that merge were unconditional, leave one identity's
+/// `Set-Cookie` in the store to be handed to every later request for the same
+/// URL. The count on the server is what shows it is not.
+#[tokio::test]
+async fn a_304_that_carries_set_cookie_is_not_left_in_the_store() {
+    let server = TestServer::start(|request| {
+        if request.header("if-none-match") == Some("\"v1\"") {
+            Reply::new(304)
+                .with_header("cache-control", "max-age=600")
+                .with_header("set-cookie", "session=leaked")
+        } else {
+            Reply::text("payload")
+                .with_header("cache-control", "max-age=60")
+                .with_header("etag", "\"v1\"")
+        }
+    })
+    .await;
+    let (cache, clock) = cache_at(SystemTime::UNIX_EPOCH);
+    let engine = engine_for(&server, Some(cache));
+    let url = server.url_for(HOST, "/asset");
+
+    let _ = text(engine.send(get(&url)).await.expect("the first request")).await;
+
+    clock.advance(Duration::from_secs(120));
+    let revalidated = engine.send(get(&url)).await.expect("the revalidation");
+    assert_eq!(
+        revalidated.headers()["set-cookie"],
+        "session=leaked",
+        "the caller is still handed the state the origin sent"
+    );
+    assert_eq!(text(revalidated).await, "payload");
+
+    let third = engine.send(get(&url)).await.expect("the third request");
+    assert!(
+        third.extensions().get::<CacheStatus>().is_none(),
+        "the entry the 304 would have refreshed carried a Set-Cookie, so it was not kept"
+    );
+    assert!(!third.headers().contains_key("set-cookie"));
+    let _ = text(third).await;
+
+    assert_eq!(
+        server.request_count(),
+        3,
+        "the third request must reach the origin rather than replay a stored cookie"
+    );
+}
+
+/// RFC 9111 §4.3.4: a `304` naming a validator this cache does not hold updates
+/// nothing here. The stored body must not come back wearing the new tag.
+#[tokio::test]
+async fn a_304_naming_a_different_entity_tag_leaves_nothing_stored() {
+    let server = TestServer::start(|request| {
+        if request.header("if-none-match").is_some() {
+            Reply::new(304)
+                .with_header("cache-control", "max-age=600")
+                .with_header("etag", "\"v2\"")
+        } else {
+            Reply::text("payload")
+                .with_header("cache-control", "max-age=60")
+                .with_header("etag", "\"v1\"")
+        }
+    })
+    .await;
+    let (cache, clock) = cache_at(SystemTime::UNIX_EPOCH);
+    let engine = engine_for(&server, Some(cache));
+    let url = server.url_for(HOST, "/asset");
+
+    let _ = text(engine.send(get(&url)).await.expect("the first request")).await;
+
+    clock.advance(Duration::from_secs(120));
+    let second = engine.send(get(&url)).await.expect("the revalidation");
+    assert_ne!(
+        second.extensions().get::<CacheStatus>(),
+        Some(&CacheStatus::Revalidated),
+        "nothing here was revalidated: the origin confirmed a representation this cache does not \
+         hold"
+    );
+    let _ = text(second).await;
+
+    let third = engine.send(get(&url)).await.expect("the third request");
+    assert!(third.extensions().get::<CacheStatus>().is_none());
+    let _ = text(third).await;
+    assert_eq!(server.request_count(), 3);
+}
+
 #[tokio::test]
 async fn a_no_store_response_is_fetched_again_every_time() {
     let server = TestServer::always(

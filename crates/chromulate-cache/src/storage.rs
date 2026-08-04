@@ -349,9 +349,25 @@ impl CacheStorage for MemoryStore {
         let mut shard = lock(self.shard_of(key));
 
         let existing = shard.records.get(key);
+        let previous = existing.map_or(0, |record| record.bytes);
         let merged = merge_variants(existing.map_or(&[][..], |record| &record.variants), entry);
         let bytes = key.size() + merged.iter().map(|entry| entry.size()).sum::<usize>();
-        let previous = existing.map_or(0, |record| record.bytes);
+
+        // A record larger than its shard's whole share of the budget can never
+        // be held: the purge below would drop it again on the way out, and
+        // would take every other key in the shard with it — a cache flush an
+        // origin can trigger with one large response. Refusing it here costs
+        // the one entry that does not fit and nothing else.
+        //
+        // What is still dropped is the copy this entry supersedes: the origin
+        // has answered with something newer, so the older body is no longer
+        // true, and being unable to store the replacement does not make it so.
+        if bytes > self.limits.per_shard() {
+            if shard.records.remove(key).is_some() {
+                shard.bytes -= previous.min(shard.bytes);
+            }
+            return Ok(());
+        }
 
         shard.bytes = shard.bytes + bytes - previous.min(shard.bytes);
         shard.records.insert(
@@ -549,6 +565,59 @@ mod tests {
             scans < 100 * 30,
             "100 stores into a full cache examined {scans} records — eviction is not batched"
         );
+    }
+
+    /// A record too large for its shard cannot be kept whatever happens: the
+    /// purge that follows its own store evicts it again. What must not happen
+    /// is that it takes the rest of the shard with it on the way out, which is
+    /// a whole-cache flush an origin can trigger with one large response.
+    #[test]
+    fn an_entry_too_large_for_its_shard_is_refused_rather_than_flushing_it() {
+        let store = MemoryStore::with_limits(MemoryLimits {
+            max_bytes: 8 * 1024,
+            shards: 1,
+        });
+        for index in 0..4 {
+            store
+                .put(&key(&index.to_string()), entry(512))
+                .expect("put succeeds");
+        }
+        assert_eq!(store.stats().keys, 4);
+
+        store
+            .put(&key("huge"), entry(16 * 1024))
+            .expect("put succeeds");
+
+        assert_eq!(
+            store.get(&key("huge")).expect("get succeeds").len(),
+            0,
+            "an entry larger than the whole shard cannot be stored"
+        );
+        assert_eq!(
+            store.stats().keys,
+            4,
+            "and refusing it must not evict the four keys that do fit"
+        );
+        assert_eq!(store.stats().evictions, 0);
+        assert!(store.stats().bytes <= 8 * 1024);
+    }
+
+    /// The oversized entry supersedes what was stored under its own key, and
+    /// the fact that it cannot be kept does not make the copy it replaced true
+    /// again.
+    #[test]
+    fn a_refused_oversized_entry_still_drops_the_copy_it_supersedes() {
+        let store = MemoryStore::with_limits(MemoryLimits {
+            max_bytes: 8 * 1024,
+            shards: 1,
+        });
+        store.put(&key("one"), entry(512)).expect("put succeeds");
+        store
+            .put(&key("one"), entry(16 * 1024))
+            .expect("put succeeds");
+
+        assert_eq!(store.get(&key("one")).expect("get succeeds").len(), 0);
+        assert_eq!(store.stats().bytes, 0);
     }
 
     #[test]
