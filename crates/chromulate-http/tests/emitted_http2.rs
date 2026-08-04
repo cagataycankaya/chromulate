@@ -55,6 +55,13 @@ struct Observed {
     window_update: Option<u32>,
     /// Whether the HEADERS frame set the PRIORITY flag.
     headers_priority_flag: bool,
+    /// How many standalone PRIORITY frames arrived before the first HEADERS.
+    ///
+    /// This is the Akamai fingerprint's third field, which is a count of
+    /// PRIORITY *frames* and not of the HEADERS priority flag above. The two
+    /// are separate observables and the capture shows Chrome using one without
+    /// the other, so they are recorded separately here too.
+    priority_frames: usize,
     /// Pseudo-header names in the order the HEADERS block listed them.
     pseudo_order: Vec<&'static str>,
 }
@@ -132,6 +139,9 @@ async fn record_opening_frames() -> io::Result<Recording> {
                     let increment =
                         u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
                     observed.window_update = Some(increment & 0x7fff_ffff);
+                }
+                0x2 => {
+                    observed.priority_frames += 1;
                 }
                 0x1 => {
                     observed.headers_priority_flag = header.flags & 0x20 != 0;
@@ -316,6 +326,29 @@ async fn the_emitted_http2_preface_matches_the_profile() {
         observed.window_update,
         Some(profile.http2.connection_window_update),
         "the connection window update must match the capture"
+    );
+
+    // The Akamai fingerprint's third field. Until this assertion existed the
+    // frame loop ignored frame type 0x2 entirely, so "Chromulate sends no
+    // PRIORITY frames" was a claim no hermetic test could have falsified —
+    // three of the four fields were checked and the fourth was assumed.
+    //
+    // Be clear about what this does and does not guard. Against the Chrome
+    // profile both sides are zero, so deleting the `0x2` arm of the frame loop
+    // would leave this green: it does not prove the counter counts. What it
+    // does catch is the case that will actually arise — a profile whose
+    // capture *does* record PRIORITY frames, such as Firefox's
+    // `3:0:0:201,...`, against a client that cannot send any, because h2's
+    // write path for them is `unimplemented!()`. Today that divergence would
+    // be silent. Proving the counter itself would mean factoring the frame
+    // walk out of this async recorder into something a synthetic byte stream
+    // can be fed to, which is worth doing when a second profile lands.
+    assert_eq!(
+        observed.priority_frames,
+        profile.http2.priority_frames.len(),
+        "the profile records {} PRIORITY frame(s) and the wire carried {}",
+        profile.http2.priority_frames.len(),
+        observed.priority_frames
     );
 
     // The two known divergences, asserted rather than described, so that a

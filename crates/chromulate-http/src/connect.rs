@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use chromulate_core::{Body, Error, HostPort, Origin, Phase, Resolve, Result, Timings};
 use chromulate_profile::Profile;
 use chromulate_proxy::{Proxy, ProxyProvider};
-use chromulate_tls::{Alpn, HandshakeInfo, TlsEngine, TlsStream};
+use chromulate_tls::{ActiveBackend, Alpn, TlsBackend, server_name};
 use hyper::client::conn::{http1, http2};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -25,9 +25,17 @@ use crate::pool::{Connection, ConnectionIdentity, PoolKey, Protocol};
 /// Both variants are `Unpin`, so the enum is projected with `get_mut` rather
 /// than a projection macro — the workspace forbids `unsafe`, which rules out
 /// `pin-project-lite`.
+/// The TLS stream the linked backend produces over a TCP socket.
+///
+/// Derived from [`ActiveBackend`] rather than named directly, so that pointing
+/// that alias at a different backend does not leave a rustls type sitting in
+/// the middle of the connection path. It resolves to a concrete type, so
+/// reading and writing through [`Stream`] is a static call in both variants.
+type BackendStream = <ActiveBackend as TlsBackend<TcpStream>>::Stream;
+
 enum Stream {
     Plain(TcpStream),
-    Secure(Box<TlsStream<TcpStream>>),
+    Secure(Box<BackendStream>),
 }
 
 impl AsyncRead for Stream {
@@ -86,7 +94,7 @@ pub(crate) struct Route {
 /// Everything needed to open connections on a profile's behalf.
 pub(crate) struct Connector {
     resolver: Arc<dyn Resolve>,
-    tls: TlsEngine,
+    tls: ActiveBackend,
     proxies: Option<Arc<dyn ProxyProvider>>,
     profile: Arc<Profile>,
     identity: ConnectionIdentity,
@@ -109,7 +117,7 @@ impl std::fmt::Debug for Connector {
 impl Connector {
     pub(crate) fn new(
         profile: Arc<Profile>,
-        tls: TlsEngine,
+        tls: ActiveBackend,
         resolver: Arc<dyn Resolve>,
         proxies: Option<Arc<dyn ProxyProvider>>,
         connect_timeout: Option<Duration>,
@@ -140,7 +148,7 @@ impl Connector {
         &self.http2_fidelity
     }
 
-    pub(crate) fn tls(&self) -> &TlsEngine {
+    pub(crate) fn tls(&self) -> &ActiveBackend {
         &self.tls
     }
 
@@ -264,15 +272,18 @@ impl Connector {
 
         let (stream, alpn) = if origin.is_secure() {
             let started = Instant::now();
-            let tls = deadline
+            // Through `TlsBackend`, not through `TlsEngine`'s inherent method.
+            // The seam only proves it is the right shape while a real caller
+            // stands on it; a trait nothing calls is a guess about an API.
+            // Dispatch stays static because `ActiveBackend` is a concrete type.
+            let (tls, info) = deadline
                 .run(
                     Phase::Handshake,
                     self.connect_timeout,
-                    self.tls.connect(stream, origin.host()),
+                    TlsBackend::connect(&self.tls, stream, server_name(origin.host())?),
                 )
                 .await?;
             timings.record_handshake(started.elapsed());
-            let info = HandshakeInfo::of_stream(&tls);
             tracing::debug!(
                 alpn = info.alpn.as_ref().map(Alpn::as_str),
                 resumed = info.resumed,
@@ -417,7 +428,7 @@ mod tests {
 
     fn connector_with(proxies: Option<Arc<dyn ProxyProvider>>) -> Connector {
         let profile = Arc::new(Profile::chrome_stable());
-        let tls = TlsEngine::new(&profile).expect("the profile must build a TLS engine");
+        let tls = ActiveBackend::new(&profile).expect("the profile must build a TLS engine");
         Connector::new(
             Arc::clone(&profile),
             tls,

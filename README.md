@@ -305,11 +305,22 @@ fingerprint crate models and computes the target shape exactly, and the golden t
 the model matches a real browser, but the bytes on the wire are `rustls`'s own. Closing
 that gap needs a custom ClientHello encoder or a different TLS backend.
 
+Groundwork for the second option is in place: `chromulate-tls` exposes a `TlsBackend` trait
+that the connection path actually uses, and `ActiveBackend` is the build-time alias naming
+the backend a given build links. `chromulate-http` no longer names `rustls` anywhere, so an
+alternative backend is a trait implementation behind a cargo feature rather than a rewrite of
+how connections are opened. **No such backend exists**, and none of the numbers above change
+until one does.
+
 Also measured, and also not matching:
 
 - **HTTP/2 pseudo-header order** is `m,s,a,p` where Chrome sends `m,a,s,p`, and the first
   `HEADERS` frame carries no priority fields where Chrome's does. Both are fixed behaviour
-  of the `h2` crate. The SETTINGS and connection window *do* match exactly.
+  of the `h2` crate: the order comes from a straight-line sequence of `if let` blocks in
+  `frame::headers`, and `Headers::encode` discards the stream-dependency field it parses, so
+  neither is reachable by configuring or wrapping `h2`. The SETTINGS, the connection window
+  and the PRIORITY-frame count *do* match exactly, which leaves the pseudo-header order as
+  the only Akamai field that differs.
 - **HTTP/3 and QUIC are not shipped.** `Alt-Svc` parsing and an alternative-service cache exist in `chromulate-h3`, and a QUIC spike behind the non-default `quic-spike` feature can complete a real HTTP/3 request — but it is a measurement rather than a product, for the reasons in [docs/architecture/04-http3-assessment.md](docs/architecture/04-http3-assessment.md). In any default build, Chrome upgrades to HTTP/3 where an origin
   advertises it; Chromulate stays on HTTP/2.
 - **There is one profile**: Chrome 151 on macOS. Presenting as Chrome on Windows or Linux,

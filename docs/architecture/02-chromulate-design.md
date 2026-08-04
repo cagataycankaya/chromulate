@@ -1482,11 +1482,30 @@ these fields.
 
 ### 9.8 The backend seam
 
-Section 8.6 argued for making the TLS backend replaceable. The seam is a trait in
-`chromulate-tls` that takes a `ClientHelloSpec` and a target, and returns a connected,
-negotiated stream plus the ALPN result. The rustls implementation is the default and the
-only one in-tree. This seam does not exist yet and is Phase 5 work; it is specified here so
-that the rustls implementation is not written in a way that forecloses it.
+Section 8.6 argued for making the TLS backend replaceable. The seam is `TlsBackend` in
+`chromulate-tls`: it takes an already-dialled stream and a `ServerName`, and returns the
+connected stream together with the `HandshakeInfo` the handshake settled on. It exposes the
+`ClientHelloSpec` being aimed at through a separate method rather than taking one, because a
+backend is configured from the profile when it is built, not per connection.
+
+The rustls implementation is the default and the only one in-tree. **The seam exists and is
+load-bearing**: `chromulate-http` holds a `chromulate_tls::ActiveBackend`, opens every TLS
+connection through `TlsBackend::connect`, and names the stream type as
+`<ActiveBackend as TlsBackend<TcpStream>>::Stream` rather than naming rustls. The string
+`rustls` does not appear anywhere in `crates/chromulate-http/src/` outside one explanatory
+comment.
+
+Two properties were deliberate. The stream is an **associated type, not a boxed trait
+object**, so no byte on the request path crosses a vtable; `TlsConnection` still exists for
+callers who want type erasure, but they opt into it. And backend choice is a **build-time
+alias** rather than a runtime object, which is what keeps that associated type concrete —
+the same trade rustls makes with its crypto providers. Adding a BoringSSL backend is
+implementing the trait and pointing `ActiveBackend` and `TlsStream` at it under a cargo
+feature; it is not a change to the connection path.
+
+The earlier version of this section said the seam "does not exist yet and is Phase 5 work".
+It had in fact been written, exported, and left with zero callers — which is why the shipped
+signature had already drifted from the one specified here before anyone noticed.
 
 ---
 

@@ -111,6 +111,45 @@ that breaking changes may land in a minor release.
 
 ### Changed
 
+- **The TLS backend seam now carries the connection, and its signature changed to do it
+  without cost.** `TlsBackend` existed as public API but had zero production callers:
+  `chromulate-http` held a concrete `TlsEngine` and called its inherent `connect`, so the
+  trait was exercised only by its own unit test. It is now the path every TLS connection
+  takes. Two breaking changes to the trait were needed to get there, both of them the point
+  rather than incidental:
+
+  - `TlsBackend::Stream` is a new associated type, and `connect` returns
+    `(Self::Stream, HandshakeInfo)` instead of a boxed `TlsConnection`. The boxed form put a
+    `dyn` behind every `poll_read` and `poll_write` on the request path; an associated type
+    keeps the stream concrete and the dispatch static. `TlsConnection` is unchanged and
+    still available for callers who want to erase the type — they now opt into that cost
+    instead of having it imposed.
+  - `connect` returns the `HandshakeInfo` alongside the stream. `chromulate-http` previously
+    called `HandshakeInfo::of_stream`, which reads rustls's own connection state, so the
+    caller was coupled to the implementation the trait exists to hide. A backend that is not
+    rustls could not have answered that question the same way.
+
+  New: `chromulate_tls::ActiveBackend`, a type alias for the backend this build links
+  (`TlsEngine` today). Backend choice is deliberately a build-time alias rather than a
+  runtime object — naming it concretely is what keeps the associated type concrete, and so
+  what keeps the vtable off the hot path. It is the same trade `rustls` makes with its
+  crypto providers. `EngineBuilder::tls` and `Engine::tls` now name `ActiveBackend`; since
+  it currently aliases `TlsEngine`, no caller has to change.
+
+  The measurable result: `crates/chromulate-http/src/` no longer contains the string
+  `rustls` anywhere outside one explanatory comment. `Stream::Secure` derives its type from
+  `<ActiveBackend as TlsBackend<TcpStream>>::Stream` rather than naming `TlsStream`
+  directly — the unused-import error that change produced is the evidence the decoupling is
+  real. Adding a BoringSSL backend is now implementing the trait and pointing two aliases at
+  it under a cargo feature, not editing the connection path. Behaviour is unchanged and
+  UNMEASURED for performance: the change removes indirection rather than adding it, but no
+  before/after benchmark was run, so no speed claim is made.
+
+  What this does not establish: no second backend exists, so the trait's sufficiency is
+  argued rather than demonstrated. It is at least now exercised by a real caller, which is
+  the condition under which a wrong signature shows up cheaply — and the signature did have
+  to change, which is exactly what having no callers had hidden.
+
 - **The minimum supported Rust version is 1.88**, corrected rather than raised.
   `rust-version` said 1.85 while `cargo +1.85.0 check --workspace --all-features` had been
   failing: the engine uses a let-chain, stable only from 1.88 on the 2024 edition, and
@@ -160,6 +199,30 @@ that breaking changes may land in a minor release.
   consumes it as before, so the facade API is unchanged.
 
 ### Fixed
+
+- **Shipped output undercounted the GREASE positions by one.** `STRUCTURAL_LIMITS` — printed
+  by `chromulate fingerprint` and by the `capabilities` example — said GREASE is missing from
+  "the five slots the profile marks", and `docs/fidelity.md` enumerated five: first cipher,
+  first extension, first supported group, first key share, last extension. The capture records
+  **six** (`client_hello.grease_positions`), and `GreasePlacement::ALL` sets all of them: the
+  omitted one is *first supported version*. The confusion is structural rather than careless —
+  `GreasePlacement` carries five booleans because its `extensions` flag covers two wire slots
+  — so the fix says which number counts what, and the guidance is to count against the capture
+  rather than the struct. Corrected in `fidelity.rs`, `chromulate-tls`'s crate documentation,
+  `docs/fidelity.md`, the assertion message in `emitted_client_hello.rs`, and `CLAUDE.md`,
+  which had inherited the five-item list.
+
+- **The Akamai fingerprint's PRIORITY field was assumed rather than checked.**
+  `emitted_http2.rs` decoded SETTINGS, the connection `WINDOW_UPDATE`, the HEADERS flags and
+  the pseudo-header order, and its prose claimed all four fields were verified from the wire —
+  but its frame loop matched only types `0x4`, `0x8` and `0x1`, so a PRIORITY frame (`0x2`)
+  fell through the catch-all arm unseen. Three fields were checked and the fourth was
+  asserted by omission. The loop now counts PRIORITY frames and the test compares that count
+  against the profile's. Being precise about what this guards: against the Chrome profile both
+  sides are zero, so deleting the counting arm would leave the test green — it does not prove
+  the counter counts. What it catches is the case that will actually arise: a profile whose
+  capture *does* record PRIORITY frames, such as Firefox's `3:0:0:201,…`, against a client
+  whose h2 write path for them is `unimplemented!()`. That divergence was previously silent.
 
 Twelve of these came from adversarial audits of the six features above, run after they
 landed. Each audit was told to try to break shipped code rather than review a plan, and to

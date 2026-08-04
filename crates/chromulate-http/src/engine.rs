@@ -14,7 +14,7 @@ use chromulate_dns::{CachingResolver, SystemResolver};
 use chromulate_header::{AcceptChStore, HeaderEngine};
 use chromulate_profile::Profile;
 use chromulate_proxy::ProxyProvider;
-use chromulate_tls::TlsEngine;
+use chromulate_tls::ActiveBackend;
 use http::header::SET_COOKIE;
 use http::{HeaderName, HeaderValue};
 use tracing::Instrument as _;
@@ -169,7 +169,7 @@ impl EngineConfig {
 /// Assembles an [`Engine`].
 pub struct EngineBuilder {
     config: EngineConfig,
-    tls: Option<TlsEngine>,
+    tls: Option<ActiveBackend>,
     resolver: Option<Arc<dyn Resolve>>,
     proxies: Option<Arc<dyn ProxyProvider>>,
     cookies: Option<Arc<dyn CookieStore>>,
@@ -215,7 +215,7 @@ impl EngineBuilder {
 
     /// Uses a TLS engine other than the one the profile would build.
     #[must_use]
-    pub fn tls(mut self, tls: TlsEngine) -> Self {
+    pub fn tls(mut self, tls: ActiveBackend) -> Self {
         self.tls = Some(tls);
         self
     }
@@ -323,7 +323,7 @@ impl EngineBuilder {
         let profile = Arc::clone(&self.config.profile);
         let tls = match self.tls {
             Some(tls) => tls,
-            None => TlsEngine::new(&profile)?,
+            None => ActiveBackend::new(&profile)?,
         };
         let resolver = self.resolver.unwrap_or_else(|| {
             Arc::new(CachingResolver::with_default_ttls(SystemResolver::new())) as Arc<dyn Resolve>
@@ -448,7 +448,7 @@ impl Engine {
 
     /// The TLS engine, whose `fidelity()` reports the handshake gap.
     #[must_use]
-    pub fn tls(&self) -> &TlsEngine {
+    pub fn tls(&self) -> &ActiveBackend {
         self.inner.connector.tls()
     }
 

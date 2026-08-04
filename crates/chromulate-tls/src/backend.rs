@@ -26,9 +26,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> TlsIo for T {}
 
 /// A finished TLS connection, with the handshake outcome attached.
 ///
-/// The stream is boxed so that every backend returns the same type. When the
-/// backend is known to be rustls and the extra indirection is not wanted,
-/// [`TlsEngine::connect`] hands back `tokio_rustls`'s stream directly.
+/// The stream is boxed so that connections from different backends can be held
+/// in one collection. This is a convenience for callers who want that, not the
+/// shape [`TlsBackend`] imposes: the trait hands back a concrete
+/// [`TlsBackend::Stream`], and the request path in `chromulate-http` uses that
+/// directly so no byte crosses a vtable.
 pub struct TlsConnection {
     io: Box<dyn TlsIo>,
     info: HandshakeInfo,
@@ -95,12 +97,34 @@ pub trait TlsBackend<IO>: Send + Sync + 'static
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    /// The stream this backend hands back.
+    ///
+    /// An associated type rather than a boxed trait object, so that the request
+    /// path costs no virtual dispatch: a caller naming a concrete backend gets
+    /// a concrete stream and every `poll_read` is a direct call. [`TlsConnection`]
+    /// exists for callers that would rather erase the type, and it is their
+    /// choice to pay for it rather than this trait's to impose.
+    type Stream: TlsIo;
+
     /// Performs the handshake over an established stream.
+    ///
+    /// Returns what the handshake settled on alongside the stream, because
+    /// reading that back out afterwards is backend-specific — rustls answers it
+    /// from its own connection state, and a BoringSSL backend would not — so a
+    /// caller that had to ask separately would be coupled to the implementation
+    /// it is supposed to be insulated from.
+    ///
+    /// The future is boxed. That is one allocation per handshake, not per byte,
+    /// and it keeps the trait object-safe for anyone who wants runtime selection.
     ///
     /// # Errors
     ///
     /// Returns [`chromulate_core::Error::Tls`] when the handshake fails.
-    fn connect(&self, io: IO, name: ServerName<'static>) -> BoxFuture<'_, Result<TlsConnection>>;
+    fn connect(
+        &self,
+        io: IO,
+        name: ServerName<'static>,
+    ) -> BoxFuture<'_, Result<(Self::Stream, HandshakeInfo)>>;
 
     /// Returns the ClientHello this backend is trying to reproduce.
     ///
@@ -113,11 +137,17 @@ impl<IO> TlsBackend<IO> for TlsEngine
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    fn connect(&self, io: IO, name: ServerName<'static>) -> BoxFuture<'_, Result<TlsConnection>> {
+    type Stream = crate::TlsStream<IO>;
+
+    fn connect(
+        &self,
+        io: IO,
+        name: ServerName<'static>,
+    ) -> BoxFuture<'_, Result<(Self::Stream, HandshakeInfo)>> {
         Box::pin(async move {
             let stream = self.connect_to(io, name).await?;
             let info = HandshakeInfo::of_stream(&stream);
-            Ok(TlsConnection::new(stream, info))
+            Ok((stream, info))
         })
     }
 
@@ -137,12 +167,32 @@ mod tests {
     fn the_engine_is_usable_through_the_backend_trait() {
         let engine =
             TlsEngine::new(&Profile::chrome_stable()).expect("the Chrome engine must build");
-        let backend: &dyn TlsBackend<DuplexStream> = &engine;
+        let backend: &dyn TlsBackend<DuplexStream, Stream = crate::TlsStream<DuplexStream>> =
+            &engine;
 
         assert_eq!(
             backend.target_client_hello(),
             &Profile::chrome_stable().client_hello,
             "a caller behind the trait can still read the target it is aiming at"
+        );
+    }
+
+    /// The trait stays object-safe, which is not free once it has an associated
+    /// type and is therefore worth pinning: naming `dyn TlsBackend` above only
+    /// compiles while the associated type can be written out at the use site.
+    /// Runtime backend selection is not something this workspace does today,
+    /// but foreclosing it should be a decision rather than an accident.
+    #[test]
+    fn a_backend_can_be_used_as_a_trait_object() {
+        let engine =
+            TlsEngine::new(&Profile::chrome_stable()).expect("the Chrome engine must build");
+        let boxed: Box<dyn TlsBackend<DuplexStream, Stream = crate::TlsStream<DuplexStream>>> =
+            Box::new(engine);
+
+        assert_eq!(
+            boxed.target_client_hello().alpn,
+            vec!["h2".to_owned(), "http/1.1".to_owned()],
+            "the boxed backend still reports the profile's ALPN"
         );
     }
 }

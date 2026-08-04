@@ -248,10 +248,20 @@ something it may implement (rustls 0.23.43, `src/manual/features.rs:98`). Done w
 features are released upstream and the Phase 4 diff shrinks accordingly. Outside this
 project's control; needs an owner willing to work on someone else's schedule.
 
-**A pluggable TLS backend trait.** Specified in section 9.8 of the design document. Done
-when the rustls implementation sits behind the trait with no behaviour change, so that an
-out-of-tree BoringSSL backend is possible without the default build acquiring a C
-dependency.
+**A pluggable TLS backend trait. Status: Done (2026-08-05).** Specified in section 9.8 of
+the design document. The rustls implementation now sits behind `TlsBackend` with no
+behaviour change: `chromulate-http` holds an `ActiveBackend`, handshakes through the trait,
+and derives its stream type from it, so an out-of-tree BoringSSL backend is possible without
+the default build acquiring a C dependency. The full battery — `fmt`, `clippy` under
+`RUSTFLAGS=-D warnings`, the workspace tests, `cargo +1.88 check`, and `cargo doc` under
+`RUSTDOCFLAGS=-D warnings` — was green across the change.
+
+What this does *not* establish: no second backend exists, so the trait's sufficiency is
+argued rather than demonstrated. It is now at least exercised by a real caller instead of
+only by its own unit test, which is the condition under which a wrong signature shows up
+cheaply. The signature already had to change to get here — the version in the design
+document returned a boxed connection and made the caller ask rustls for the handshake result
+separately.
 
 **A custom ClientHello encoder in front of rustls.** Assessed in the design document as
 not recommended: the ClientHello is part of a transcript both sides hash, and splicing a
