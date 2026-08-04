@@ -298,12 +298,11 @@ impl Session for ProbeSession {
     fn write_handshake(&mut self, buf: &mut Vec<u8>) -> Option<Keys> {
         let before = buf.len();
         let keys = self.inner.write_handshake(buf);
-        if buf.len() > before {
-            if let Ok(mut state) = self.recorder.state.lock() {
-                if state.client_hello.is_empty() {
-                    state.client_hello = buf[before..].to_vec();
-                }
-            }
+        if buf.len() > before
+            && let Ok(mut state) = self.recorder.state.lock()
+            && state.client_hello.is_empty()
+        {
+            state.client_hello = buf[before..].to_vec();
         }
         keys
     }

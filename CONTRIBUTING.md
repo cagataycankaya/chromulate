@@ -46,7 +46,7 @@ Run `python3 tools/cookie-mutation-check.py` as well when you have touched
 `chromulate-cookie`; it verifies that the tests would notice if each fix were reverted,
 which a green suite does not tell you.
 
-CI runs all of the above plus an MSRV check against Rust 1.85, Miri over
+CI runs all of the above plus an MSRV check against Rust 1.88, Miri over
 `chromulate-core`, tests on Linux, macOS, and Windows, `cargo machete` for unused
 dependencies, and a build of the fuzz targets. The nightly schedule also gives each fuzz
 target a short run — see `fuzz/README.md`. To run those two locally:

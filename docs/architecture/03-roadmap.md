@@ -355,7 +355,7 @@ RFC 9111 correctness.
 examples, a plugin guide covering the seven seams, and a performance guide that exists only
 once Phase 7 has produced numbers to put in it.
 
-**CI maturity.** The platform matrix on stable and on the 1.85 MSRV (`Cargo.toml:26`), Miri
+**CI maturity.** The platform matrix on stable and on the 1.88 MSRV (`Cargo.toml:27`), Miri
 over `chromulate-core` only (it has no I/O and is therefore tractable), coverage reporting,
 and a scheduled job running the `network-tests` suite separately from pull-request CI so
 that an unrelated upstream outage does not block a merge.

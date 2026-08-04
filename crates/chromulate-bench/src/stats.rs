@@ -42,7 +42,7 @@ impl Summary {
         let mut sorted = samples.to_vec();
         sorted.sort_by(f64::total_cmp);
         let middle = sorted.len() / 2;
-        let median = if sorted.len() % 2 == 0 {
+        let median = if sorted.len().is_multiple_of(2) {
             (sorted[middle - 1] + sorted[middle]) / 2.0
         } else {
             sorted[middle]

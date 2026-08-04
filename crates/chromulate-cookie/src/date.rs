@@ -108,35 +108,33 @@ pub(crate) fn parse_cookie_date(input: &str) -> Option<SystemTime> {
     let mut found_year: Option<u32> = None;
 
     for token in input.split(is_delimiter).filter(|t| !t.is_empty()) {
-        if found_time.is_none() {
-            if let Some(time) = try_time(token) {
-                found_time = Some(time);
+        if found_time.is_none()
+            && let Some(time) = try_time(token)
+        {
+            found_time = Some(time);
+            continue;
+        }
+        if found_day.is_none()
+            && let Some((value, len)) = leading_digits(token)
+            && len <= 2
+        {
+            found_day = Some(value);
+            continue;
+        }
+        if found_month.is_none()
+            && let Some(prefix) = token.get(..3)
+        {
+            let prefix = prefix.to_ascii_lowercase();
+            if let Some(index) = MONTHS.iter().position(|m| *m == prefix) {
+                found_month = Some(index as u32 + 1);
                 continue;
             }
         }
-        if found_day.is_none() {
-            if let Some((value, len)) = leading_digits(token) {
-                if len <= 2 {
-                    found_day = Some(value);
-                    continue;
-                }
-            }
-        }
-        if found_month.is_none() {
-            if let Some(prefix) = token.get(..3) {
-                let prefix = prefix.to_ascii_lowercase();
-                if let Some(index) = MONTHS.iter().position(|m| *m == prefix) {
-                    found_month = Some(index as u32 + 1);
-                    continue;
-                }
-            }
-        }
-        if found_year.is_none() {
-            if let Some((value, len)) = leading_digits(token) {
-                if len == 2 || len == 4 {
-                    found_year = Some(value);
-                }
-            }
+        if found_year.is_none()
+            && let Some((value, len)) = leading_digits(token)
+            && (len == 2 || len == 4)
+        {
+            found_year = Some(value);
         }
     }
 

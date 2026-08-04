@@ -104,17 +104,17 @@ impl Cookie {
             };
             match attr_name.trim().to_ascii_lowercase().as_str() {
                 "expires" => {
-                    if let Some(v) = attr_value {
-                        if let Some(t) = date::parse_cookie_date(v) {
-                            expires = Some(t);
-                        }
+                    if let Some(v) = attr_value
+                        && let Some(t) = date::parse_cookie_date(v)
+                    {
+                        expires = Some(t);
                     }
                 }
                 "max-age" => {
-                    if let Some(v) = attr_value {
-                        if let Ok(n) = v.parse::<i64>() {
-                            max_age = Some(n);
-                        }
+                    if let Some(v) = attr_value
+                        && let Ok(n) = v.parse::<i64>()
+                    {
+                        max_age = Some(n);
                     }
                 }
                 "domain" => {

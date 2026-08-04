@@ -64,9 +64,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --all-features
+      # `+1.88.0` is load-bearing, for the same reason it is on the Miri and
+      # fuzz jobs: `rust-toolchain.toml` pins the channel to stable and a
+      # toolchain file wins over whatever the action installed. Without it this
+      # job ran on stable and reported green while the declared MSRV was wrong
+      # — which is exactly what happened, undetected, until an agent ran the
+      # check by hand.
+      - run: cargo +1.88.0 check --workspace --all-features
 
   docs:
     name: Documentation
