@@ -1,0 +1,30 @@
+[package]
+name = "chromulate-cookie"
+description = "Browser-grade cookie jar: RFC 6265 parsing, domain/path scoping, and SameSite eligibility"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+chromulate-core.workspace = true
+http.workspace = true
+url.workspace = true
+psl.workspace = true
+serde = { workspace = true, features = ["derive"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+serde_json.workspace = true
+criterion.workspace = true
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "cookie"
+harness = false
