@@ -129,6 +129,94 @@ pub fn start(worker_threads: usize) -> io::Result<Server> {
     })
 }
 
+/// Several origins on one runtime, so a client sees many distinct pool keys.
+///
+/// A connection pool is keyed by origin, so measuring anything that scales with
+/// the *number of keys* — eviction sweeps, capacity accounting, lock contention
+/// between unrelated hosts — needs more than one origin. Every listener here
+/// binds its own port on `127.0.0.1`, which is what makes each one a separate
+/// key, and they share a runtime so that starting a hundred of them costs a
+/// hundred sockets rather than a hundred schedulers.
+#[derive(Debug)]
+pub struct Origins {
+    addrs: Vec<SocketAddr>,
+    accepted: Arc<AtomicU64>,
+    _runtime: Runtime,
+}
+
+impl Origins {
+    /// One URL per origin, all for the same `path`.
+    #[must_use]
+    pub fn urls(&self, path: &str) -> Vec<String> {
+        self.addrs
+            .iter()
+            .map(|addr| format!("http://{addr}{path}"))
+            .collect()
+    }
+
+    /// How many origins are listening.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.addrs.len()
+    }
+
+    /// Whether no origin is listening.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.addrs.is_empty()
+    }
+
+    /// The shared accept counter across every origin.
+    #[must_use]
+    pub fn accept_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.accepted)
+    }
+}
+
+/// Starts `count` origins on one runtime with `worker_threads` workers.
+///
+/// # Errors
+///
+/// Returns the underlying I/O error when the runtime cannot be built or a
+/// listener cannot bind.
+pub fn start_many(count: usize, worker_threads: usize) -> io::Result<Origins> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .thread_name("bench-origins")
+        .enable_all()
+        .build()?;
+
+    let accepted = Arc::new(AtomicU64::new(0));
+    let mut addrs = Vec::with_capacity(count);
+
+    for _ in 0..count {
+        let listener = runtime.block_on(async { TcpListener::bind("127.0.0.1:0").await })?;
+        addrs.push(listener.local_addr()?);
+        let counter = Arc::clone(&accepted);
+        runtime.spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    continue;
+                };
+                counter.fetch_add(1, Ordering::Relaxed);
+                let _ = stream.set_nodelay(true);
+                tokio::spawn(async move {
+                    let _ = http1::Builder::new()
+                        .keep_alive(true)
+                        .serve_connection(TokioIo::new(stream), service_fn(route))
+                        .await;
+                });
+            }
+        });
+    }
+
+    Ok(Origins {
+        addrs,
+        accepted,
+        _runtime: runtime,
+    })
+}
+
 async fn route(request: Request<Incoming>) -> Result<Response<ServerBody>, Infallible> {
     let path = request.uri().path().to_owned();
 
