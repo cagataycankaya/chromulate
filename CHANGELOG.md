@@ -43,11 +43,28 @@ that breaking changes may land in a minor release.
   marker (found even when split across chunks), a predicate over the decoded prefix, or a
   byte budget — and reports which. On HTTP/2 stopping early resets the stream and keeps the
   pooled connection, observed as `RST_STREAM(CANCEL)` at a real h2 origin; on HTTP/1.1 it
-  still discards the connection, which is required for correctness. Measured on six
-  marketplace product pages, whose structured product data sits between 0.3% and 17% into the
-  body: 4040 KB read falls to 744 KB, median 177 ms to 114 ms. On one of the six the time
-  saving was nil, because the discarded HTTP/1.1 connection cost a handshake — which is the
-  whole reason the HTTP/2 path exists.
+  still discards the connection, which is required for correctness.
+
+  **The byte saving is large and reproducible; the time saving is neither.** Measured on six
+  marketplace product pages whose structured product data sits between 0.3% and 17% into the
+  body, across two independent runs: bytes read fall by **82%** in both (4040 KB to 744 KB,
+  and 10039 KB to 1762 KB on the four-site subset of the second run). Time is a different
+  story — the first run showed a median of 177 ms falling to 114 ms, and the second showed
+  120 ms falling to 119 ms, which is nothing. The explanation is that the saving is bounded
+  by how much of a request was *transfer* rather than the origin's own think time; on the
+  second run the floor was about 110 ms of think time and the full-body read was already
+  near it. Treat the byte figure as the claim and the time figure as conditional on the
+  network.
+
+  For the same reason this is **not a competitive advantage**. Measured against `reqwest`
+  and `wreq` hand-rolling the same early stop over their own byte streams, all three read
+  the same 82% less and land within noise of each other (medians 119, 113 and 109 ms with
+  interquartile ranges that overlap almost entirely). All three keep their pooled HTTP/2
+  connection across an abandoned body — that is hyper's behaviour, not this crate's. What
+  `bytes_until` is worth is not speed: it is the chunk-boundary marker search a caller would
+  otherwise hand-roll and get wrong, and the distinction between "found it", "ran out of
+  budget" and "reached the end", without which a fixed byte budget silently extracted only
+  12 of 18 pages in the same measurement.
 - **`chromulate-h3`**: RFC 7838 `Alt-Svc` parsing and a per-origin alternative-service cache
   with expiry, which is how a client learns an origin offers HTTP/3. A QUIC spike behind the
   non-default `quic-spike` feature establishes what the `quinn`/`h3` stack would put on the
