@@ -92,7 +92,11 @@ jobs:
       # cannot see the crates that do any. Core is the one with no I/O at all,
       # which makes it both tractable and the right place to look — it holds
       # the body and URI types every other crate builds on.
-      - run: cargo miri test -p chromulate-core
+      # `+nightly` is load-bearing: `rust-toolchain.toml` pins the channel to
+      # stable, and a toolchain file wins over whatever the action installed.
+      # Without it this runs `cargo miri` on stable, where the component does
+      # not exist.
+      - run: cargo +nightly miri test -p chromulate-core
 
   profiles:
     name: Profiles match their captures
