@@ -17,9 +17,11 @@ Hyper + browser networking behaviour        not        a headless browser
 [![CI](https://github.com/cagataycankaya/chromulate/actions/workflows/ci.yml/badge.svg)](https://github.com/cagataycankaya/chromulate/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
-> **Status: early development.** The core, the fingerprint algebra, and the supporting
-> engines are implemented and tested. The public client API described below is the design
-> target and is landing now. Expect breaking changes before 0.2.
+> **Status: early development.** Everything described below is implemented and tested — the
+> examples compile, and the CLI issues real requests. What is early is the surface: this is
+> pre-1.0 and breaking changes will land in minor releases. Read
+> [Honest limitations](#honest-limitations) before depending on it, and
+> [the performance baseline](docs/performance-baseline.md) before assuming it is fast.
 
 ## Why this exists
 
