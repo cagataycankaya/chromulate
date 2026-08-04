@@ -75,6 +75,15 @@ from this document.
 Three of the Akamai fingerprint's four fields match exactly; the fourth does not, so the
 hash does not either.
 
+**All four rows are verified from the wire by a hermetic test**, not only by the live echo
+above: `chromulate-http/tests/emitted_http2.rs` stands up a TLS listener that negotiates
+`h2`, records the client's opening frames, and decodes the SETTINGS order, the connection
+window update, the HEADERS flags, and the pseudo-header order out of the HPACK block. It
+asserts the two divergences rather than describing them, so a future `h2` release that
+closes either one fails the test and this document gets corrected instead of going stale.
+The test was mutation-checked: flipping the expected pseudo-header order to Chrome's turns
+it red with the wire's actual order in the failure message.
+
 Separately, Chrome's first `HEADERS` frame carries priority information — captured as
 weight 256, depends-on 0, exclusive — and **Chromulate sends `HEADERS` with no priority
 flag at all**. Both this and the pseudo-header order are fixed behaviour of the `h2`

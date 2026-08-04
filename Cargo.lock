@@ -456,7 +456,11 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rand",
+ "rcgen",
+ "rustls",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "url",
 ]
