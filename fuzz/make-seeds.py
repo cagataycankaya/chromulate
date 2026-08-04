@@ -45,6 +45,29 @@ def run(argv: list[str], stdin: bytes) -> bytes:
     return subprocess.run(argv, input=stdin, capture_output=True, check=True).stdout
 
 
+def record(name: str, value: str, **overrides) -> dict:
+    """One `CookieRecord`, with every field `Jar::export` writes.
+
+    Serde fills nothing in for a missing field, so a snapshot seed that omits one
+    fails to deserialise and the target returns before it reaches `import`.
+    """
+    fields = {
+        "name": name,
+        "value": value,
+        "domain": "example.com",
+        "host_only": True,
+        "path": "/",
+        "secure": True,
+        "http_only": False,
+        "same_site": "Lax",
+        "partitioned": False,
+        "expires": None,
+        "creation_seq": 0,
+        "last_access_seq": 0,
+    }
+    return fields | overrides
+
+
 def main() -> int:
     if CORPUS.exists():
         shutil.rmtree(CORPUS)
@@ -68,6 +91,83 @@ def main() -> int:
         "seconds": b"3600",
     }.items():
         write("cookie_expires_date", name, value)
+
+    # Jar snapshots, the shape `Jar::export` produces and `Jar::import` reads back.
+    # Written here rather than by hand because this script wipes `corpus/`, so a
+    # seed that lives only in that directory survives until somebody next runs it.
+    for name, cookies in {
+        "empty": [],
+        "round-trip": [record("session", "abc123")],
+        # `__Host-` forbids a `Domain` scope, requires `Path=/`, and requires
+        # `Secure`. This record breaks all three, and `import` must drop it.
+        "host-prefix-violation": [
+            record("__Host-session", "forged", host_only=False, path="/admin", secure=False)
+        ],
+        # Nine records against a total cap of eight, so the eviction pass runs
+        # rather than being left for the fuzzer to rediscover.
+        "over-the-limit": [
+            record(f"c{index}", str(index), domain=f"site{index}.example") for index in range(9)
+        ],
+        # The saturating counters: `u64::MAX + 1` would wrap the jar's sequence
+        # back to zero and corrupt RFC 6265 §5.4 ordering for everything after.
+        "maximal-sequence": [
+            record("session", "abc", creation_seq=2**64 - 1, last_access_seq=2**64 - 1)
+        ],
+        # A value no `Set-Cookie` could have carried. It would break the joined
+        # `Cookie` header, so that record goes and the rest of the snapshot stays.
+        "unrepresentable-value": [record("poisoned", "a\r\nb"), record("good", "1")],
+    }.items():
+        write("cookie_snapshot_import", name, json.dumps({"cookies": cookies}).encode())
+
+    # Two selector bytes, then NUL between each field: the `Accept-CH` value, the
+    # caller header block, the target URL, the referrer, the initiator, and a
+    # high-entropy hint value. See the target for the selector bit layout.
+    for name, fields in {
+        # Navigate/document, HTTP/1.1, GET, user-activated: the shape an address
+        # bar produces, and the one the captured order was recorded from.
+        "navigate-document": (0, 2, "", "", "https://example.com/index.html", "", "", ""),
+        # Three hints granted, so a grant reaches the order and the high-entropy
+        # slots are inserted rather than skipped.
+        "granted-hints": (
+            0,
+            2,
+            "Sec-CH-UA-Arch, Sec-CH-UA-Platform-Version, Sec-CH-UA-Bitness",
+            "",
+            "https://example.com/index.html",
+            "",
+            "",
+            "15.6.0",
+        ),
+        # A caller header the profile orders and one it does not, each set twice:
+        # every value has to come back together at that name's one slot.
+        "caller-overrides": (
+            0,
+            2,
+            "",
+            "accept-language: tr-TR\naccept-language: en-US\nx-trace: 1\nx-trace: 2",
+            "https://example.com/index.html",
+            "",
+            "",
+            "",
+        ),
+        # Cross-site POST: `Origin`, `Referer` and a cross-site `Sec-Fetch-Site`
+        # all appear, which is three insertions into the captured order at once.
+        "cross-site-post": (
+            31,
+            5,
+            "",
+            "content-type: application/json",
+            "https://api.example.com/v1/items",
+            "https://other.test/page",
+            "https://other.test/",
+            "",
+        ),
+        # A URL with no host at all, the one case `apply` documents as an error.
+        "no-host-url": (22, 1, "", "", "data:text/plain,hello", "", "", ""),
+    }.items():
+        selectors = bytes(fields[:2])
+        payload = b"\x00".join(part.encode() for part in fields[2:])
+        write("header_engine_apply", name, selectors + payload)
 
     gz = gzip.compress(SAMPLE)
     zl = zlib.compress(SAMPLE)

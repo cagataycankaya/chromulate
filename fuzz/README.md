@@ -44,16 +44,21 @@ If a run does churn the committed corpus, `./make-seeds.py` puts it back.
 | --- | --- | --- |
 | `cookie_set_cookie` | `chromulate-cookie` | A `Set-Cookie` header, stored and read back under two `SameSite` contexts, then round-tripped through the jar snapshot |
 | `cookie_expires_date` | `chromulate-cookie` | The `Expires` and `Max-Age` attribute values, with the rest of the cookie held fixed |
+| `cookie_snapshot_import` | `chromulate-cookie` | A persisted `JarSnapshot` JSON document, restored into a jar and exported back out |
+| `header_engine_apply` | `chromulate-header` | An `Accept-CH` value and a block of caller-set headers, applied against the captured order |
 | `compression_decode` | `chromulate-compression` | A compressed body, with the first input byte selecting gzip, deflate, brotli, zstd, or identity |
 | `compression_content_encoding` | `chromulate-compression` | A `Content-Encoding` header driving the decoder chain, then the body — the path `MAX_CONTENT_CODINGS` bounds |
 | `proxy_parse` | `chromulate-proxy` | A proxy URL, a `no_proxy` list, and a candidate host, NUL-separated |
 | `fingerprint_capture` | `chromulate-fingerprint` | A capture JSON document, plus the JA3/JA4/Akamai computations downstream of a successful load |
 
-Two of these bound a resource rather than parse a grammar, and both use limits far
-below the shipped defaults so that a short run can actually reach them:
+Several of these bound a resource rather than parse a grammar, and each one arms
+its limit far below the shipped default so that a short run can actually reach it.
 `compression_decode` arms `ExpansionGuard` at 64 KiB and 20x against defaults of
 100 MiB and 100x, because no fuzzer will stumble onto a 100 MiB expansion inside a
-CI time budget.
+CI time budget. `cookie_snapshot_import` gives its jar a cap of 8 cookies against a
+default of 3000, and `header_engine_apply` gives its `AcceptChStore` room for 4
+origins against a default of 10,000, for the same reason: a cap the corpus can
+never reach is a branch that is not being fuzzed.
 
 ## Corpus
 
