@@ -15,6 +15,10 @@
 //!   there is no name to attach the policy to.
 //! - **`max-age=0` removes the policy** rather than refreshing it (§6.1.1), so
 //!   an origin can turn HSTS off.
+//! - **The name is canonicalised before anything is stored or read** (§8.1.1,
+//!   §2.3), by `canonical_name`. Without it `example.com` and `example.com.`
+//!   are two hosts to this store and one host to DNS, which is a downgrade
+//!   anyone can ask for by spelling the name the other way.
 //!
 //! What none of that can do is protect the *first* request to an origin this
 //! process has never visited, because the plaintext request is what teaches the
@@ -113,7 +117,16 @@ impl HstsStore {
     /// `over_tls` must be whether the response that carried it arrived over
     /// HTTPS; a header from a plaintext response is discarded, per §8.1.
     pub fn record(&mut self, host: &str, value: &str, over_tls: bool, now: SystemTime) {
-        if !over_tls || is_ip_literal(host) {
+        if !over_tls {
+            return;
+        }
+        // Canonicalise before the IP check as well as before the key: without it
+        // `127.0.0.1.` is a name to `is_ip_literal` and takes a policy §8.1.1
+        // says it must not.
+        let Some(host) = canonical_name(host) else {
+            return;
+        };
+        if is_ip_literal(host) {
             return;
         }
         let Some(directive) = parse(value) else {
@@ -155,6 +168,9 @@ impl HstsStore {
     /// out.
     #[must_use]
     pub fn applies_to(&self, host: &str, now: SystemTime) -> bool {
+        let Some(host) = canonical_name(host) else {
+            return false;
+        };
         if is_ip_literal(host) {
             return false;
         }
@@ -167,12 +183,11 @@ impl HstsStore {
         }
 
         // A parent domain's policy reaches this host only when that parent said
-        // `includeSubDomains`.
+        // `includeSubDomains`. `canonical_name` has already established that no
+        // label is empty, so every parent this yields is a real one and the walk
+        // needs no guard of its own.
         let mut rest = host.as_str();
         while let Some((_, parent)) = rest.split_once('.') {
-            if parent.is_empty() {
-                break;
-            }
             if let Some(policy) = self.hosts.get(parent)
                 && policy.include_subdomains
                 && policy.expires > now
@@ -318,6 +333,35 @@ fn parse(value: &str) -> Option<Directive> {
     })
 }
 
+/// `host` with its root label removed, or `None` when it is not a name at all.
+///
+/// Two separate corrections, both of which RFC 6797 §8.1.1 folds into "convert
+/// the host to a canonicalized form" before a policy is stored or consulted, and
+/// both of which Chromium gets from `TransportSecurityState::CanonicalizeHost`
+/// putting the name into DNS wire form first.
+///
+/// **A trailing root label is dropped.** A fully qualified name may be written
+/// with the empty root label present, and `url` keeps it: `http://gmail.com./`
+/// arrives here as the host `gmail.com.`, which every resolver treats as
+/// `gmail.com`. Matched literally it is a different string, so a preloaded host
+/// is not upgraded and a learned policy is filed under a key the next request
+/// misses — a downgrade available to anyone who can put one extra dot in a URL.
+///
+/// **Any other empty label rejects the name.** `a..app` and `.app` are names DNS
+/// cannot resolve and `CanonicalizeHost` refuses; here they matter because the
+/// ancestor walk drops leading labels and would reach the `app` entry *through*
+/// the empty one, inventing a match for a host that never asked for one.
+///
+/// Case is left alone: both callers lowercase, and the preload table folds case
+/// as it compares, so doing it here would only mean an allocation neither needs.
+fn canonical_name(host: &str) -> Option<&str> {
+    let host = host.strip_suffix('.').unwrap_or(host);
+    if host.is_empty() || host.split('.').any(str::is_empty) {
+        return None;
+    }
+    Some(host)
+}
+
 /// Whether `host` is an IP address literal rather than a name.
 fn is_ip_literal(host: &str) -> bool {
     let unbracketed = host
@@ -395,6 +439,60 @@ mod tests {
         assert!(
             !inclusive.applies_to("notexample.com", now()),
             "a suffix match is not a subdomain match"
+        );
+    }
+
+    #[test]
+    fn the_root_label_makes_no_difference_to_a_learned_policy() {
+        // One host, two spellings. Keyed literally the store learns under
+        // whichever spelling the response used and misses under the other, which
+        // is a downgrade anyone can ask for by adding a dot.
+        let mut learned_bare = HstsStore::new();
+        learned_bare.record("example.com", "max-age=100; includeSubDomains", true, now());
+        assert!(learned_bare.applies_to("example.com.", now()));
+        assert!(learned_bare.applies_to("api.example.com.", now()));
+
+        let mut learned_rooted = HstsStore::new();
+        learned_rooted.record("example.com.", "max-age=100", true, now());
+        assert!(learned_rooted.applies_to("example.com", now()));
+        assert_eq!(learned_rooted.len(), 1, "one host, not two keys");
+
+        // And the removal path canonicalises too, or `max-age=0` from a response
+        // that spells the name the other way leaves the policy standing.
+        learned_rooted.record("example.com", "max-age=0", true, now());
+        assert!(!learned_rooted.applies_to("example.com.", now()));
+        assert!(learned_rooted.is_empty());
+    }
+
+    #[test]
+    fn a_host_with_an_empty_label_takes_and_matches_no_policy() {
+        let mut store = HstsStore::new();
+        store.record("a..example", "max-age=100", true, now());
+        assert!(
+            store.is_empty(),
+            "a name DNS cannot resolve takes no policy"
+        );
+
+        let mut inclusive = HstsStore::new();
+        inclusive.record("example.com", "max-age=100; includeSubDomains", true, now());
+        assert!(
+            !inclusive.applies_to("a..example.com", now()),
+            "the walk must not reach example.com through an empty label"
+        );
+        assert!(
+            !inclusive.applies_to(".example.com", now()),
+            "nor through a leading empty label"
+        );
+        assert!(inclusive.applies_to("a.example.com", now()));
+    }
+
+    #[test]
+    fn an_ip_literal_written_with_a_root_label_is_still_an_ip_literal() {
+        let mut store = HstsStore::new();
+        store.record("127.0.0.1.", "max-age=100", true, now());
+        assert!(
+            store.is_empty(),
+            "RFC 6797 8.1.1 canonicalises before it decides the host is an address"
         );
     }
 

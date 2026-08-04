@@ -58,23 +58,39 @@
 //! What is being bought for 76 ns is 4.4 ms of startup that every process pays
 //! whether or not it ever asks, several megabytes that are never released, and a
 //! `OnceLock` on the request path to guard the build. The number that decides it
-//! is the absolute one: `covers` costs 234.7–243.4 ns over the mixed host shapes
-//! in `tests/hsts_preload.rs`, it is consulted once per request, and a request is
-//! measured in milliseconds. A quarter of a microsecond is not where this client
-//! spends its time.
+//! is the absolute one: `covers` costs 269–283 ns over the mixed host shapes in
+//! `tests/hsts_preload.rs` (two runs of five rounds of 200,000, macOS arm64,
+//! release; the top of that range is a first-round outlier), it is consulted once
+//! per request, and a request is measured in milliseconds. A quarter of a
+//! microsecond is not where this client spends its time.
+//!
+//! That figure was 234.8–239.6 ns before `super::canonical_name` was added in
+//! front of the match, measured the same way on the same machine; canonicalising
+//! the host costs about 33 ns of the total. It buys a preload list that a single
+//! extra dot in a URL cannot walk around, which is not a trade that needed
+//! thinking about.
 //!
 //! The map is also not quite the same function. Matching a mixed-case host
 //! against a byte-keyed map means allocating a lowercased copy per lookup or
 //! writing a custom equivalence; the binary search folds case as it reads,
 //! because it compares byte by byte anyway.
 //!
-//! # Known gap
+//! # The name is canonicalised first, in both halves
 //!
-//! A host written with the root label present (`example.com.`) does not match.
-//! Chromium canonicalises the name to DNS wire form first, which drops the empty
-//! root label; this crate compares the host as `url` hands it over, and the
-//! dynamic store in the parent module has the same gap. Fixing it in one place
-//! and not the other would be worse than the gap.
+//! [`covers`] puts the host through `super::canonical_name` before it matches
+//! anything — the same function [`super::HstsStore::applies_to`] uses, so the
+//! learned half and the preloaded half agree on what a host *is*. Two things
+//! come out of that, and each was a real defect before it did:
+//!
+//! - a host written with the root label present (`example.com.`, which is what
+//!   `url` hands over for `http://example.com./`) matches its entry, where
+//!   before it silently did not and the request went out in plaintext;
+//! - a host with any other empty label (`a..app`) matches nothing, where before
+//!   the ancestor walk stepped over the empty label and reached the `app` entry.
+//!
+//! [`lookup`] does not canonicalise: it is the raw table probe the tests use to
+//! read what the blob holds, and canonicalising there would make it unable to
+//! say so.
 
 use std::cmp::Ordering;
 
@@ -191,8 +207,9 @@ fn compare(table: &[u8], query: &[u8]) -> Ordering {
 
 /// Looks `name` up as a whole entry, returning its `includeSubDomains` flag.
 ///
-/// This is an exact match on the full name and says nothing about subdomains;
-/// [`covers`] is the question a caller usually wants answered.
+/// This is an exact match on the full name: it says nothing about subdomains and
+/// it does not canonicalise `name`, so a root label makes it miss. [`covers`] is
+/// the question a caller usually wants answered, and the one that canonicalises.
 ///
 /// ```
 /// use chromulate_http::hsts::preload;
@@ -202,6 +219,9 @@ fn compare(table: &[u8], query: &[u8]) -> Ordering {
 /// // `.app` is preloaded as a whole TLD, with subdomains.
 /// assert_eq!(preload::lookup("app"), Some(true));
 /// assert_eq!(preload::lookup("example.com"), None);
+/// // The raw table holds no root label, so neither does a query that finds it.
+/// assert_eq!(preload::lookup("gmail.com."), None);
+/// assert!(preload::covers("gmail.com."));
 /// ```
 #[must_use]
 pub fn lookup(name: &str) -> Option<bool> {
@@ -222,8 +242,9 @@ pub fn lookup(name: &str) -> Option<bool> {
 /// Whether the preload list demands HTTPS for `host`.
 ///
 /// True when `host` is itself an entry, or when an ancestor of it is an entry
-/// that asserts `includeSubDomains`. `host` may be in any ASCII case; it must be
-/// a name rather than an IP literal, which the caller has already established.
+/// that asserts `includeSubDomains`. `host` may be in any ASCII case and may
+/// carry the root label; it must be a name rather than an IP literal, which the
+/// caller has already established.
 ///
 /// ```
 /// use chromulate_http::hsts::preload;
@@ -235,21 +256,26 @@ pub fn lookup(name: &str) -> Option<bool> {
 /// assert!(preload::covers("anything.example.app"));
 /// // A shared string suffix is not a shared label boundary.
 /// assert!(!preload::covers("notgmail.com"));
+/// // The root label is dropped, as DNS drops it.
+/// assert!(preload::covers("anything.example.app."));
+/// // An empty label is not a label to walk past.
+/// assert!(!preload::covers("anything..app"));
 /// ```
 #[must_use]
 pub fn covers(host: &str) -> bool {
+    let Some(host) = super::canonical_name(host) else {
+        return false;
+    };
     if lookup(host).is_some() {
         return true;
     }
 
     // An ancestor's entry reaches this host only when that ancestor said
     // `includeSubDomains`. Dropping one leading label at a time is what keeps
-    // the comparison on a label boundary.
+    // the comparison on a label boundary; `canonical_name` has already
+    // established that no label is empty, so every parent this yields is one.
     let mut rest = host;
     while let Some((_, parent)) = rest.split_once('.') {
-        if parent.is_empty() {
-            break;
-        }
         if lookup(parent) == Some(true) {
             return true;
         }
@@ -271,6 +297,16 @@ mod tests {
         // fails and someone has to look at why.
         assert_eq!(ENTRY_COUNT, 94_628);
         assert_eq!(BLOB.len(), 1_749_625);
+
+        // PROVENANCE.md records the flag split too, and nothing was checking it:
+        // a blob regenerated from a source that had changed shape could keep both
+        // numbers above and still carry a different set of flags. This is the
+        // cheapest thing that would notice.
+        let with_subdomains = (0..ENTRY_COUNT)
+            .filter(|index| includes_subdomains(*index))
+            .count();
+        assert_eq!(with_subdomains, 94_378);
+        assert_eq!(ENTRY_COUNT - with_subdomains, 250);
     }
 
     #[test]
@@ -375,6 +411,39 @@ mod tests {
     fn a_host_with_no_dots_and_no_entry_terminates() {
         assert!(!covers("localhost"));
         assert!(!covers(""));
+    }
+
+    #[test]
+    fn the_root_label_is_dropped_before_matching() {
+        // `url` keeps the root label, so this is the host `covers` is handed for
+        // `http://gmail.com./` — a name that resolves to exactly what
+        // `gmail.com` resolves to. Matching it literally missed the entry and
+        // sent the request in plaintext.
+        assert!(covers("gmail.com."));
+        assert!(covers("deep.nested.example.app."));
+        assert!(covers("APP."));
+        // Dropping it must not widen anything: `gmail.com` still carries no
+        // `includeSubDomains`, and a string suffix is still not a label
+        // boundary.
+        assert!(!covers("mail.gmail.com."));
+        assert!(!covers("notgmail.com."));
+    }
+
+    #[test]
+    fn an_empty_label_is_not_a_label_the_walk_may_step_over() {
+        // The false-positive direction. The walk drops one leading label at a
+        // time, so before the name was checked it reached `app` through the
+        // empty label in each of these and forced HTTPS on a name DNS cannot
+        // resolve and Chromium refuses to canonicalise.
+        assert!(!covers("a..app"));
+        assert!(!covers(".app"));
+        assert!(!covers("..app"));
+        assert!(!covers("a..gmail.com"));
+        assert!(!covers("example.com.."));
+        assert!(!covers("."));
+        // The well-formed neighbours are untouched.
+        assert!(covers("a.example.app"));
+        assert!(covers("example.app"));
     }
 
     /// The comparison the table's shape was chosen on, measured rather than

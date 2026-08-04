@@ -57,11 +57,25 @@ default = []
 network-tests = []
 # Chromium's HSTS preload list, compiled into the binary. Off by default because
 # it is not free: `data/hsts-preload/preload.bin` is 1,749,625 bytes and all of it
-# is linked in. Measured on the release `chromulate` CLI binary, macOS arm64:
-# 9,049,920 bytes without the feature, 10,816,576 with it, a growth of 1,766,656 —
-# the blob plus 17,031 bytes of lookup code and alignment. What it buys is
-# protection for the *first* request to an origin this process has never visited,
-# which is the one case a store learned from responses cannot cover.
+# is linked in. What it buys is protection for the *first* request to an origin
+# this process has never visited, which is the one case a store learned from
+# responses cannot cover.
+#
+# Measured on the release `chromulate` CLI binary, macOS arm64, with
+#   cargo build --release -p chromulate-cli
+#   cargo build --release -p chromulate-cli --features chromulate/hsts-preload
+# 9,067,360 bytes without the feature and 10,817,920 with it: a growth of
+# 1,750,560.
+#
+# Subtracting two file sizes is a noisy way to ask this, because both move with
+# segment padding and with anything else that lands in the binary — the same two
+# builds measured against an earlier `main` gave a growth of 1,767,008, and the
+# difference was the *baseline* moving, not this feature. `size -m` splits it and
+# the split is stable: `__TEXT,__const` grows 1,336,976 -> 3,085,968, which is the
+# blob, and `__TEXT,__text` grows 5,242,032 -> 5,242,992, which is 960 bytes of
+# lookup code. So the honest figure is "the blob, plus about a kilobyte" rather
+# than any precise total; an earlier version of this comment claimed 17,031 bytes
+# of code and alignment, which was padding read as code.
 #
 # Cargo features are additive and unify across a dependency graph, so any crate in
 # the build enabling this turns it on for every consumer of `chromulate-http` in
