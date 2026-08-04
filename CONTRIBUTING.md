@@ -47,7 +47,11 @@ Run `python3 tools/cookie-mutation-check.py` as well when you have touched
 which a green suite does not tell you.
 
 CI runs all of the above plus an MSRV check against Rust 1.85, Miri over
-`chromulate-core`, and tests on Linux, macOS, and Windows.
+`chromulate-core`, tests on Linux, macOS, and Windows, `cargo machete` for unused
+dependencies, and a build of the fuzz targets. The nightly schedule also gives each fuzz
+target a short run — see `fuzz/README.md`. To run those two locally:
+`cargo install cargo-machete cargo-fuzz`, then `cargo machete` and
+`cargo +nightly fuzz build`.
 
 **Beware the shell pitfall that has bitten this project twice.** `cargo clippy … | tail -1`
 reports the exit status of `tail`, not of clippy, so a chained `&&` proceeds through a
