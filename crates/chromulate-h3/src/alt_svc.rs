@@ -708,6 +708,173 @@ mod tests {
         assert!(cache.is_empty());
     }
 
+    // -- attack surface: grammar edge cases --------------------------------
+
+    #[test]
+    fn an_escaped_quote_inside_a_quoted_authority_is_unescaped() {
+        // A quoted-pair inside the quoted-string alt-authority must not be mistaken
+        // for the string's closing quote.
+        let list = alternatives(r#"h3="ex\"ample.com:443""#);
+        assert_eq!(list[0].host(), Some("ex\"ample.com"));
+        assert_eq!(list[0].port(), 443);
+    }
+
+    #[test]
+    fn percent_decoding_the_protocol_id_is_single_pass_not_recursive() {
+        // A doubly-encoded protocol-id must decode once, not twice. Decoding twice
+        // would turn `%2568` into `h` instead of the single-pass `%68`, which is the
+        // classic double-decode smuggling bug.
+        let list = alternatives(r#"%2568=":443""#);
+        assert_eq!(list[0].protocol_id(), "%68");
+    }
+
+    #[test]
+    fn a_percent_encoded_percent_sign_decodes_correctly() {
+        let list = alternatives(r#"%25=":443""#);
+        assert_eq!(list[0].protocol_id(), "%");
+    }
+
+    #[test]
+    fn protocol_id_bytes_that_are_not_valid_utf8_after_decoding_are_skipped() {
+        // `%ff` alone is not a valid UTF-8 continuation byte on its own.
+        assert_eq!(
+            AltSvc::parse(r#"%ff=":443""#),
+            AltSvc::Alternatives(Vec::new())
+        );
+    }
+
+    #[test]
+    fn a_bare_clear_token_mixed_with_other_alt_values_is_not_a_reset() {
+        // RFC 7838's ABNF makes `clear` an alternative to the whole list, not a
+        // member of it: `Alt-Svc-Field-Value = clear / 1#alt-value`. A field that
+        // is not literally `clear` must be parsed as a list, and the malformed
+        // `clear` element (no `=`) is simply dropped like any other unparseable one.
+        let list = alternatives(r#"clear, h3=":443""#);
+        let ids: Vec<_> = list.iter().map(Alternative::protocol_id).collect();
+        assert_eq!(ids, ["h3"]);
+    }
+
+    #[test]
+    fn a_duplicate_parameter_lets_the_last_value_win() {
+        let list = alternatives(r#"h3=":443"; ma=10; ma=20"#);
+        assert_eq!(list[0].max_age(), Duration::from_secs(20));
+    }
+
+    #[test]
+    fn a_negative_ma_falls_back_to_the_default() {
+        let list = alternatives(r#"h3=":443"; ma=-5"#);
+        assert_eq!(list[0].max_age(), DEFAULT_MAX_AGE);
+    }
+
+    #[test]
+    fn a_field_value_that_is_only_whitespace_yields_no_alternatives() {
+        assert_eq!(AltSvc::parse("   "), AltSvc::Alternatives(Vec::new()));
+    }
+
+    #[test]
+    fn an_unbracketed_ipv6_literal_missing_its_closing_bracket_is_rejected() {
+        // The depth counter never returns to zero, so no colon is ever treated as
+        // the port separator and the entry is dropped rather than mis-split.
+        assert_eq!(
+            AltSvc::parse(r#"h3="[2001:db8::1:443""#),
+            AltSvc::Alternatives(Vec::new())
+        );
+    }
+
+    #[test]
+    fn unbalanced_brackets_do_not_panic_and_still_split_on_the_last_colon() {
+        // Not valid IPv6 syntax, but the depth counter tolerates it defensively:
+        // a leading `]` and a mid-string `[` still let the trailing `:port` split.
+        let list = alternatives(r#"h3="]not-real[:443""#);
+        assert_eq!(list[0].host(), Some("]not-real["));
+        assert_eq!(list[0].port(), 443);
+    }
+
+    #[test]
+    fn multi_byte_utf8_in_a_quoted_host_or_parameter_does_not_panic() {
+        // `unquote` slices `&str` by byte index around the quote characters; ASCII
+        // quote/backslash bytes never collide with UTF-8 continuation bytes, so this
+        // must stay panic-free with non-ASCII content in either position.
+        let list = alternatives("h3=\"\u{1f980}:443\"; note=\"\u{1f980}\"");
+        assert_eq!(list[0].host(), Some("\u{1f980}"));
+        assert_eq!(list[0].port(), 443);
+    }
+
+    #[test]
+    fn ten_thousand_alt_values_in_one_field_parse_without_pathological_slowdown() {
+        // Not a timing assertion (that would be flaky under CI load); the point is
+        // that this completes at all and returns the expected count, exercising the
+        // splitter and per-element parser at a scale a hostile origin could send.
+        let long_value: String = (0..10_000)
+            .map(|i| format!(r#"h3-{i}=":443"; ma=1"#))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let list = alternatives(&long_value);
+        assert_eq!(list.len(), 10_000);
+    }
+
+    #[test]
+    fn an_ma_large_enough_to_overflow_systemtime_is_dropped_not_panicked() {
+        // `record` documents that it drops rather than clamps an overflowing `ma`;
+        // this is the live proof, going through the cache rather than just `parse`,
+        // since the overflow can only happen at the `SystemTime + Duration` step.
+        let mut cache = AltSvcCache::new();
+        let o = origin("https://example.com/");
+        cache
+            .record(
+                &o,
+                &format!(r#"h3=":443"; ma={}"#, u64::MAX),
+                SystemTime::UNIX_EPOCH,
+            )
+            .expect("https origin is allowed to advertise");
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn a_wss_origin_may_advertise_like_an_https_one() {
+        // The inverse of the cleartext-refusal check: `Origin::is_secure` treats
+        // `wss` as secure alongside `https`, and the cache must honour that rather
+        // than hard-coding a scheme check of its own.
+        let mut cache = AltSvcCache::new();
+        let o = origin("wss://example.com/");
+        cache
+            .record(&o, r#"h3=":443"; ma=3600"#, at(0))
+            .expect("wss origin is secure and may advertise");
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn a_ws_origin_may_not_advertise() {
+        // The plaintext WebSocket counterpart of the existing `http` refusal check:
+        // `ws` must be refused for the same reason `http` is.
+        let mut cache = AltSvcCache::new();
+        let o = origin("ws://example.com/");
+        let err = cache
+            .record(&o, r#"h3=":443"; ma=3600"#, at(0))
+            .expect_err("a plaintext ws origin must be refused");
+        assert!(matches!(err, AltSvcError::InsecureOrigin { .. }));
+    }
+
+    #[test]
+    fn the_cache_is_not_bounded_by_the_number_of_origins() {
+        // Finding, not a defect this test guards against: nothing in `AltSvcCache`
+        // caps the number of distinct origins it will remember, and `record` never
+        // evicts on insert. A per-origin `HashMap` filled entirely by a
+        // server-controlled response header is a memory-growth surface once this
+        // cache is wired to a live client that visits many origins; today it is not
+        // wired to anything, which is why this is recorded rather than fixed here.
+        // The caller is responsible for calling `purge_expired` on some cadence, and
+        // nothing enforces that either.
+        let mut cache = AltSvcCache::new();
+        for i in 0..2_000 {
+            let o = origin(&format!("https://host-{i}.example/"));
+            cache
+                .record(&o, r#"h3=":443"; ma=3600"#, at(0))
+                .expect("https origin is allowed to advertise");
+        }
+        assert_eq!(cache.len(), 2_000, "no cap was enforced on origin count");
+    }
+
     #[test]
     fn the_alternative_host_wins_over_the_origin_host() {
         let mut cache = AltSvcCache::new();

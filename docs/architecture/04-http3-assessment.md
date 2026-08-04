@@ -73,21 +73,29 @@ the graph — `advisories ok, bans ok, licenses ok, sources ok` — and needed n
 `deny.toml`. This was checked first, because a licence problem would have ended the
 investigation.
 
-**The MSRV is exactly the workspace's, and it holds.** `quinn`'s `rust-version` is `1.85`
-and so is this workspace's (`Cargo.toml:27`). That is not comfortable margin; it is zero
-margin, so it was checked rather than assumed:
-`cargo +1.85.0 check -p chromulate-h3 --all-features` exits `0` with the whole QUIC stack in
-the graph. A `quinn` patch release that raises its MSRV raises this project's, and the
-`msrv` CI job (`.github/workflows/ci.yml:62-69`) is what would notice.
+**The MSRV held, at zero margin, for about five hours.** `quinn`'s `rust-version` is `1.85`.
+This workspace's was too when this section was first written, checked rather than assumed:
+`cargo +1.85.0 check -p chromulate-h3 --all-features` exited `0` with the whole QUIC stack in
+the graph. That check also turned up something this work did not cause and does not fix on
+its own: `cargo +1.85.0 check --workspace --all-features` failed on the branch this crate was
+written from, for two reasons that have nothing to do with HTTP/3 — `crates/chromulate-http/src/engine.rs:578`
+used a `let` chain, stable in 1.88 and not in 1.85, and `rcgen` pulls `time@0.3.47`, which
+requires 1.88. Both reach the workspace through crates this change does not touch.
 
-That job is worth a warning, because running it locally turned up something this work did
-not cause and does not fix. `cargo +1.85.0 check --workspace --all-features` fails on the
-branch this crate was written from, for two reasons that have nothing to do with HTTP/3:
-`crates/chromulate-http/src/engine.rs:578` uses a `let` chain, stable in 1.88 and not in
-1.85, and `rcgen` pulls `time@0.3.47`, which requires 1.88. Both reach the workspace through
-crates this change does not touch. The declared MSRV of `1.85` is therefore already wrong,
-and someone should either raise it or fix the two causes — out of scope here, recorded so it
-is not discovered later and blamed on this crate.
+That made the declared MSRV of `1.85` wrong on the day this crate landed, and it is why
+the sentence above is past tense: commit `775bafe` ("The declared MSRV was wrong, and CI
+could not have caught it"), the same day, raised the workspace's `rust-version` to `1.88`
+(`Cargo.toml:28`) — the number the `let` chain and `rcgen` already required — rather than
+removing either cause. `quinn`'s `1.85` did not move, so the margin this crate now sits on
+is three point-releases, not zero, and `cargo +1.85.0 check -p chromulate-h3 --all-features`
+now exits `101` (`chromulate-h3@0.1.0 requires rustc 1.88`), refused on the workspace's
+declared minimum before the QUIC-specific code is even reached.
+`cargo +1.88.0 check --workspace --all-features` is the check that now matters, and it
+passes. The `msrv` CI job (`.github/workflows/ci.yml:62-75`) is what enforces it, pinned to
+`dtolnay/rust-toolchain@1.88.0` explicitly for the same reason the Miri and fuzz jobs pin
+their own toolchains: `rust-toolchain.toml` pins the ambient channel to stable, and a bare
+version input to that action loses to it silently, which is exactly how the `1.85` claim
+went unnoticed by CI for as long as it did.
 
 **`unsafe` arrives with the datapath, not the protocol.** `quinn-proto` is a state machine
 with four `unsafe` blocks; `quinn-udp` is a portable UDP datapath — `sendmmsg`, `recvmmsg`,
