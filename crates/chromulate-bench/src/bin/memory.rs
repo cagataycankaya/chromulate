@@ -43,6 +43,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("serve") => serve(),
+        Some("serve-many") => {
+            let count: usize = args.get(1).map_or(Ok(1), |raw| raw.parse())?;
+            serve_many(count)
+        }
         Some("idle") => idle(),
         Some("pool") => {
             let connections: usize = args.get(1).map_or(Ok(1), |raw| raw.parse())?;
@@ -50,8 +54,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some("stream") => big_body(false),
         Some("buffer") => big_body(true),
+        Some("soak") => {
+            let seconds: u64 = args.get(1).map_or(Ok(120), |raw| raw.parse())?;
+            soak(seconds)
+        }
         other => {
-            eprintln!("unknown phase {other:?}; expected idle | pool N | stream | buffer");
+            eprintln!(
+                "unknown phase {other:?}; expected idle | pool N | stream | buffer | soak [seconds]"
+            );
             std::process::exit(2);
         }
     }
@@ -63,6 +73,72 @@ fn serve() -> Result<(), Box<dyn std::error::Error>> {
     // The parent kills this process when it is done with it.
     loop {
         std::thread::park();
+    }
+}
+
+fn serve_many(count: usize) -> Result<(), Box<dyn std::error::Error>> {
+    let origins = server::start_many(count, 4)?;
+    let ports: Vec<String> = origins
+        .urls("/")
+        .iter()
+        .filter_map(|url| {
+            url.rsplit(':')
+                .next()
+                .map(|tail| tail.trim_end_matches('/').to_owned())
+        })
+        .collect();
+    println!("PORTS {}", ports.join(","));
+    loop {
+        std::thread::park();
+    }
+}
+
+/// Several origins in a child process, killed on drop.
+///
+/// The soak phase needs this for the same reason the pooled phase does: the
+/// growth it looks for is a few megabytes per minute, and a server sharing the
+/// process would contribute its own connection buffers to exactly the number
+/// under examination. Measuring both together and calling the total a client
+/// leak is the mistake this exists to prevent — and it was made once, which is
+/// why this comment is here.
+#[derive(Debug)]
+struct Origins {
+    child: Child,
+    ports: Vec<u16>,
+}
+
+impl Origins {
+    fn spawn(count: usize) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut child = Command::new(env::current_exe()?)
+            .arg("serve-many")
+            .arg(count.to_string())
+            .stdout(Stdio::piped())
+            .spawn()?;
+        let stdout = child.stdout.take().ok_or("child produced no stdout")?;
+        let mut line = String::new();
+        BufReader::new(stdout).read_line(&mut line)?;
+        let ports = line
+            .trim()
+            .strip_prefix("PORTS ")
+            .ok_or("child did not announce its ports")?
+            .split(',')
+            .map(str::parse)
+            .collect::<Result<Vec<u16>, _>>()?;
+        Ok(Self { child, ports })
+    }
+
+    fn urls(&self) -> Vec<String> {
+        self.ports
+            .iter()
+            .map(|port| format!("http://127.0.0.1:{port}/"))
+            .collect()
+    }
+}
+
+impl Drop for Origins {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -280,6 +356,108 @@ fn big_body(buffer: bool) -> Result<(), Box<dyn std::error::Error>> {
         mib(peak),
         mib(peak.saturating_sub(baseline))
     );
+
+    drop(client);
+    drop(runtime);
+    Ok(())
+}
+
+/// Sustained load with resident memory sampled over time.
+///
+/// Every other phase here is a point measurement: build a client, do a fixed
+/// amount of work, read RSS once. None of them would notice a leak, because a
+/// leak is a *slope*, and a single point has none. This runs a steady request
+/// loop for `seconds` and prints RSS each interval, so the shape can be read
+/// rather than inferred.
+///
+/// Three things are deliberately exercised at once, because they are the state
+/// a long-running crawler accumulates and each is a plausible leak site: pooled
+/// connections across many origins, a cookie jar taking `Set-Cookie` on every
+/// response, and the `Accept-CH` store. The origins are separate so pool and
+/// jar keys grow rather than being overwritten.
+fn soak(seconds: u64) -> Result<(), Box<dyn std::error::Error>> {
+    const ORIGINS: usize = 24;
+    const CONCURRENCY: usize = 16;
+
+    let origins = Origins::spawn(ORIGINS)?;
+    let urls: Vec<String> = origins.urls();
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()?;
+
+    let client = chromulate::Client::builder().build()?;
+    let baseline = rss();
+
+    println!("phase=soak seconds={seconds} origins={ORIGINS} concurrency={CONCURRENCY}");
+    println!("baseline_mib={:.2}", mib(baseline));
+    println!("# elapsed_s  rss_mib  delta_mib  requests");
+
+    let completed = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+    let urls = std::sync::Arc::new(urls);
+
+    runtime.block_on(async {
+        let mut workers = Vec::with_capacity(CONCURRENCY);
+        for worker in 0..CONCURRENCY {
+            let client = client.clone();
+            let urls = std::sync::Arc::clone(&urls);
+            let completed = std::sync::Arc::clone(&completed);
+            workers.push(tokio::spawn(async move {
+                let mut next = worker;
+                while std::time::Instant::now() < deadline {
+                    let url = &urls[next % urls.len()];
+                    next += 1;
+                    if let Ok(response) = client.get(url).send().await
+                        && response.bytes().await.is_ok()
+                    {
+                        completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }));
+        }
+
+        let started = std::time::Instant::now();
+        let mut samples: Vec<(u64, u64)> = Vec::new();
+        while std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            let elapsed = started.elapsed().as_secs();
+            let current = rss();
+            samples.push((elapsed, current));
+            println!(
+                "{elapsed:>10}  {:>7.2}  {:>9.2}  {}",
+                mib(current),
+                mib(current.saturating_sub(baseline)),
+                completed.load(std::sync::atomic::Ordering::Relaxed)
+            );
+        }
+
+        for worker in workers {
+            let _ = worker.await;
+        }
+
+        // The verdict is the slope over the second half: startup allocates
+        // pools and buffers that never come back, and counting that as a leak
+        // would make every run look like one.
+        if samples.len() >= 4 {
+            let half = samples.len() / 2;
+            let (first_t, first_rss) = samples[half];
+            let (last_t, last_rss) = samples[samples.len() - 1];
+            let minutes = (last_t.saturating_sub(first_t)) as f64 / 60.0;
+            let growth = mib(last_rss.saturating_sub(first_rss));
+            println!();
+            println!(
+                "second-half growth: {growth:.2} MiB over {minutes:.1} min \
+                 ({:.2} MiB/min)",
+                if minutes > 0.0 { growth / minutes } else { 0.0 }
+            );
+            println!(
+                "requests completed: {}",
+                completed.load(std::sync::atomic::Ordering::Relaxed)
+            );
+        }
+    });
 
     drop(client);
     drop(runtime);
