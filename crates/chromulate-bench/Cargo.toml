@@ -1,0 +1,36 @@
+[package]
+name = "chromulate-bench"
+description = "Benchmark harness for Chromulate: end-to-end throughput against reqwest, allocation counting, and memory measurement."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+chromulate.workspace = true
+chromulate-core.workspace = true
+chromulate-header.workspace = true
+chromulate-http.workspace = true
+chromulate-profile.workspace = true
+
+bytes.workspace = true
+futures-util.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["server", "http1"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+reqwest.workspace = true
+tokio = { workspace = true, features = ["full"] }
+url.workspace = true
+
+# This crate deliberately does not carry `[lints] workspace = true`.
+#
+# The workspace forbids `unsafe_code`, and a counting global allocator cannot be
+# written without `unsafe impl GlobalAlloc`. Measuring allocations per request is
+# the whole point of `src/bin/allocs.rs`, so the exception lives here, in a
+# `publish = false` crate that ships in no binary a user runs. Every other file
+# in this crate carries `#![forbid(unsafe_code)]` at its own top.
