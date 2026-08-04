@@ -226,6 +226,44 @@ impl RequestBuilder {
         })
     }
 
+    /// Sets a `multipart/form-data` body and the `Content-Type` naming its
+    /// boundary.
+    ///
+    /// The body streams: a form holding a file part sends the file from disk to
+    /// the socket without reading it into memory. A form whose parts all have
+    /// known lengths declares a `Content-Length`; one containing a part of
+    /// unknown length falls back to chunked transfer encoding.
+    ///
+    /// ```no_run
+    /// use chromulate::multipart::{Form, Part};
+    ///
+    /// # async fn run(client: chromulate::Client) -> chromulate::Result<()> {
+    /// client
+    ///     .post("https://example.com/upload")
+    ///     .multipart(
+    ///         Form::new()
+    ///             .text("caption", "a holiday photo")
+    ///             .part("photo", Part::file("holiday.jpg").await?.mime_str("image/jpeg")),
+    ///     )
+    ///     .send()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "multipart")]
+    #[must_use]
+    pub fn multipart(self, form: crate::multipart::Form) -> Self {
+        let encoded = form.into_body();
+        self.with(move |parts| {
+            let (content_type, body) = encoded?;
+            parts
+                .headers
+                .insert(http::header::CONTENT_TYPE, content_type);
+            parts.body = body;
+            Ok(())
+        })
+    }
+
     /// Bounds this request, overriding the client's timeout.
     #[must_use]
     pub fn timeout(self, timeout: Duration) -> Self {
