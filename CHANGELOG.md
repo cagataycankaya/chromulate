@@ -118,6 +118,36 @@ same machine and harness as the baseline; the baseline numbers are quoted alongs
   +1.39 MiB peak against a +260 MiB buffering control), and the wire header order still
   matches the capture — both re-verified, not assumed.
 
+### Changed — dependency bumps, measured
+
+`md-5` 0.10 → 0.11, `sha2` 0.10 → 0.11, `base64` 0.22 → 0.23, `rand` 0.9 → 0.10, and
+`actions/checkout` v4 → v7. Each was merged and verified on its own; `rand` 0.10 moved
+`random_range` from `Rng` to a blanket-implemented `RngExt`, which the GREASE draw and the
+retry jitter now import.
+
+Measured against the same benches on the same machine, two independent runs agreeing:
+
+| | Before | After |
+|---|---:|---:|
+| `fingerprint/ja4` | 4.39 µs | **3.52 µs** (−20%) |
+| `fingerprint/ja4_raw` | 3.38 µs | **3.19 µs** (−14%) |
+| `fingerprint/ja3_hash` | 373 ns | **350 ns** (−6%) |
+| `fingerprint/wire_extension_order` | 183 ns | **171 ns** (−6.5%) |
+| Allocations per request | 48 | 48 (unchanged) |
+| `header/*`, `cookies_for/*`, `body_collect/*` | — | unchanged |
+
+The RustCrypto 0.11 releases are where the JA4 gain comes from. Nothing regressed, and
+allocation counts are byte-identical.
+
+The GREASE draw was re-verified rather than assumed to survive the `rand` upgrade: over
+2,000 seeds it still yields all sixteen reserved code points and every one satisfies
+RFC 8701's `0x?A?A`. The golden Chrome 151 tests and the live network tests stay green.
+
+`dtolnay/rust-toolchain` is now in the Dependabot ignore list: the `msrv` job pins it to
+1.85.0 because that is the workspace's declared `rust-version`, not because it is an
+action version to keep current, and bumping it would have left the job green while
+verifying nothing.
+
 ### Fixed — HTTP/2 connections were never pooled
 
 Found by measuring a real HTTPS origin for the first time.

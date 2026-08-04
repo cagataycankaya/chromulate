@@ -154,6 +154,33 @@ never grow and the cap saves nothing; that is the workload to size it against. F
 deployments, remember the advertised 15 MiB connection window — part of the Akamai
 fingerprint, so not tunable — is the number to plan per-connection memory against.
 
+## Dependency bumps, 2026-08-04
+
+`md-5` and `sha2` 0.10 → 0.11, `base64` 0.22 → 0.23, `rand` 0.9 → 0.10, merged one at a
+time with the full suite green after each. The RustCrypto releases moved the fingerprint
+hashes measurably, and nothing regressed:
+
+| | Before | After |
+|---|---:|---:|
+| `fingerprint/ja4` | 4.39 µs | **3.52 µs** (−20%) |
+| `fingerprint/ja4_raw` | 3.38 µs | **3.19 µs** (−14%) |
+| `fingerprint/ja3_hash` | 373 ns | **350 ns** (−6%) |
+| `fingerprint/wire_extension_order` | 183 ns | **171 ns** (−6.5%) |
+| Allocations per request | 48 | 48 |
+| `header`, `cookie`, `body_collect` | — | unchanged |
+
+None of it is on the per-request path — the fingerprint work runs per connection at most,
+and `ja4` runs only on demand — so this is a real improvement in a place that was already
+too cheap to matter. It is recorded because a dependency bump that moves a number by 20%
+in either direction is worth knowing about.
+
+One caveat about method, since it nearly became a wrong claim in this document:
+`wire_extension_order` first appeared to have improved by 66%. It had not. The pre-merge
+sample for that row was taken on a loaded machine and read 315–463 ns against a true value
+of ~183 ns, so the comparison was against noise. A second run settled it at 171 ns. When a
+bench row disagrees with its own recorded history by 2.5x, the baseline is the suspect,
+not the change.
+
 ## Against a real origin
 
 Everything above is loopback, which isolates client overhead and says nothing about the
