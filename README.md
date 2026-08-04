@@ -159,13 +159,13 @@ repository; the measured claims behind the fidelity rows are in
 | | |
 |---|---|
 | HTTP/1.1 and HTTP/2 | Yes, chosen by ALPN, with connection pooling for both |
-| TLS 1.2 and 1.3 | Yes, over `rustls` with the platform trust store |
+| TLS 1.2 and 1.3 | Yes, over `rustls`. Roots come from the Mozilla program compiled in by `webpki-roots`, which is `RootSource::default()` — **not** the platform trust store, so a build behaves the same on every machine. `chromulate-tls`'s `platform-roots` feature switches it, and the facade does not forward that feature today |
 | HTTP/3 and QUIC | **Assessed, not shipped.** `Alt-Svc` parsing and an alternative-service cache exist in `chromulate-h3`, which is how a client learns an origin offers HTTP/3. QUIC itself is behind the non-default `quic-spike` feature and is a measurement, not a product: a real HTTP/3 request succeeds, but the handshake omits five extensions the Chrome capture carries, emits no GREASE, and its transport-parameter set cannot be shaped through `quinn`'s public API. Shipping it would mean claiming a protocol surface nobody has a capture to check — see [docs/architecture/04-http3-assessment.md](docs/architecture/04-http3-assessment.md) |
 | Connection pool keyed by profile identity | Yes — two profiles never share a connection, which is what stops a request being observed with another identity's fingerprint |
 | HSTS | Yes. Learned from responses, applied before the request leaves; a header arriving over cleartext is ignored |
 | HSTS preload list | Yes, behind the off-by-default `hsts-preload` feature: Chromium's complete list, 94,628 entries, which protects the first request to an origin. Off by default because it grows a release binary by 1,766,656 bytes (measured) |
 | Proxies | Yes: HTTP `CONNECT`, SOCKS5 and SOCKS5h, with rotation and `NO_PROXY` |
-| DNS | Yes: caching, TTL-aware, with concurrent lookups for one name collapsed into one |
+| DNS | Yes: caching, with concurrent lookups for one name collapsed into one. **Not TTL-aware** — `lookup_host` does not expose the TTL the server returned, so a fixed 60 s is applied and said so at `caching.rs:33-38` |
 | Happy Eyeballs (RFC 8305) | **No.** Addresses are tried in the resolver's order; a browser races the families. A latency difference, not an observable one |
 
 ### Browser identity
