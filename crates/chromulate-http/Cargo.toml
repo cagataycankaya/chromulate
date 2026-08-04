@@ -67,6 +67,16 @@ network-tests = []
 # that build. The behaviour it adds is "upgrade more requests to HTTPS", which is
 # safe to acquire unexpectedly, but it is worth knowing that is how it can arrive.
 hsts-preload = []
+# `ValidatorStore`: remember an `ETag`/`Last-Modified` per URL and replay it as a
+# conditional request on the next visit, whether or not the response was
+# storable.
+#
+# Off by default because it is a deliberate divergence from browser behaviour,
+# not an approximation of it: Chrome does not revalidate a response it was told
+# not to store, so an engine with this on is observably not a browser. See
+# `validators::ValidatorStore` for what a browser does instead and for the
+# measured hit rate, which is low.
+validator-store = []
 
 [lints]
 workspace = true
