@@ -16,13 +16,18 @@ use crate::pool::{Connection, Pool, PoolKey};
 
 /// Turns hyper's response body into a Chromulate body.
 ///
+/// The declared length — hyper's size hint is exact when the response carries
+/// a `Content-Length` — travels with the body so `Body::collect` can size its
+/// buffer once instead of growing into it.
+///
 /// Trailers are dropped: `Body` has no way to carry them, and no browser-facing
 /// behaviour in this crate depends on them.
 pub(crate) fn from_incoming(incoming: hyper::body::Incoming) -> Body {
+    let length = incoming.size_hint().exact();
     let stream = incoming
         .into_data_stream()
         .map(|chunk| chunk.map_err(|error| body_error(Phase::ReceiveBody, error)));
-    Body::stream(stream, None)
+    Body::stream(stream, length)
 }
 
 /// Polls the next **data** chunk out of a body, skipping non-data frames.

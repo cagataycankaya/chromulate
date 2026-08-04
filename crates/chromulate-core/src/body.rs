@@ -122,8 +122,15 @@ impl Body {
                     Ok(bytes)
                 }
             }
-            Inner::Stream { stream, .. } => {
-                let mut buf = BytesMut::new();
+            Inner::Stream { stream, length } => {
+                // Pre-size from the declared length so a large body is not
+                // copied repeatedly as the buffer doubles. Clamped to `limit`,
+                // so a lying `Content-Length` cannot become an allocation the
+                // peer never has to back with data.
+                let hint = length
+                    .and_then(|declared| usize::try_from(declared.min(limit)).ok())
+                    .unwrap_or(0);
+                let mut buf = BytesMut::with_capacity(hint);
                 let mut total: u64 = 0;
                 while let Some(chunk) = stream.next().await {
                     let chunk = chunk?;

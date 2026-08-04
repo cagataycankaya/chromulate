@@ -47,6 +47,26 @@ fn benches(c: &mut Criterion) {
         });
     }
     group.finish();
+
+    // The same collect with the length declared up front, which is what a
+    // response carrying `Content-Length` looks like: `collect` can size its
+    // buffer once instead of growing into it. Compare against the undeclared
+    // rows above to see what the pre-sizing is worth.
+    let mut group = c.benchmark_group("body_collect_sized");
+    for count in CHUNK_COUNTS {
+        group.throughput(Throughput::Bytes((count * CHUNK) as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(count), &count, |b, &count| {
+            b.to_async(&runtime).iter_batched(
+                || (0..count).map(|_| Ok(chunk.clone())).collect::<Vec<_>>(),
+                |chunks| async move {
+                    let body = Body::stream(stream::iter(chunks), Some((count * CHUNK) as u64));
+                    black_box(body.collect(u64::MAX).await.expect("collect must succeed"))
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+    group.finish();
 }
 
 criterion_group! {
