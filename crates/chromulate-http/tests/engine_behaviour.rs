@@ -20,7 +20,7 @@ use chromulate_dns::StaticResolver;
 use chromulate_fingerprint::{Setting, SettingId};
 use chromulate_http::{Engine, EngineConfig, Pool, PoolConfig};
 use chromulate_profile::Profile;
-use common::{Reply, TestServer};
+use common::{Recorded, Reply, TestServer};
 use http::{HeaderValue, Method, StatusCode};
 use url::Url;
 
@@ -771,6 +771,87 @@ async fn a_head_timeout_bounds_one_hop_even_without_a_whole_request_deadline() {
     assert!(
         matches!(error, Error::Timeout(Phase::AwaitResponse)),
         "{error:?}"
+    );
+}
+
+/// A server that answers `/prompt` at once and never answers anything else.
+///
+/// The prompt reply is what warms a pooled connection, so the stalling hop that
+/// follows it reuses that connection instead of dialling. That matters because
+/// these tests pause the clock: a paused clock jumps to the next deadline as
+/// soon as the runtime idles, and a dial still in flight when it jumps would
+/// expire the connect timeout instead of the one under test.
+fn prompt_then_silent(request: &Recorded) -> Reply {
+    if request.target == "/prompt" {
+        Reply::text("here")
+    } else {
+        Reply::ok().delayed(Duration::from_secs(3600))
+    }
+}
+
+#[tokio::test]
+async fn a_default_configured_engine_gives_up_when_the_head_never_arrives() {
+    let server = TestServer::start(prompt_then_silent).await;
+    // `head_timeout` is left exactly as `EngineConfig::new` leaves it, because
+    // that default is the entire subject of this test.
+    let engine = engine_for(&server, &["example.test"]);
+
+    let warm = engine
+        .send(get(&server.url_for("example.test", "/prompt")))
+        .await
+        .expect("the first request must succeed");
+    assert_eq!(text_of(warm).await, "here");
+
+    tokio::time::pause();
+
+    // The outer bound is the difference between a test that reports and a test
+    // that hangs: without a default head timeout the send below never returns,
+    // and a suite people learn to skip guards nothing.
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(600),
+        engine.send(get(&server.url_for("example.test", "/silent"))),
+    )
+    .await
+    .expect("a default-configured engine must bound the head wait itself, not hang on it");
+
+    let error = outcome.expect_err("the head never arrives, so the request must fail");
+    assert!(
+        matches!(error, Error::Timeout(Phase::AwaitResponse)),
+        "{error:?}"
+    );
+    assert_eq!(
+        server.accepts(),
+        1,
+        "the stalling hop must have reused the warmed connection rather than dialled again"
+    );
+}
+
+#[tokio::test]
+async fn an_explicit_head_timeout_of_none_still_means_no_bound() {
+    let server = TestServer::start(prompt_then_silent).await;
+    let engine = tuned(&server, &["example.test"], |config| {
+        config.head_timeout = None;
+    });
+
+    let warm = engine
+        .send(get(&server.url_for("example.test", "/prompt")))
+        .await
+        .expect("the first request must succeed");
+    assert_eq!(text_of(warm).await, "here");
+
+    tokio::time::pause();
+
+    // Long-polling asks for exactly this, so opting out has to keep working:
+    // the outer bound is what expires here, not anything the engine imposed.
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(1800),
+        engine.send(get(&server.url_for("example.test", "/silent"))),
+    )
+    .await;
+
+    assert!(
+        outcome.is_err(),
+        "an opted-out head wait must outlast half an hour of silence, not end early"
     );
 }
 
