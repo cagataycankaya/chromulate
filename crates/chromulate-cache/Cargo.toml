@@ -1,0 +1,30 @@
+[package]
+name = "chromulate-cache"
+description = "An RFC 9111 HTTP cache for Chromulate: storability, freshness, revalidation, and Vary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+chromulate-core.workspace = true
+
+bytes.workspace = true
+futures-core.workspace = true
+http.workspace = true
+http-body.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

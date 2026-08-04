@@ -37,6 +37,46 @@ use crate::redirect::{self, Decision, Hop};
 /// connection instead.
 const REDIRECT_DRAIN_LIMIT: u64 = 64 * 1024;
 
+/// What the cache asked to have carried from before a hop to after it.
+///
+/// A type alias with two definitions, so the two calls in the redirect loop are
+/// written once. With the `cache` feature off it is `()`, both calls are
+/// `#[inline]` identity functions, and nothing of `chromulate-cache` is linked.
+#[cfg(feature = "cache")]
+type CachePending = chromulate_cache::Pending;
+#[cfg(not(feature = "cache"))]
+type CachePending = ();
+
+/// A response the cache could serve without an exchange.
+///
+/// `Option<Infallible>` rather than `Option<Response>` when the feature is off,
+/// and the difference is not cosmetic: this value is the scrutinee of a `match`
+/// whose other arm awaits the network, and a `match` keeps its scrutinee alive
+/// across that await. Typed as `Option<Response>` it put a whole response head
+/// into every request's future — 152 bytes on the measured build, for a
+/// variant that cannot exist. Typing the impossible case as impossible is what
+/// keeps the allocation harness's byte figure where it was.
+#[cfg(feature = "cache")]
+type CacheHit = Option<Response>;
+#[cfg(not(feature = "cache"))]
+type CacheHit = Option<std::convert::Infallible>;
+
+/// Unwraps a cache hit into the response to return.
+///
+/// With the feature off the argument is uninhabited, so the arm that calls this
+/// is unreachable and the compiler knows it.
+#[cfg(feature = "cache")]
+#[inline]
+fn cache_hit(response: Response) -> Response {
+    response
+}
+
+#[cfg(not(feature = "cache"))]
+#[inline]
+fn cache_hit(never: std::convert::Infallible) -> Response {
+    match never {}
+}
+
 /// What the engine learned while producing a response, placed in the
 /// response's extensions.
 ///
@@ -137,6 +177,8 @@ pub struct EngineBuilder {
     decompression: Option<ExpansionGuard>,
     pool: Option<Pool>,
     retry: Option<Retry>,
+    #[cfg(feature = "cache")]
+    cache: Option<Arc<chromulate_cache::HttpCache>>,
 }
 
 impl fmt::Debug for EngineBuilder {
@@ -162,6 +204,8 @@ impl EngineBuilder {
             decompression: None,
             pool: None,
             retry: None,
+            #[cfg(feature = "cache")]
+            cache: None,
         }
     }
 
@@ -231,6 +275,27 @@ impl EngineBuilder {
         self
     }
 
+    /// Serves and stores responses through an RFC 9111 cache.
+    ///
+    /// Requires the off-by-default `cache` feature, and a direct dependency on
+    /// `chromulate-cache` to name the type.
+    ///
+    /// The cache is consulted **per hop**, not per logical request, because a
+    /// cache key is one target URI: a `301` and the resource it points at are
+    /// two entries, and a cached redirect is followed exactly as a fresh one
+    /// would be. A hop served from store contacts no origin, so it records no
+    /// cookies, no HSTS policy, and no connection timings — there was no
+    /// exchange to record.
+    ///
+    /// Read [`chromulate_cache`]'s list of what the cache deliberately does not
+    /// implement before turning this on.
+    #[cfg(feature = "cache")]
+    #[must_use]
+    pub fn cache(mut self, cache: Arc<chromulate_cache::HttpCache>) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+
     /// Builds the engine.
     ///
     /// # Errors
@@ -267,6 +332,8 @@ impl EngineBuilder {
                 cookies: self.cookies,
                 middleware: self.middleware,
                 retry: self.retry,
+                #[cfg(feature = "cache")]
+                cache: self.cache,
                 config: self.config,
                 connector,
                 pool,
@@ -307,6 +374,8 @@ struct EngineInner {
     decompression: ExpansionGuard,
     middleware: Vec<Arc<dyn Middleware>>,
     retry: Option<Retry>,
+    #[cfg(feature = "cache")]
+    cache: Option<Arc<chromulate_cache::HttpCache>>,
 }
 
 impl fmt::Debug for Engine {
@@ -337,6 +406,17 @@ impl Engine {
     #[must_use]
     pub fn pool(&self) -> &Pool {
         &self.inner.pool
+    }
+
+    /// The response cache, when one was installed.
+    ///
+    /// The way to reach [`chromulate_cache::HttpCache::invalidate`] for a
+    /// caller that knows a target has changed by some route this engine did
+    /// not see.
+    #[cfg(feature = "cache")]
+    #[must_use]
+    pub fn cache(&self) -> Option<&Arc<chromulate_cache::HttpCache>> {
+        self.inner.cache.as_ref()
     }
 
     /// What separates this engine's connections from another engine's.
@@ -423,10 +503,21 @@ impl Engine {
                 hop = hops,
             );
 
-            let response = self
-                .hop(&mut request, body, &url, &options, &deadline, &mut timings)
-                .instrument(span)
-                .await?;
+            // The cache sits around one hop, not around the whole logical
+            // request: a cache key is a single target URI, so a redirect and
+            // what it points at are separate entries and a cached `301` is
+            // followed by the loop below exactly as a fresh one would be.
+            let (pending, cached) = self.cache_before(&mut request, &url);
+            let response = match cached {
+                Some(hit) => cache_hit(hit),
+                None => {
+                    let response = self
+                        .hop(&mut request, body, &url, &options, &deadline, &mut timings)
+                        .instrument(span)
+                        .await?;
+                    self.cache_after(pending, &url, response)
+                }
+            };
 
             let decision = redirect::decide(
                 response.status(),
@@ -517,6 +608,41 @@ impl Engine {
 
         self.record_response(url, &response);
         Ok(response)
+    }
+
+    /// Asks the cache what to do with this hop, before anything is sent.
+    ///
+    /// Returns what [`Engine::cache_after`] will need, and the stored response
+    /// when one may be served without an exchange.
+    #[cfg(feature = "cache")]
+    fn cache_before(&self, request: &mut Request, url: &Url) -> (CachePending, CacheHit) {
+        match &self.inner.cache {
+            Some(cache) => cache.before(request, url),
+            None => (CachePending::default(), None),
+        }
+    }
+
+    #[cfg(not(feature = "cache"))]
+    #[inline]
+    fn cache_before(&self, _request: &mut Request, _url: &Url) -> (CachePending, CacheHit) {
+        ((), None)
+    }
+
+    /// Hands the cache what the origin answered, and takes back the response
+    /// the caller should see — the stored one after a `304`, otherwise the
+    /// origin's own with its body wrapped so that reading it also stores it.
+    #[cfg(feature = "cache")]
+    fn cache_after(&self, pending: CachePending, url: &Url, response: Response) -> Response {
+        match &self.inner.cache {
+            Some(cache) => cache.after(pending, url, response),
+            None => response,
+        }
+    }
+
+    #[cfg(not(feature = "cache"))]
+    #[inline]
+    fn cache_after(&self, _pending: CachePending, _url: &Url, response: Response) -> Response {
+        response
     }
 
     /// Takes a pooled connection, or opens one.

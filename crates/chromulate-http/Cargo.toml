@@ -11,6 +11,7 @@ authors.workspace = true
 
 [dependencies]
 chromulate-core.workspace = true
+chromulate-cache = { workspace = true, optional = true }
 chromulate-compression.workspace = true
 chromulate-dns.workspace = true
 chromulate-fingerprint.workspace = true
@@ -77,6 +78,11 @@ hsts-preload = []
 # `validators::ValidatorStore` for what a browser does instead and for the
 # measured hit rate, which is low.
 validator-store = []
+# An RFC 9111 HTTP cache in front of every hop. Off by default: a cache changes
+# which requests reach the origin, and that is not something to inherit by
+# accident. See `chromulate-cache`'s documentation for the subset implemented
+# and, more importantly, for the list of what it deliberately does not do.
+cache = ["dep:chromulate-cache"]
 
 [lints]
 workspace = true

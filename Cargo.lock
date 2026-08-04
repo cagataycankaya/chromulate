@@ -339,6 +339,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "chromulate-cache"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "chromulate-core",
+ "futures-core",
+ "futures-util",
+ "http",
+ "http-body",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "chromulate-cli"
 version = "0.1.0"
 dependencies = [
@@ -458,6 +474,7 @@ name = "chromulate-http"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "chromulate-cache",
  "chromulate-compression",
  "chromulate-cookie",
  "chromulate-core",

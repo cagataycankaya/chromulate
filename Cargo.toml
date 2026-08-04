@@ -7,6 +7,7 @@ members = [
     "crates/chromulate-profile",
     "crates/chromulate-header",
     "crates/chromulate-cookie",
+    "crates/chromulate-cache",
     "crates/chromulate-compression",
     "crates/chromulate-dns",
     "crates/chromulate-proxy",
@@ -38,6 +39,7 @@ chromulate-fingerprint = { version = "0.1.0", path = "crates/chromulate-fingerpr
 chromulate-profile = { version = "0.1.0", path = "crates/chromulate-profile" }
 chromulate-header = { version = "0.1.0", path = "crates/chromulate-header" }
 chromulate-cookie = { version = "0.1.0", path = "crates/chromulate-cookie" }
+chromulate-cache = { version = "0.1.0", path = "crates/chromulate-cache" }
 chromulate-compression = { version = "0.1.0", path = "crates/chromulate-compression" }
 chromulate-dns = { version = "0.1.0", path = "crates/chromulate-dns" }
 chromulate-proxy = { version = "0.1.0", path = "crates/chromulate-proxy" }
