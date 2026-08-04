@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use chromulate::cookie::Jar;
 use chromulate::dns::StaticResolver;
-use chromulate::{Client, Error, Profile, RedirectPolicy};
+use chromulate::{Client, Error, Profile, RedirectPolicy, Stop, StopReason};
 use common::{Reply, TestServer};
 use futures_util::StreamExt as _;
 
@@ -119,6 +119,150 @@ async fn a_body_is_sent_as_given() {
         .expect("the request must succeed");
 
     assert_eq!(server.received()[0].body_text(), "raw bytes");
+}
+
+// ------------------------------------------------------ stopping early
+
+/// The default path, which no early-stop work may disturb: `bytes()` reads all
+/// of it and the connection comes back, exactly as before.
+#[tokio::test]
+async fn bytes_still_reads_the_whole_body_and_returns_the_connection() {
+    let mut page = b"<head>application/ld+json{}".to_vec();
+    page.resize(64 * 1024, b'x');
+
+    let server = TestServer::always(Reply::ok().with_body(page.clone())).await;
+    let client = client_for(&server, &["example.test"]);
+    let url = server.url_for("example.test", "/product");
+
+    let body = client
+        .get(&url)
+        .send()
+        .await
+        .expect("the request must succeed")
+        .bytes()
+        .await
+        .expect("the body must read");
+
+    assert_eq!(body.len(), page.len());
+    assert_eq!(body, page);
+
+    let _ = client
+        .get(&url)
+        .send()
+        .await
+        .expect("the second request must succeed")
+        .bytes()
+        .await
+        .expect("the second body must read");
+    assert_eq!(
+        server.accepts(),
+        1,
+        "an ordinary whole-body read must still pool its connection"
+    );
+}
+
+#[tokio::test]
+async fn bytes_until_a_marker_reads_the_front_of_the_body_and_says_it_matched() {
+    let mut page = b"<head>application/ld+json{\"price\":42}".to_vec();
+    page.resize(512 * 1024, b'x');
+
+    let server = TestServer::always(Reply::ok().with_body(page)).await;
+    let client = client_for(&server, &["example.test"]);
+
+    let prefix = client
+        .get(server.url_for("example.test", "/product"))
+        .send()
+        .await
+        .expect("the request must succeed")
+        .bytes_until(Stop::marker("application/ld+json").plus(11))
+        .await
+        .expect("the prefix must read");
+
+    assert_eq!(prefix.reason(), StopReason::Matched);
+    assert!(prefix.matched());
+    assert!(!prefix.is_complete());
+    assert_eq!(
+        prefix.bytes(),
+        &b"<head>application/ld+json{\"price\":42"[..]
+    );
+}
+
+/// The distinction a scraper mis-parses without: this page has no marker, and
+/// the answer has to say so rather than hand back a short read.
+#[tokio::test]
+async fn bytes_until_reports_a_page_that_never_contained_the_marker() {
+    let server = TestServer::always(Reply::text("a page with no structured data")).await;
+    let client = client_for(&server, &["example.test"]);
+
+    let prefix = client
+        .get(server.url_for("example.test", "/product"))
+        .send()
+        .await
+        .expect("the request must succeed")
+        .bytes_until(Stop::marker("application/ld+json"))
+        .await
+        .expect("the prefix must read");
+
+    assert_eq!(prefix.reason(), StopReason::EndOfBody);
+    assert!(!prefix.matched());
+    assert!(prefix.is_complete());
+    assert_eq!(prefix.bytes(), "a page with no structured data");
+}
+
+/// The client's ceiling still bounds the read, but a truncating read that
+/// failed on truncation would have nothing to report, so it stops instead.
+#[tokio::test]
+async fn the_clients_maximum_response_size_caps_the_budget_without_failing() {
+    let server = TestServer::always(Reply::ok().with_body(vec![b'x'; 64 * 1024])).await;
+    let client = build(&server, &["example.test"], |builder| {
+        builder.max_response_size(4096)
+    });
+    let url = server.url_for("example.test", "/product");
+
+    let prefix = client
+        .get(&url)
+        .send()
+        .await
+        .expect("the request must succeed")
+        .bytes_until(Stop::marker("never-present"))
+        .await
+        .expect("a budget is an instruction to stop, not a limit to fail on");
+
+    assert_eq!(prefix.bytes().len(), 4096);
+    assert_eq!(prefix.reason(), StopReason::Budget);
+
+    // The same client's `bytes()` still fails on the same body, so the ceiling
+    // has not been quietly relaxed for everyone.
+    let error = client
+        .get(&url)
+        .send()
+        .await
+        .expect("the request must succeed")
+        .bytes()
+        .await
+        .expect_err("bytes() still refuses an oversized body");
+    assert!(
+        matches!(error, Error::BodyTooLarge { limit: 4096 }),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_smaller_budget_than_the_clients_ceiling_is_the_one_that_applies() {
+    let server = TestServer::always(Reply::ok().with_body(vec![b'x'; 64 * 1024])).await;
+    let client = client_for(&server, &["example.test"]);
+
+    let prefix = client
+        .get(server.url_for("example.test", "/product"))
+        .send()
+        .await
+        .expect("the request must succeed")
+        .bytes_until(Stop::after(100))
+        .await
+        .expect("the prefix must read");
+
+    assert_eq!(prefix.bytes().len(), 100);
+    assert_eq!(prefix.reason(), StopReason::Budget);
 }
 
 // ---------------------------------------------------------------- encoding
