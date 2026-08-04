@@ -7,7 +7,7 @@
 mod common;
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use chromulate::cookie::Jar;
 use chromulate::dns::StaticResolver;
@@ -425,6 +425,48 @@ async fn a_cookie_the_server_sets_is_replayed_on_the_next_request() {
     assert_eq!(echoed, "session=abc123");
 }
 
+/// The login flow, through the plain facade with no `RequestOptions` at all —
+/// the path every ordinary caller takes.
+///
+/// The first visit is what makes this reproduce. A jar with nothing to say
+/// hides the defect completely: hop one then sets no `Cookie` header, so hop
+/// two asks the jar and finds the session. It is the client that has *already*
+/// been to the site — every real one, a moment after its first request — that
+/// loses its login.
+#[tokio::test]
+async fn a_session_cookie_set_by_a_login_redirect_reaches_the_page_it_redirects_to() {
+    let server = TestServer::start(|request| match request.target.as_str() {
+        "/" => Reply::ok().with_header("set-cookie", "consent=yes; Path=/"),
+        "/login" => {
+            Reply::redirect(302, "/dashboard").with_header("set-cookie", "session=abc123; Path=/")
+        }
+        _ => Reply::text(request.header("cookie").unwrap_or("<none>")),
+    })
+    .await;
+    let client = client_for(&server, &["example.test"]);
+
+    let first_visit = client
+        .get(server.url_for("example.test", "/"))
+        .send()
+        .await
+        .expect("the first visit must succeed");
+    let _ = first_visit.bytes().await;
+
+    let dashboard = client
+        .get(server.url_for("example.test", "/login"))
+        .send()
+        .await
+        .expect("the login redirect must be followed")
+        .text()
+        .await
+        .expect("the body must decode");
+
+    assert_eq!(
+        dashboard, "consent=yes; session=abc123",
+        "the page the login redirected to must receive the session the login set"
+    );
+}
+
 #[tokio::test]
 async fn turning_the_cookie_store_off_stops_the_replay() {
     let server = TestServer::start(|request| {
@@ -705,6 +747,53 @@ async fn the_client_exposes_the_identity_it_presents_and_the_gap_to_it() {
         !client.engine().http2_fidelity().is_exact(),
         "the HTTP/2 gap must be reported, never reported as absent"
     );
+}
+
+/// The facade's half of the HSTS shape. `Client::hsts()` used to hand out the
+/// write guard, so a caller who held it across an `.await` stopped every later
+/// request on the read lock the request path takes — a hang no timeout could
+/// interrupt, because the blocked thread never polls the timeout's future
+/// either. `with_hsts` releases the lock before it returns and the borrow
+/// cannot escape the closure, so there is nothing left to hold.
+///
+/// The probe runs on a plain thread rather than a task on purpose: under the
+/// failure this guards it never returns, and a thread that is not a runtime
+/// worker cannot stop this test from finishing and reporting.
+#[tokio::test]
+async fn seeding_the_hsts_store_leaves_the_lock_free_for_the_request_path() {
+    let server = TestServer::always(Reply::ok()).await;
+    let client = client_for(&server, &["example.test"]);
+
+    client.with_hsts(|store| {
+        store.record(
+            "pinned.example",
+            "max-age=31536000; includeSubDomains",
+            true,
+            SystemTime::now(),
+        );
+    });
+
+    let (answer, probe) = std::sync::mpsc::channel();
+    {
+        let client = client.clone();
+        std::thread::spawn(move || {
+            let seeded =
+                client.with_hsts(|store| store.applies_to("api.pinned.example", SystemTime::now()));
+            let _ = answer.send(seeded);
+        });
+    }
+
+    assert_eq!(
+        probe.recv_timeout(Duration::from_secs(3)),
+        Ok(true),
+        "a second taker could not reach the HSTS store after `with_hsts` returned"
+    );
+
+    client
+        .get(server.url_for("example.test", "/"))
+        .send()
+        .await
+        .expect("a request must still be able to read the HSTS store");
 }
 
 #[tokio::test]

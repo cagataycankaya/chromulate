@@ -10,7 +10,7 @@ mod common;
 use std::io::Write as _;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use chromulate_cookie::Jar;
 use chromulate_core::{
@@ -671,6 +671,128 @@ async fn an_unattributed_request_still_carries_its_lax_cookie() {
     );
 }
 
+// -------------------------------------------------- cookies across a redirect
+
+/// An engine wired to a jar that already holds `seed` for `host` on this
+/// server's port.
+///
+/// The seeding is the whole point of this section. A `Cookie` header is only
+/// computed for the first hop when the jar has something to say, and it was
+/// that header surviving onto the second hop that suppressed the second
+/// lookup. Every redirect test written before this one started from an empty
+/// jar, so hop one set no `Cookie` header, so hop two asked the jar and got
+/// the right answer — which is exactly why the suite was green while a login
+/// flow lost its session.
+fn engine_with_jar(server: &TestServer, host: &str, seed: &[&str]) -> Engine {
+    let jar = Arc::new(Jar::new());
+    let origin = Url::parse(&server.url_for(host, "/")).expect("a valid seed URL");
+    for header in seed {
+        let value = HeaderValue::from_str(header).expect("a valid Set-Cookie value");
+        jar.store(&origin, &mut std::iter::once(&value));
+    }
+
+    let resolver = StaticResolver::empty().with_host(host.to_owned(), vec![server.addr()]);
+    let mut config = EngineConfig::new(Arc::new(Profile::chrome_stable()));
+    config.connect_timeout = Some(Duration::from_secs(5));
+    Engine::builder(config)
+        .resolver(Arc::new(resolver))
+        .cookies(jar as Arc<dyn CookieStore>)
+        .build()
+        .expect("the engine must build")
+}
+
+/// A server that answers anything but `/dashboard` with a same-origin redirect
+/// to it, carrying `set_cookie` — the shape of the login flow this defect was
+/// reported against.
+async fn redirect_setting_cookie(set_cookie: &'static str) -> TestServer {
+    TestServer::start(move |request| {
+        if request.target == "/dashboard" {
+            Reply::text("arrived")
+        } else {
+            Reply::redirect(302, "/dashboard").with_header("set-cookie", set_cookie)
+        }
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_cookie_set_by_a_same_origin_redirect_is_sent_on_the_next_hop() {
+    let server = redirect_setting_cookie("session=fresh; Path=/").await;
+    let engine = engine_with_jar(&server, "app.test", &["visitor=1; Path=/"]);
+
+    engine
+        .send(get(&server.url_for("app.test", "/login")))
+        .await
+        .expect("the redirect must be followed");
+
+    let received = server.received();
+    assert_eq!(received.len(), 2, "both hops must have been made");
+    assert_eq!(
+        received[0].header("cookie"),
+        Some("visitor=1"),
+        "the first hop carries what the jar already held"
+    );
+    assert_eq!(
+        received[1].header("cookie"),
+        Some("visitor=1; session=fresh"),
+        "the cookie the redirect itself set must reach the hop it was set for; a header \
+         computed before that response arrived cannot suppress the jar"
+    );
+}
+
+#[tokio::test]
+async fn a_cookie_the_redirect_deletes_is_not_replayed_on_the_next_hop() {
+    let server = redirect_setting_cookie("session=; Path=/; Max-Age=0").await;
+    let engine = engine_with_jar(&server, "app.test", &["session=old; Path=/"]);
+
+    engine
+        .send(get(&server.url_for("app.test", "/logout")))
+        .await
+        .expect("the redirect must be followed");
+
+    let received = server.received();
+    assert_eq!(received.len(), 2, "both hops must have been made");
+    assert_eq!(received[0].header("cookie"), Some("session=old"));
+    assert_eq!(
+        received[1].header("cookie"),
+        None,
+        "the jar was emptied by the redirect, so the next hop carries nothing"
+    );
+}
+
+/// The behaviour the fix had to preserve, and the reason the jar lookup is
+/// skipped at all: a caller who sets their own `Cookie` header is not
+/// overridden, on the first hop or on any later one. Deleting the
+/// `contains_key` guard in `apply_headers` — the over-fix — turns this red and
+/// leaves the two above green, which is what makes the two conditions
+/// separately guarded rather than one condition tested twice.
+#[tokio::test]
+async fn a_callers_own_cookie_header_wins_over_the_jar_on_every_hop() {
+    let server = redirect_setting_cookie("session=fresh; Path=/").await;
+    let engine = engine_with_jar(&server, "app.test", &["visitor=1; Path=/"]);
+
+    let mut request = get(&server.url_for("app.test", "/login"));
+    request.headers_mut().insert(
+        http::header::COOKIE,
+        HeaderValue::from_static("chosen=by-caller"),
+    );
+
+    engine
+        .send(request)
+        .await
+        .expect("the redirect must be followed");
+
+    let received = server.received();
+    assert_eq!(received.len(), 2, "both hops must have been made");
+    for (index, hop) in received.iter().enumerate() {
+        assert_eq!(
+            hop.header("cookie"),
+            Some("chosen=by-caller"),
+            "hop {index}: the caller's own Cookie header is not the engine's to replace"
+        );
+    }
+}
+
 // ---------------------------------------------------------- streaming bodies
 
 #[tokio::test]
@@ -1014,12 +1136,9 @@ async fn a_recorded_hsts_policy_upgrades_a_later_plaintext_request() {
     // The policy can only be recorded from a TLS response, and this harness is
     // plaintext, so the store is reached directly to set up the state under
     // test. What is being tested is what the engine does *with* a policy.
-    engine.hsts().record(
-        "example.test",
-        "max-age=31536000",
-        true,
-        std::time::SystemTime::now(),
-    );
+    engine.with_hsts(|store| {
+        store.record("example.test", "max-age=31536000", true, SystemTime::now());
+    });
 
     let url = server.url_for("example.test", "/");
     let error = engine
@@ -1058,6 +1177,63 @@ async fn a_strict_transport_security_header_over_plaintext_is_not_recorded() {
     )
     .await;
     assert_eq!(server.request_count(), 2);
+}
+
+/// `with_hsts` must leave the lock free, because the request path takes it on
+/// every single request — `apply_hsts` reads it before anything is sent.
+///
+/// This is the shape half of the fix. `hsts()` used to hand back the write
+/// guard itself, so a caller who kept it — which is the obvious thing to write
+/// — stopped every later request dead on the read lock. Because that block is a
+/// thread block rather than a pending future, a `tokio::time::timeout` around
+/// the request did not save anyone either: the future it wraps is never polled
+/// again, so the timeout never fires.
+///
+/// Which is why the probe below is a plain `std::thread` and not a task. A
+/// thread that is not a runtime worker cannot stop this test from finishing and
+/// reporting, so the failure arrives in three seconds instead of hanging the
+/// suite — the whole point of testing a deadlock.
+///
+/// The mutation is `std::mem::forget` on the guard inside `with_hsts`, and it
+/// turns this red in three seconds. Run it with `--exact` against this test:
+/// `a_recorded_hsts_policy_upgrades_a_later_plaintext_request` seeds and then
+/// issues a request on the test's own thread, so under the same mutation it
+/// hangs outright rather than failing — which is the behaviour this shape
+/// exists to make unreachable, observed while proving that it is.
+#[tokio::test]
+async fn the_hsts_lock_is_free_again_once_with_hsts_returns() {
+    let server = TestServer::always(Reply::text("body")).await;
+    let engine = engine_for(&server, &["plain.test"]);
+
+    engine.with_hsts(|store| {
+        store.record("pinned.test", "max-age=31536000", true, SystemTime::now());
+    });
+
+    let (answer, probe) = std::sync::mpsc::channel();
+    {
+        let engine = engine.clone();
+        std::thread::spawn(move || {
+            let seeded =
+                engine.with_hsts(|store| store.applies_to("pinned.test", SystemTime::now()));
+            let _ = answer.send(seeded);
+        });
+    }
+
+    // One assertion, two facts: the probe got the lock at all, and it found the
+    // policy the first call wrote — so the edit reached the engine's own store
+    // rather than a copy of it.
+    assert_eq!(
+        probe.recv_timeout(Duration::from_secs(3)),
+        Ok(true),
+        "a second taker could not reach the HSTS store after `with_hsts` returned"
+    );
+
+    // And the request path, which takes the same lock before anything is sent,
+    // for an origin that has no policy at all.
+    engine
+        .send(get(&server.url_for("plain.test", "/")))
+        .await
+        .expect("a request must still be able to read the HSTS store");
 }
 
 // ------------------------------------------------------------------ timings

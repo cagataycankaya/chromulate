@@ -90,8 +90,8 @@ impl Client {
         self.inner.cookies.as_ref()
     }
 
-    /// Exclusive access to the HSTS store this client consults before every
-    /// request.
+    /// Runs `edit` against the HSTS store this client consults before every
+    /// request, with exclusive access, and returns what it returned.
     ///
     /// Policies are learned from `Strict-Transport-Security` responses, so a
     /// freshly built client knows nothing and its *first* request to an
@@ -101,16 +101,22 @@ impl Client {
     /// ```no_run
     /// # use std::time::SystemTime;
     /// let client = chromulate::Client::chrome()?;
-    /// client
-    ///     .hsts()
-    ///     .record("internal.example", "max-age=31536000; includeSubDomains", true, SystemTime::now());
+    /// client.with_hsts(|store| {
+    ///     store.record(
+    ///         "internal.example",
+    ///         "max-age=31536000; includeSubDomains",
+    ///         true,
+    ///         SystemTime::now(),
+    ///     );
+    /// });
     /// # Ok::<(), chromulate::Error>(())
     /// ```
     ///
-    /// The guard holds a lock the request path takes, so drop it before
-    /// issuing requests.
-    pub fn hsts(&self) -> std::sync::RwLockWriteGuard<'_, chromulate_http::HstsStore> {
-        self.inner.engine.hsts()
+    /// The lock is released before this returns. See
+    /// [`Engine::with_hsts`](chromulate_http::Engine::with_hsts) for why the
+    /// store is reached through a closure rather than by handing out its guard.
+    pub fn with_hsts<R>(&self, edit: impl FnOnce(&mut chromulate_http::HstsStore) -> R) -> R {
+        self.inner.engine.with_hsts(edit)
     }
 
     /// Starts a request with an explicit method.
