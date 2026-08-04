@@ -7,6 +7,13 @@ it first.
 
 Everything here is measured. Where something is inferred rather than measured, it says so.
 
+> **Status (2026-08-04, later the same day):** the optimisation opportunities at the end of
+> this document have since been applied and re-measured on the same machine and harness.
+> This document is kept as the *before* record; the after numbers are in the
+> [changelog](../CHANGELOG.md) under "Changed — performance". Headlines: throughput parity
+> with reqwest (paired medians 0.93–1.09x, was 0.79–0.88x), 48 allocations per steady-state
+> request (was 127; reqwest 49), full-jar cookie insert 1.3–1.9 µs amortised (was ~21–22 µs).
+
 ## Machine
 
 | | |
@@ -137,10 +144,11 @@ Lookup is linear in the matching bucket, not in the jar.
   connections per round at concurrency 256. Over a real network with TLS each of those
   would cost a round trip and a handshake. Do not read "the default pool is free" from this.
 
-## Known optimisation opportunities, not applied
+## Known optimisation opportunities
 
-Ranked by expected payoff. None have been applied; this document is the baseline they would
-be measured against.
+Ranked by expected payoff. **All three have since been applied** — see the status note at
+the top and the changelog for the measured results. The list is kept as written so the
+predictions can be compared against what the changes actually delivered.
 
 1. **Precompute the profile's constant headers in `HeaderEngine::new`.** `HeaderName` and
    `HeaderValue` are both `Bytes`-backed, so cloning is a refcount bump rather than an

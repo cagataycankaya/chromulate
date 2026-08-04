@@ -69,6 +69,55 @@ an Apple M1 Pro. See [`benches/README.md`](benches/README.md) to reproduce.
   defect: removing it needs either a purge margin or a global LRU index, and both change what
   `JarLimits::total` means.
 
+### Changed — performance, measured against the baseline above
+
+The optimisation wave the baseline called for. Every figure is the median of runs on the
+same machine and harness as the baseline; the baseline numbers are quoted alongside.
+
+- **Throughput is at parity with `reqwest`: paired medians 0.93–1.09x** across concurrency
+  1–256 (two independent runs), against the baseline's 0.79–0.88x. The machine was noisier
+  than on the baseline day, so treat the claim as "the 12–21% deficit is gone", not
+  "faster than reqwest".
+- **48 heap allocations per steady-state request, from 127** — now *below* reqwest's 49
+  (0.98x, was 2.59x). First request: 156 → 78 (reqwest 76). The design documents'
+  low-allocation claim is now supported by measurement. The wave, in order of payoff:
+  - `HeaderEngine` precomputes every profile-constant name and value at construction and
+    promotes their buffers once: `apply` fell from 80 allocations / 4.38 µs to
+    8 allocations / **1.46 µs** per request.
+  - The wire header list is moved onto the outgoing request instead of the map being
+    rebuilt and then cloned.
+  - The parsed `Url` travels with the request (`RequestUrl` extension); the five
+    `Url`/`Uri` crossings per request are gone, and `FinalUrl` is taken from the response
+    rather than cloned.
+  - The pool key's identity hash is computed once at construction instead of SipHashing
+    ~200 bytes two to three times per request, and the https fallback key clones
+    reference counts instead of re-copying strings.
+  - The response body wrappers poll the `Body` directly: one boxed stream and two poll
+    layers fewer per response.
+- **`Pool::release` no longer walks the whole pool under the global mutex per request**:
+  a running count answers the cap check, and the expiry sweep runs at most once per
+  quarter of the idle timeout. Mechanism proven by construction and pinned by five new
+  pool tests; the multi-origin throughput effect awaits a multi-origin harness.
+- **Cookie eviction at the caps is amortised, mirroring Chromium's purge batches** (a
+  tenth of the total cap, a sixth of the per-domain cap): storing a new cookie into a
+  full default jar fell from **21.9 µs to 1.32 µs** (one domain) and **22.7 µs to
+  1.85 µs** (spread domains); replace stays ~560 ns. The caps are now documented as
+  ceilings the jar purges below, not levels it sits at, and two new mutations in
+  `tools/cookie-mutation-check.py` guard the batching.
+- **`Body::collect` pre-sizes from the declared length** (hyper's `Content-Length` size
+  hint now travels with the body): collecting 16 MiB fell from 1.62 ms to **492 µs**
+  (9.7 → 31.7 GiB/s). Undeclared lengths are unchanged.
+- **`PoolConfig::http1_max_buf_size`** bounds hyper's per-connection h1 buffers (default
+  unchanged). Measured with 512 pooled connections that had each downloaded a 4 MiB body:
+  resident memory fell from a ~381 MiB median to ~217 MiB with a 16 KiB cap — roughly
+  45% — while with 1 KiB bodies the buffers never grow and the cap saves nothing. It also
+  caps the acceptable response header block, which is why it is a documented knob rather
+  than a new default.
+- The Accept-CH store's read lock is skipped until a grant has ever been recorded.
+- Constant-memory streaming still holds after the body-path changes (256 MiB at a
+  +1.39 MiB peak against a +260 MiB buffering control), and the wire header order still
+  matches the capture — both re-verified, not assumed.
+
 ### Measured — fidelity
 
 Against a live echo endpoint, the engine reproduces Chrome 151's HTTP/2 preface in 3 of the
