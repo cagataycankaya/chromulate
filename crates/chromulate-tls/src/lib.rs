@@ -121,12 +121,14 @@
 pub mod backend;
 pub mod engine;
 pub mod fidelity;
+#[cfg(any(test, chromulate_mock_backend))]
+pub mod mock;
 pub mod provider;
 pub mod resumption;
 pub mod server_name;
 pub mod trust;
 
-pub use backend::{TlsBackend, TlsConnection, TlsIo};
+pub use backend::{TlsBackend, TlsBackendConfig, TlsConnection, TlsIo};
 pub use engine::{Alpn, HandshakeInfo, TlsEngine, TlsEngineBuilder};
 pub use fidelity::{
     Fidelity, STRUCTURAL_LIMITS, TargetIdentity, target_client_hello, target_identity,
@@ -158,10 +160,24 @@ pub type TlsStream<IO> = tokio_rustls::client::TlsStream<IO>;
 /// socket for a choice nobody changes while the process is running. It is the
 /// same trade rustls makes with its crypto providers.
 ///
-/// `chromulate-http` names this alias and the [`TlsStream`] one, and calls the
-/// engine only through [`TlsBackend`]. Adding a BoringSSL backend is therefore
-/// a matter of implementing that trait and pointing these two aliases at it
-/// under a cargo feature — not of changing the connection path. That the seam
-/// is load-bearing today, with rustls as its only implementation, is what makes
-/// that claim testable rather than aspirational.
+/// `chromulate-http` names this alias, and calls the engine only through
+/// [`TlsBackend`]. Adding a BoringSSL backend is therefore a matter of
+/// implementing that trait and pointing this alias at it under a cargo feature
+/// — not of changing the connection path.
+///
+/// That claim is checked rather than asserted: the off-by-default
+/// `--cfg chromulate_mock_backend` flag points this alias at `mock::MockBackend`, which
+/// shares no code and no types with rustls, and the workspace still compiles
+/// and its tests still pass. See `mock` for the three trait members writing
+/// that second implementation turned out to be missing.
+#[cfg(not(chromulate_mock_backend))]
 pub type ActiveBackend = TlsEngine;
+
+/// The TLS backend this build links — here, the mock, because the
+/// `--cfg chromulate_mock_backend` is set.
+///
+/// **This build performs no encryption.** The feature exists to prove the
+/// backend seam admits an implementation that is not rustls; it is not a
+/// configuration anyone should ship.
+#[cfg(chromulate_mock_backend)]
+pub type ActiveBackend = mock::MockBackend;

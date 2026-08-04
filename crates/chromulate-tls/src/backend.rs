@@ -14,10 +14,12 @@ use std::task::{Context, Poll};
 
 use chromulate_core::{BoxFuture, Result};
 use chromulate_fingerprint::ClientHelloSpec;
+use chromulate_profile::Profile;
 use rustls_pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::engine::{HandshakeInfo, TlsEngine};
+use crate::fidelity::{Fidelity, TargetIdentity};
 
 /// A byte stream a TLS backend can hand back.
 pub trait TlsIo: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -88,12 +90,57 @@ impl AsyncWrite for TlsConnection {
     }
 }
 
+/// What a backend is, independent of the stream type it will be handed.
+///
+/// Split out of [`TlsBackend`] because none of these depend on `IO`, and while
+/// they lived on the `IO`-generic trait none of them could be called without
+/// naming a stream type that had nothing to do with the question. Writing a
+/// second backend turned that from a wart into a compile error:
+/// `ActiveBackend::from_profile(&profile)` could not infer `IO`, because
+/// nothing in the signature mentions it.
+///
+/// So the rule this encodes: a member belongs on `TlsBackend<IO>` only if it
+/// actually involves the stream.
+pub trait TlsBackendConfig {
+    /// Builds a backend configured from a profile.
+    ///
+    /// On the trait because `chromulate-http` constructs its own backend when a
+    /// caller does not supply one; without it, a seam still forces the caller to
+    /// name a concrete type in order to get one.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the profile cannot be turned into a working
+    /// configuration.
+    fn from_profile(profile: &Profile) -> Result<Self>
+    where
+        Self: Sized;
+
+    /// Returns the ClientHello this backend is trying to reproduce.
+    ///
+    /// What it actually emits is a separate question; a caller comparing the
+    /// two is the point of exposing this.
+    fn target_client_hello(&self) -> &ClientHelloSpec;
+
+    /// Returns the fingerprints of the ClientHello this backend aims at.
+    fn target_identity(&self) -> &TargetIdentity;
+
+    /// Reports what this backend will and will not reproduce.
+    ///
+    /// Every backend has to answer this, including one that reproduces
+    /// everything. A backend that could decline to state its gap would make the
+    /// gap invisible, and this project's whole claim is that the gap is
+    /// published rather than glossed.
+    fn fidelity(&self) -> &Fidelity;
+}
+
 /// Something that can turn a plaintext stream into a TLS stream on a profile's
 /// behalf.
 ///
-/// Implemented here by [`TlsEngine`] over rustls. A caller written against this
-/// trait keeps working when the implementation underneath changes.
-pub trait TlsBackend<IO>: Send + Sync + 'static
+/// Implemented here by [`TlsEngine`] over rustls, and by
+/// `crate::mock::MockBackend` under `--cfg chromulate_mock_backend`. A caller written
+/// against this trait keeps working when the implementation underneath changes.
+pub trait TlsBackend<IO>: TlsBackendConfig + Send + Sync + 'static
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -125,12 +172,24 @@ where
         io: IO,
         name: ServerName<'static>,
     ) -> BoxFuture<'_, Result<(Self::Stream, HandshakeInfo)>>;
+}
 
-    /// Returns the ClientHello this backend is trying to reproduce.
-    ///
-    /// What it actually emits is a separate question; a caller comparing the
-    /// two is the point of exposing this.
-    fn target_client_hello(&self) -> &ClientHelloSpec;
+impl TlsBackendConfig for TlsEngine {
+    fn from_profile(profile: &Profile) -> Result<Self> {
+        TlsEngine::new(profile)
+    }
+
+    fn target_client_hello(&self) -> &ClientHelloSpec {
+        TlsEngine::target_client_hello(self)
+    }
+
+    fn target_identity(&self) -> &TargetIdentity {
+        TlsEngine::target_identity(self)
+    }
+
+    fn fidelity(&self) -> &Fidelity {
+        TlsEngine::fidelity(self)
+    }
 }
 
 impl<IO> TlsBackend<IO> for TlsEngine
@@ -149,10 +208,6 @@ where
             let info = HandshakeInfo::of_stream(&stream);
             Ok((stream, info))
         })
-    }
-
-    fn target_client_hello(&self) -> &ClientHelloSpec {
-        TlsEngine::target_client_hello(self)
     }
 }
 

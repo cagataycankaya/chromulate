@@ -118,6 +118,33 @@ jobs:
       # here rather than changing what a server sees.
       - run: cargo run --release -p chromulate-cli -- verify
 
+  backend-seam:
+    name: The TLS seam admits a second backend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # `chromulate-tls` claims a BoringSSL backend would be a trait
+      # implementation rather than a rewrite of the connection path. That claim
+      # is only worth anything if something checks it, and the only honest check
+      # is a second implementation: `--cfg chromulate_mock_backend` points
+      # `ActiveBackend` at a backend that shares no code and no types with
+      # rustls, and `chromulate-http` has to build and pass its tests against it.
+      #
+      # A cfg flag rather than a cargo feature, deliberately. Features must be
+      # additive and `--all-features` would switch this one on, which would mean
+      # every other job believing it exercised TLS while linking a backend that
+      # encrypts nothing.
+      - run: cargo clippy -p chromulate-tls -p chromulate-http --all-targets -- -D warnings
+        env:
+          RUSTFLAGS: --cfg chromulate_mock_backend
+      - run: cargo test -p chromulate-tls -p chromulate-http
+        env:
+          RUSTFLAGS: --cfg chromulate_mock_backend
+
   supply-chain:
     name: Advisories and licences
     runs-on: ubuntu-latest

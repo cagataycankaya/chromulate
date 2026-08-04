@@ -14,7 +14,7 @@ use chromulate_dns::{CachingResolver, SystemResolver};
 use chromulate_header::{AcceptChStore, HeaderEngine};
 use chromulate_profile::Profile;
 use chromulate_proxy::ProxyProvider;
-use chromulate_tls::ActiveBackend;
+use chromulate_tls::{ActiveBackend, TlsBackendConfig};
 use http::header::SET_COOKIE;
 use http::{HeaderName, HeaderValue};
 use tracing::Instrument as _;
@@ -323,7 +323,7 @@ impl EngineBuilder {
         let profile = Arc::clone(&self.config.profile);
         let tls = match self.tls {
             Some(tls) => tls,
-            None => ActiveBackend::new(&profile)?,
+            None => ActiveBackend::from_profile(&profile)?,
         };
         let resolver = self.resolver.unwrap_or_else(|| {
             Arc::new(CachingResolver::with_default_ttls(SystemResolver::new())) as Arc<dyn Resolve>

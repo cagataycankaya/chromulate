@@ -1125,6 +1125,15 @@ async fn a_request_without_a_scheme_is_rejected_before_any_connection_is_made() 
 
 /// The engine must not send the plaintext request at all once a policy is
 /// known — a redirect would already be too late, because the request went out.
+///
+/// Not run under `--cfg chromulate_mock_backend`, and the reason is worth recording rather than
+/// hiding: this test proves the scheme was rewritten *indirectly*, by observing
+/// that the upgraded request fails to connect. That proof rests on a TLS
+/// handshake against a plaintext port failing. The mock backend performs no
+/// handshake, so the "https" request succeeds against the plaintext harness and
+/// the assertion fires — the behaviour under test is fine, the evidence for it
+/// is what depends on real TLS.
+#[cfg_attr(chromulate_mock_backend, ignore = "proof depends on a real handshake")]
 #[tokio::test]
 async fn a_recorded_hsts_policy_upgrades_a_later_plaintext_request() {
     let server = TestServer::always(

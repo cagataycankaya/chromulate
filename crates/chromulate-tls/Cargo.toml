@@ -37,6 +37,7 @@ cert-compression = ["rustls/brotli"]
 # webpki roots.
 platform-roots = ["dep:rustls-native-certs"]
 
+
 # Unlocks `TlsEngineBuilder::danger_accept_invalid_certs`. Off by default so the method
 # cannot be reached by accident.
 dangerous-configuration = []

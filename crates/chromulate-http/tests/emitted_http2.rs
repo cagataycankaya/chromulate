@@ -1,5 +1,10 @@
 //! What this client actually puts on an HTTP/2 connection, read off the wire.
 //!
+//! Not built under `--cfg chromulate_mock_backend`: this test stands up a real TLS origin and
+//! hands the engine a `TlsEngine` trusting its certificate, which the mock
+//! backend cannot be — it performs no handshake. That is a property of the test,
+//! not a gap in the seam; the library itself compiles against either backend.
+//!
 //! The profile states an HTTP/2 shape — SETTINGS in a given order, a connection
 //! window update, and a pseudo-header order — and the engine hands the first
 //! two to `hyper`. Whether they arrive in that shape is a different question
@@ -21,6 +26,8 @@
 //! would need the 257-entry HPACK Huffman table for no gain here: their order
 //! is already golden-tested in `chromulate-header` and checked on the wire by
 //! the live tests.
+
+#![cfg(not(chromulate_mock_backend))]
 
 use std::io;
 use std::net::SocketAddr;

@@ -19,6 +19,11 @@
 //!   sends is *observed at the peer* rather than inferred from the client
 //!   carrying on.
 
+// Not built under `--cfg chromulate_mock_backend`: this test needs a real TLS origin and a
+// `TlsEngine` that trusts its certificate. The mock backend performs no
+// handshake, so there is nothing here for it to measure.
+#![cfg(not(chromulate_mock_backend))]
+
 mod common;
 
 use std::io;

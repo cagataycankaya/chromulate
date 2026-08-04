@@ -145,10 +145,43 @@ that breaking changes may land in a minor release.
   UNMEASURED for performance: the change removes indirection rather than adding it, but no
   before/after benchmark was run, so no speed claim is made.
 
-  What this does not establish: no second backend exists, so the trait's sufficiency is
-  argued rather than demonstrated. It is at least now exercised by a real caller, which is
-  the condition under which a wrong signature shows up cheaply — and the signature did have
-  to change, which is exactly what having no callers had hidden.
+- **The seam now has a second implementation, and writing it found four defects in the
+  first.** A trait with one implementation is a guess about an interface. `mock::MockBackend`
+  is that second implementation: it shares no code and no types with rustls, performs no
+  handshake, and chooses `IO` as its `Stream` where the rustls backend chooses
+  `tokio_rustls::client::TlsStream<IO>`. `chromulate-http` builds and passes its tests
+  against it.
+
+  It is selected by `--cfg chromulate_mock_backend`, **not** a cargo feature. Features must
+  be additive and `--all-features` would switch it on, which would mean every other CI job
+  believing it exercised TLS while linking a backend that encrypts nothing. A new CI job,
+  "The TLS seam admits a second backend", builds and tests both crates under that flag.
+
+  What the second implementation exposed, none of which the first had shown:
+
+  - **`from_profile`, `target_identity` and `fidelity` were missing from the trait.**
+    `chromulate-http` builds its own backend when a caller supplies none, and the CLI and the
+    facade's own documented example call the other two. All three were inherent `TlsEngine`
+    methods, so the seam only worked for the one backend that already existed.
+  - **The trait was split in two.** `from_profile` does not mention `IO`, so on an
+    `IO`-generic trait it could not be called at all — `ActiveBackend::from_profile(&profile)`
+    failed to infer the parameter. The `IO`-independent members now live on
+    `TlsBackendConfig`, which `TlsBackend<IO>` requires. The rule that fell out: a member
+    belongs on `TlsBackend<IO>` only if it actually involves the stream.
+  - **A backend that negotiates nothing must not claim a negotiated protocol.** The mock
+    first reported ALPN `h2` because the profile offers it first; `chromulate-http` duly
+    spoke HTTP/2 to a plaintext HTTP/1 origin and a test failed. It now reports `None`.
+  - **One HSTS test proves its point through TLS failing.**
+    `a_recorded_hsts_policy_upgrades_a_later_plaintext_request` shows the scheme was rewritten
+    by observing that the upgraded request cannot connect, which rests on a handshake against
+    a plaintext port failing. Under a no-op backend that evidence evaporates, so the test is
+    `ignore`d there with the reason recorded. The behaviour is fine; the evidence for it is
+    what depends on real TLS.
+
+  Still not established: the mock is not a TLS implementation, so it proves the seam admits a
+  *different* backend, not that it admits a *demanding* one. A BoringSSL backend needs
+  configuration a profile drives — cipher order, GREASE, ALPS — and nothing here exercises
+  that path.
 
 - **The minimum supported Rust version is 1.88**, corrected rather than raised.
   `rust-version` said 1.85 while `cargo +1.85.0 check --workspace --all-features` had been

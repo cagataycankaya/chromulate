@@ -308,9 +308,15 @@ that gap needs a custom ClientHello encoder or a different TLS backend.
 Groundwork for the second option is in place: `chromulate-tls` exposes a `TlsBackend` trait
 that the connection path actually uses, and `ActiveBackend` is the build-time alias naming
 the backend a given build links. `chromulate-http` no longer names `rustls` anywhere, so an
-alternative backend is a trait implementation behind a cargo feature rather than a rewrite of
-how connections are opened. **No such backend exists**, and none of the numbers above change
-until one does.
+alternative backend is a trait implementation rather than a rewrite of how connections are
+opened. That is checked rather than asserted: a second implementation exists behind
+`--cfg chromulate_mock_backend`, sharing no code or types with rustls, and CI builds and
+tests both crates against it.
+
+**No TLS backend other than rustls exists**, and none of the numbers above change until one
+does. The second implementation is a no-op used to keep the seam honest; it demands nothing
+of the profile, so it shows the seam admits a different backend rather than a
+fingerprint-controlling one.
 
 Also measured, and also not matching:
 

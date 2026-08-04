@@ -256,12 +256,17 @@ the default build acquiring a C dependency. The full battery — `fmt`, `clippy`
 `RUSTFLAGS=-D warnings`, the workspace tests, `cargo +1.88 check`, and `cargo doc` under
 `RUSTDOCFLAGS=-D warnings` — was green across the change.
 
-What this does *not* establish: no second backend exists, so the trait's sufficiency is
-argued rather than demonstrated. It is now at least exercised by a real caller instead of
-only by its own unit test, which is the condition under which a wrong signature shows up
-cheaply. The signature already had to change to get here — the version in the design
-document returned a boxed connection and made the caller ask rustls for the handshake result
-separately.
+A second implementation followed, because a trait with one is a guess: `mock::MockBackend`
+under `--cfg chromulate_mock_backend`, checked by its own CI job. Writing it found three
+trait members missing (`from_profile`, `target_identity`, `fidelity`, all of them inherent
+`TlsEngine` methods the seam could not reach) and one that could not be called at all,
+because `from_profile` does not mention `IO` and so could not be resolved on an
+`IO`-generic trait. The trait is now split into `TlsBackendConfig` and `TlsBackend<IO>`.
+
+What this does *not* establish: the mock is undemanding. It needs no cipher order, no GREASE
+placement, no ALPS — the parts of a profile a real backend has to consume. So the seam is
+shown to admit a *different* implementation, not yet a *fingerprint-controlling* one. That
+remains the open question a BoringSSL backend would answer.
 
 **A custom ClientHello encoder in front of rustls.** Assessed in the design document as
 not recommended: the ClientHello is part of a transcript both sides hash, and splicing a

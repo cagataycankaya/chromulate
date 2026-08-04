@@ -20,11 +20,6 @@ use crate::deadline::Deadline;
 use crate::http2::{Http2Fidelity, configure};
 use crate::pool::{Connection, ConnectionIdentity, PoolKey, Protocol};
 
-/// A plaintext or TLS byte stream.
-///
-/// Both variants are `Unpin`, so the enum is projected with `get_mut` rather
-/// than a projection macro — the workspace forbids `unsafe`, which rules out
-/// `pin-project-lite`.
 /// The TLS stream the linked backend produces over a TCP socket.
 ///
 /// Derived from [`ActiveBackend`] rather than named directly, so that pointing
@@ -33,6 +28,11 @@ use crate::pool::{Connection, ConnectionIdentity, PoolKey, Protocol};
 /// reading and writing through [`Stream`] is a static call in both variants.
 type BackendStream = <ActiveBackend as TlsBackend<TcpStream>>::Stream;
 
+/// A plaintext or TLS byte stream.
+///
+/// Both variants are `Unpin`, so the enum is projected with `get_mut` rather
+/// than a projection macro — the workspace forbids `unsafe`, which rules out
+/// `pin-project-lite`.
 enum Stream {
     Plain(TcpStream),
     Secure(Box<BackendStream>),
@@ -422,13 +422,15 @@ async fn dial(addresses: &[SocketAddr], target: &HostPort) -> Result<TcpStream> 
 mod tests {
     use chromulate_dns::StaticResolver;
     use chromulate_proxy::{ProxyUrl, RoundRobin};
+    use chromulate_tls::TlsBackendConfig;
     use url::Url;
 
     use super::*;
 
     fn connector_with(proxies: Option<Arc<dyn ProxyProvider>>) -> Connector {
         let profile = Arc::new(Profile::chrome_stable());
-        let tls = ActiveBackend::new(&profile).expect("the profile must build a TLS engine");
+        let tls =
+            ActiveBackend::from_profile(&profile).expect("the profile must build a TLS engine");
         Connector::new(
             Arc::clone(&profile),
             tls,

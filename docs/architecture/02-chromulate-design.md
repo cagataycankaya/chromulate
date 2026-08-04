@@ -1503,9 +1503,31 @@ the same trade rustls makes with its crypto providers. Adding a BoringSSL backen
 implementing the trait and pointing `ActiveBackend` and `TlsStream` at it under a cargo
 feature; it is not a change to the connection path.
 
+The trait is in two parts, and the split is not cosmetic. `TlsBackendConfig` carries what a
+backend *is* — `from_profile`, `target_client_hello`, `target_identity`, `fidelity` — and
+`TlsBackend<IO>` carries what it *does with a stream*. None of the first group mentions `IO`,
+and while they lived on the `IO`-generic trait none of them could be called without naming a
+stream type irrelevant to the question: `ActiveBackend::from_profile(&profile)` simply failed
+to infer the parameter. The rule to apply when adding a member: it belongs on
+`TlsBackend<IO>` only if it actually involves the stream.
+
+**The seam has two implementations.** `mock::MockBackend`, behind
+`--cfg chromulate_mock_backend`, shares no code and no types with rustls and picks `IO` as
+its `Stream` where the rustls backend picks `tokio_rustls::client::TlsStream<IO>`. A CI job
+builds and tests `chromulate-tls` and `chromulate-http` against it. This is a cfg flag rather
+than a cargo feature on purpose: features must be additive, `--all-features` would enable it,
+and a CI run that believed it was exercising TLS while linking a backend that encrypts
+nothing would be worse than not checking the seam at all.
+
+What that does not prove: the mock is undemanding. It needs no cipher list, no GREASE
+placement, no ALPS — the things a profile actually drives. It establishes that the seam
+admits a *different* backend, not that it admits a *fingerprint-controlling* one.
+
 The earlier version of this section said the seam "does not exist yet and is Phase 5 work".
 It had in fact been written, exported, and left with zero callers — which is why the shipped
-signature had already drifted from the one specified here before anyone noticed.
+signature had already drifted from the one specified here before anyone noticed, and why
+writing the second implementation immediately found three missing trait members and an
+unusable constructor.
 
 ---
 
