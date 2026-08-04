@@ -32,13 +32,14 @@ impl fmt::Debug for Response {
 }
 
 impl Response {
-    pub(crate) fn new(inner: chromulate_core::Response, requested: Url, max_size: u64) -> Self {
+    pub(crate) fn new(mut inner: chromulate_core::Response, requested: Url, max_size: u64) -> Self {
         // The engine records which URL actually answered, which after a
-        // redirect chain is not the one the caller asked for.
+        // redirect chain is not the one the caller asked for. Taken by value:
+        // this facade is the extension's one consumer.
         let url = inner
-            .extensions()
-            .get::<FinalUrl>()
-            .map_or(requested, |final_url| final_url.0.clone());
+            .extensions_mut()
+            .remove::<FinalUrl>()
+            .map_or(requested, |final_url| final_url.0);
         Self {
             inner,
             url,

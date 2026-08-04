@@ -213,10 +213,19 @@ impl RequestBuilder {
 
     /// Builds the request without sending it.
     ///
+    /// The already-parsed URL travels in the request's extensions as
+    /// [`chromulate_http::RequestUrl`], so the engine does not have to parse
+    /// the `Uri` back into one.
+    ///
     /// # Errors
     ///
     /// Returns the first error collected while the request was assembled.
     pub fn build(self) -> Result<chromulate_core::Request> {
+        self.build_with_url().map(|(request, _)| request)
+    }
+
+    /// Builds the request and hands back the parsed URL it was built from.
+    fn build_with_url(self) -> Result<(chromulate_core::Request, Url)> {
         let parts = self.state?;
         let mut request = http::Request::builder()
             .method(parts.method)
@@ -233,7 +242,10 @@ impl RequestBuilder {
             headers.insert(name.clone(), value.clone());
         }
         request.extensions_mut().insert(parts.options);
-        Ok(request)
+        request
+            .extensions_mut()
+            .insert(chromulate_http::RequestUrl(parts.url.clone()));
+        Ok((request, parts.url))
     }
 
     /// Sends the request.
@@ -244,9 +256,7 @@ impl RequestBuilder {
     /// whatever the transport produced.
     pub async fn send(self) -> Result<Response> {
         let client = Arc::clone(&self.client);
-        let request = self.build()?;
-        let requested = Url::parse(&request.uri().to_string())
-            .map_err(|error| Error::url(format!("the request URL is not usable: {error}")))?;
+        let (request, requested) = self.build_with_url()?;
 
         let response = client.engine.send(request).await?;
         Ok(Response::new(response, requested, client.max_response_size))

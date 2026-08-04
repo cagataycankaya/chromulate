@@ -129,8 +129,8 @@ pub mod cookie {
 pub mod engine {
     pub use chromulate_http::{
         ConnectionIdentity, Engine, EngineBuilder, EngineConfig, FinalUrl, Http2Fidelity, Pool,
-        PoolConfig, PoolKey, Protocol, RateLimit, RateLimiter, Retry, RetryOn, RetryPolicy,
-        UnsupportedSetting,
+        PoolConfig, PoolKey, Protocol, RateLimit, RateLimiter, RequestUrl, Retry, RetryOn,
+        RetryPolicy, UnsupportedSetting,
     };
 }
 

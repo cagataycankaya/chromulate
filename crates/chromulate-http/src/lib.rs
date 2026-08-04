@@ -68,7 +68,7 @@ pub mod pool;
 pub mod redirect;
 pub mod time;
 
-pub use engine::{Engine, EngineBuilder, EngineConfig, FinalUrl};
+pub use engine::{Engine, EngineBuilder, EngineConfig, FinalUrl, RequestUrl};
 pub use http2::{DEFAULT_CONNECTION_WINDOW, Http2Fidelity, UnsupportedSetting};
 pub use middleware::{RateLimit, RateLimiter, Retry, RetryOn, RetryPolicy};
 pub use pool::{ConnectionIdentity, Pool, PoolConfig, PoolKey, Protocol};

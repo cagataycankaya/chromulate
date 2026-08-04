@@ -45,6 +45,16 @@ const REDIRECT_DRAIN_LIMIT: u64 = 64 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FinalUrl(pub Url);
 
+/// The request's already-parsed URL, placed in the request's extensions by a
+/// caller that has one, so [`Engine::run`] does not re-parse the `Uri` it was
+/// built from.
+///
+/// Optional: a request without this extension works identically, at the cost
+/// of one URL parse. The engine takes it out at the start of the run — after
+/// a redirect it would describe the wrong hop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestUrl(pub Url);
+
 /// The engine's own settings, separate from anything one request carries.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -324,7 +334,10 @@ impl Engine {
             .cloned()
             .unwrap_or_default();
 
-        let mut url = url_of(request.uri())?;
+        let mut url = match request.extensions_mut().remove::<RequestUrl>() {
+            Some(RequestUrl(parsed)) => parsed,
+            None => url_of(request.uri())?,
+        };
         let deadline = Deadline::starting_now(options.timeout.or(self.inner.config.timeout));
         let head_timeout = options.head_timeout.or(self.inner.config.head_timeout);
         let limit = match effective_policy(&options, self.inner.config.redirect) {
@@ -566,18 +579,25 @@ fn outgoing_request(
     // HTTP/2 needs the whole URL so hyper can derive `:scheme` and
     // `:authority`. hyper writes a `Uri`'s `Display` form verbatim onto an h1
     // request line, so an absolute URI there would produce the absolute form,
-    // which is reserved for requests addressed to a proxy.
-    let target = match protocol {
-        Protocol::Http11 => match url.query() {
-            Some(query) => format!("{}?{query}", url.path()),
-            None => url.path().to_owned(),
-        },
-        Protocol::Http2 => url.as_str().to_owned(),
+    // which is reserved for requests addressed to a proxy. Both shapes are
+    // carved out of the request's own `Uri` — every component is a
+    // reference-counted handle, so neither arm re-serialises or re-parses the
+    // URL.
+    let uri = match protocol {
+        Protocol::Http11 => {
+            let path_and_query = request
+                .uri()
+                .path_and_query()
+                .cloned()
+                .unwrap_or_else(|| http::uri::PathAndQuery::from_static("/"));
+            let mut parts = http::uri::Parts::default();
+            parts.path_and_query = Some(path_and_query);
+            http::Uri::from_parts(parts).map_err(|error| {
+                Error::url(format!("{url} is not a usable request target: {error}"))
+            })?
+        }
+        Protocol::Http2 => request.uri().clone(),
     };
-
-    let uri: http::Uri = target
-        .parse()
-        .map_err(|error| Error::url(format!("{url} is not a usable request target: {error}")))?;
 
     let mut builder = http::Request::builder()
         .method(request.method().clone())
