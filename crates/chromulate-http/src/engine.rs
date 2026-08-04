@@ -46,8 +46,8 @@ const REDIRECT_DRAIN_LIMIT: u64 = 64 * 1024;
 pub struct FinalUrl(pub Url);
 
 /// The request's already-parsed URL, placed in the request's extensions by a
-/// caller that has one, so [`Engine::run`] does not re-parse the `Uri` it was
-/// built from.
+/// caller that has one, so [`Engine`] does not re-parse the `Uri` it was built
+/// from.
 ///
 /// Optional: a request without this extension works identically, at the cost
 /// of one URL parse. The engine takes it out at the start of the run — after
