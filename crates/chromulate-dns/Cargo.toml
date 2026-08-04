@@ -1,0 +1,21 @@
+[package]
+name = "chromulate-dns"
+description = "The resolver layer behind chromulate_core::Resolve, with TTL caching and single-flight lookups"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+chromulate-core = { workspace = true }
+tokio = { workspace = true, features = ["net"] }
+futures-util = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "net"] }
+
+[lints]
+workspace = true

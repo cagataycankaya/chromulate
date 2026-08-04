@@ -1,0 +1,58 @@
+[package]
+name = "chromulate-tls"
+description = "The TLS layer: a verified rustls client configured to look as much like a browser as rustls allows"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+chromulate-core = { workspace = true }
+chromulate-fingerprint = { workspace = true }
+chromulate-profile = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+tokio = { workspace = true, features = ["io-util"] }
+tokio-rustls = { workspace = true }
+tracing = { workspace = true }
+url = { workspace = true }
+webpki-roots = { workspace = true }
+rustls-native-certs = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+
+[features]
+default = ["cert-compression"]
+
+# Offer `compress_certificate` with brotli, which is what the Chrome capture offers.
+# Without it rustls omits extension 0x001b and the emitted extension set drifts one
+# further from the profile.
+cert-compression = ["rustls/brotli"]
+
+# Load the operating system trust store in addition to, or instead of, the bundled
+# webpki roots.
+platform-roots = ["dep:rustls-native-certs"]
+
+# Unlocks `TlsEngineBuilder::danger_accept_invalid_certs`. Off by default so the method
+# cannot be reached by accident.
+dangerous-configuration = []
+
+# Swap the ring provider for aws-lc-rs. Off by default: a pure-Rust build with no C
+# toolchain is part of what this project is, and aws-lc-rs needs a C compiler and cmake.
+#
+# What it buys, measured: X25519MLKEM768 becomes available, so the Chrome profile's group
+# list goes from 3 of 4 to 4 of 4, and the key shares become exactly the pair the capture
+# shows. What it does not buy: no GREASE, no ALPS, no signed_certificate_timestamp, the
+# same six unavailable cipher suites, and the same renegotiation SCSV. See the crate
+# docs' "Fidelity limits" section.
+aws-lc-rs = ["rustls/aws-lc-rs"]
+
+# Tests that open real sockets. Off by default so `cargo test` stays offline.
+network-tests = []
+
+[lints]
+workspace = true

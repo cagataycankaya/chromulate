@@ -1,0 +1,45 @@
+[package]
+name = "chromulate-compression"
+description = "Streaming response-body decompression for the content codings a browser advertises"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+chromulate-core = { workspace = true }
+async-compression = { workspace = true, features = ["tokio"] }
+tokio = { workspace = true }
+tokio-util = { workspace = true, features = ["io"] }
+futures-core = { workspace = true }
+futures-util = { workspace = true }
+bytes = { workspace = true }
+http = { workspace = true }
+http-body = { workspace = true }
+http-body-util = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time", "io-util"] }
+criterion.workspace = true
+async-compression = { workspace = true, features = ["tokio", "gzip", "brotli", "zstd", "zlib"] }
+
+[features]
+default = ["gzip", "brotli", "zstd", "deflate"]
+gzip = ["async-compression/gzip"]
+brotli = ["async-compression/brotli"]
+zstd = ["async-compression/zstd"]
+# HTTP's "deflate" content coding is the zlib-wrapped format (RFC 9110 §8.4.1.2), not
+# raw DEFLATE, despite async-compression naming raw DEFLATE support "deflate" and the
+# zlib-wrapped format "zlib". This feature name follows the HTTP token, not the
+# dependency's naming.
+deflate = ["async-compression/zlib"]
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "decode"
+harness = false
