@@ -62,6 +62,7 @@ mod body;
 mod connect;
 mod deadline;
 mod engine;
+pub mod hsts;
 pub mod http2;
 pub mod middleware;
 pub mod pool;
@@ -69,6 +70,7 @@ pub mod redirect;
 pub mod time;
 
 pub use engine::{Engine, EngineBuilder, EngineConfig, FinalUrl, RequestUrl};
+pub use hsts::{DEFAULT_HOST_CAPACITY, HstsStore};
 pub use http2::{DEFAULT_CONNECTION_WINDOW, Http2Fidelity, UnsupportedSetting};
 pub use middleware::{RateLimit, RateLimiter, Retry, RetryOn, RetryPolicy};
 pub use pool::{ConnectionIdentity, Pool, PoolConfig, PoolKey, Protocol};

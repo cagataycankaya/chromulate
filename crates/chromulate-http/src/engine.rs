@@ -3,7 +3,7 @@
 
 use std::fmt;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use chromulate_compression::ExpansionGuard;
 use chromulate_core::{
@@ -222,6 +222,7 @@ impl EngineBuilder {
             inner: Arc::new(EngineInner {
                 headers: HeaderEngine::new(Arc::clone(&profile)),
                 accept_ch: RwLock::new(AcceptChStore::new()),
+                hsts: RwLock::new(crate::hsts::HstsStore::new()),
                 accept_ch_used: std::sync::atomic::AtomicBool::new(false),
                 decompression: self.decompression.unwrap_or_default(),
                 cookies: self.cookies,
@@ -252,6 +253,8 @@ struct EngineInner {
     pool: Pool,
     headers: HeaderEngine,
     accept_ch: RwLock<AcceptChStore>,
+    /// Origins that have demanded HTTPS; see [`crate::hsts`].
+    hsts: RwLock<crate::hsts::HstsStore>,
     /// Whether any response has ever recorded an `Accept-CH` grant.
     ///
     /// Most deployments never see one, and `RwLock::read` is still an atomic
@@ -349,6 +352,10 @@ impl Engine {
             Some(RequestUrl(parsed)) => parsed,
             None => url_of(request.uri())?,
         };
+        // Before anything is sent. A browser that has seen HSTS from an origin
+        // never speaks plaintext to it, and the whole point is that the
+        // plaintext request is not made — a redirect would already be too late.
+        self.apply_hsts(&mut url);
         let deadline = Deadline::starting_now(options.timeout.or(self.inner.config.timeout));
         let head_timeout = options.head_timeout.or(self.inner.config.head_timeout);
         let limit = match effective_policy(&options, self.inner.config.redirect) {
@@ -527,10 +534,53 @@ impl Engine {
     }
 
     /// Records everything a response teaches the client about the origin.
+    /// A handle to the HSTS store, for tests that need to establish a policy
+    /// without a TLS origin.
+    ///
+    /// Recording a policy requires a response that arrived over TLS, which the
+    /// hermetic test harness cannot produce; without this, the engine's use of
+    /// a policy could only be tested against a live HTTPS server, which is to
+    /// say not in `cargo test`.
+    #[doc(hidden)]
+    pub fn hsts_store_for_test(&self) -> std::sync::RwLockWriteGuard<'_, crate::hsts::HstsStore> {
+        self.inner
+            .hsts
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Rewrites `url` to HTTPS when a recorded HSTS policy demands it.
+    fn apply_hsts(&self, url: &mut Url) {
+        if url.scheme() != "http" {
+            return;
+        }
+        let store = self
+            .inner
+            .hsts
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if store.upgrade(url, SystemTime::now()) {
+            tracing::debug!(%url, "upgraded to https by a stored HSTS policy");
+        }
+    }
+
     fn record_response(&self, url: &Url, response: &Response) {
         if let Some(cookies) = &self.inner.cookies {
             let mut set_cookie = response.headers().get_all(SET_COOKIE).iter();
             cookies.store(url, &mut set_cookie);
+        }
+
+        // RFC 6797 §8.1: only a response that arrived over TLS may set a
+        // policy, so the scheme of the URL that produced it is the gate.
+        if let Some(policy) = response.headers().get("strict-transport-security")
+            && let Ok(value) = policy.to_str()
+            && let Some(host) = url.host_str()
+        {
+            self.inner
+                .hsts
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .record(host, value, url.scheme() == "https", SystemTime::now());
         }
 
         if let Some(accept_ch) = response.headers().get("accept-ch")

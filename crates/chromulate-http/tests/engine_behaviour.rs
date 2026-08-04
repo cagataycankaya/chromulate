@@ -917,3 +917,64 @@ async fn a_request_without_a_scheme_is_rejected_before_any_connection_is_made() 
     assert!(matches!(error, Error::Url(_)), "{error:?}");
     assert_eq!(server.accepts(), 0, "nothing should have been dialled");
 }
+
+// -------------------------------------------------------------------- HSTS
+
+/// The engine must not send the plaintext request at all once a policy is
+/// known — a redirect would already be too late, because the request went out.
+#[tokio::test]
+async fn a_recorded_hsts_policy_upgrades_a_later_plaintext_request() {
+    let server = TestServer::always(
+        Reply::text("body").with_header("strict-transport-security", "max-age=31536000"),
+    )
+    .await;
+    let engine = engine_for(&server, &["example.test"]);
+
+    // The policy can only be recorded from a TLS response, and this harness is
+    // plaintext, so the store is reached directly to set up the state under
+    // test. What is being tested is what the engine does *with* a policy.
+    engine.hsts_store_for_test().record(
+        "example.test",
+        "max-age=31536000",
+        true,
+        std::time::SystemTime::now(),
+    );
+
+    let url = server.url_for("example.test", "/");
+    let error = engine
+        .send(get(&url))
+        .await
+        .expect_err("a plaintext request to a pinned host must not be sent as plaintext");
+
+    // The upgraded request goes to port 443 of a host that only listens on the
+    // test port, so it fails to connect — which is the observable proof that
+    // the scheme was rewritten before anything was sent.
+    assert!(
+        server.request_count() == 0,
+        "the plaintext request reached the origin despite an HSTS policy: {error}"
+    );
+}
+
+#[tokio::test]
+async fn a_strict_transport_security_header_over_plaintext_is_not_recorded() {
+    let server = TestServer::always(
+        Reply::text("body").with_header("strict-transport-security", "max-age=31536000"),
+    )
+    .await;
+    let engine = engine_for(&server, &["example.test"]);
+
+    let url = server.url_for("example.test", "/");
+    let _ = text_of(engine.send(get(&url)).await.expect("the request succeeds")).await;
+
+    // A second request must still be plaintext: honouring an STS header that
+    // arrived over cleartext would let anyone who can inject into it pin the
+    // origin, which RFC 6797 section 8.1 forbids.
+    let _ = text_of(
+        engine
+            .send(get(&url))
+            .await
+            .expect("the second request must also succeed over plaintext"),
+    )
+    .await;
+    assert_eq!(server.request_count(), 2);
+}
