@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 use chromulate_compression::ExpansionGuard;
 use chromulate_core::{
     Body, BoxFuture, CookieStore, Error, Exchange, Middleware, Next, Origin, Phase, RedirectPolicy,
-    Request, RequestOptions, Resolve, Response, Result,
+    Request, RequestOptions, Resolve, Response, Result, Timings,
 };
 use chromulate_dns::{CachingResolver, SystemResolver};
 use chromulate_header::{AcceptChStore, HeaderEngine};
@@ -37,13 +37,24 @@ use crate::redirect::{self, Decision, Hop};
 /// connection instead.
 const REDIRECT_DRAIN_LIMIT: u64 = 64 * 1024;
 
-/// The URL that produced a response, placed in the response's extensions.
+/// What the engine learned while producing a response, placed in the
+/// response's extensions.
 ///
-/// After a redirect chain this is not the URL the caller asked for, and a
-/// caller resolving relative links out of the body needs the one that actually
-/// answered.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FinalUrl(pub Url);
+/// One extension carrying two facts rather than two extensions carrying one
+/// each: [`http::Extensions`] boxes every value it stores, so a second insert
+/// is a second heap allocation on a path whose per-request allocation count is
+/// a published figure.
+#[derive(Debug, Clone)]
+pub struct ResponseInfo {
+    /// The URL that produced the response.
+    ///
+    /// After a redirect chain this is not the URL the caller asked for, and a
+    /// caller resolving relative links out of the body needs the one that
+    /// actually answered.
+    pub url: Url,
+    /// Where the request spent its time.
+    pub timings: Timings,
+}
 
 /// The request's already-parsed URL, placed in the request's extensions by a
 /// caller that has one, so [`Engine`] does not re-parse the `Uri` it was built
@@ -342,6 +353,7 @@ impl Engine {
 
     /// Follows the redirect chain for one logical request.
     async fn run(&self, mut request: Request) -> Result<Response> {
+        let mut timings = Timings::starting_now();
         let options = request
             .extensions()
             .get::<RequestOptions>()
@@ -357,7 +369,6 @@ impl Engine {
         // plaintext request is not made — a redirect would already be too late.
         self.apply_hsts(&mut url);
         let deadline = Deadline::starting_now(options.timeout.or(self.inner.config.timeout));
-        let head_timeout = options.head_timeout.or(self.inner.config.head_timeout);
         let limit = match effective_policy(&options, self.inner.config.redirect) {
             RedirectPolicy::Follow { limit } => Some(limit),
             // `RedirectPolicy` is non-exhaustive; anything this build does not
@@ -385,7 +396,7 @@ impl Engine {
             );
 
             let response = self
-                .hop(&mut request, body, &url, &options, &deadline, head_timeout)
+                .hop(&mut request, body, &url, &options, &deadline, &mut timings)
                 .instrument(span)
                 .await?;
 
@@ -399,7 +410,7 @@ impl Engine {
             )?;
 
             let Decision::Follow(hop) = decision else {
-                return self.finish(response, &deadline, url);
+                return self.finish(response, &deadline, url, timings);
             };
 
             tracing::debug!(
@@ -432,14 +443,18 @@ impl Engine {
         url: &Url,
         options: &RequestOptions,
         deadline: &Deadline,
-        head_timeout: Option<Duration>,
+        timings: &mut Timings,
     ) -> Result<Response> {
+        // Every hop, not just the ones a redirect produced: the first hop is
+        // what sets the boundary the others are measured against.
+        timings.record_hop_start();
         deadline.check(Phase::Connect)?;
 
+        let head_timeout = options.head_timeout.or(self.inner.config.head_timeout);
         let origin = Origin::of(url)?;
         let route = self.inner.connector.route(origin).await;
 
-        let (key, connection) = self.acquire(&route, deadline).await?;
+        let (key, connection) = self.acquire(&route, deadline, timings).await?;
         let protocol = connection.protocol();
 
         // The header engine emits `Host` only for HTTP/1.1, so the version has
@@ -457,13 +472,24 @@ impl Engine {
                 send_on(connection, key, self.inner.pool.clone(), outgoing),
             )
             .await?;
+        // Stamped before the response is inspected, so what the client learns
+        // from the headers is not billed as time the origin took.
+        timings.record_head();
 
         self.record_response(url, &response);
         Ok(response)
     }
 
     /// Takes a pooled connection, or opens one.
-    async fn acquire(&self, route: &Route, deadline: &Deadline) -> Result<(PoolKey, Connection)> {
+    ///
+    /// `timings` is only handed to the connector, so a hop served from the pool
+    /// leaves the connection phases unrecorded rather than recording zeroes.
+    async fn acquire(
+        &self,
+        route: &Route,
+        deadline: &Deadline,
+        timings: &mut Timings,
+    ) -> Result<(PoolKey, Connection)> {
         for key in self.inner.connector.candidate_keys(route) {
             if let Some(connection) = self.inner.pool.checkout(&key) {
                 tracing::trace!(key = %key, "reusing a pooled connection");
@@ -471,7 +497,11 @@ impl Engine {
             }
         }
 
-        let (key, connection) = self.inner.connector.connect(route, deadline).await?;
+        let (key, connection) = self
+            .inner
+            .connector
+            .connect(route, deadline, timings)
+            .await?;
 
         // A multiplexed connection belongs to the pool from the moment it is
         // opened, not when a response body ends. An HTTP/1.1 connection is
@@ -601,14 +631,20 @@ impl Engine {
         }
     }
 
-    /// Decodes the body, attaches the request deadline to it, and records which
-    /// URL actually produced it.
-    fn finish(&self, response: Response, deadline: &Deadline, url: Url) -> Result<Response> {
+    /// Decodes the body, attaches the request deadline to it, and records what
+    /// the response cost and which URL produced it.
+    fn finish(
+        &self,
+        response: Response,
+        deadline: &Deadline,
+        url: Url,
+        timings: Timings,
+    ) -> Result<Response> {
         let response = self.inner.decompression.decode_response(response)?;
         let (mut parts, body) = response.into_parts();
         // After a redirect chain the caller's URL is not the one that answered,
         // and nothing else in the response says which one did.
-        parts.extensions.insert(FinalUrl(url));
+        parts.extensions.insert(ResponseInfo { url, timings });
         Ok(Response::from_parts(parts, bounded_by(body, *deadline)))
     }
 }

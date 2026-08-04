@@ -6,16 +6,17 @@ use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use chromulate_core::{
-    Body, Error, Result,
+    Body, Error, Result, Timings,
     reexport::{HeaderMap, StatusCode, Url, Version},
 };
-use chromulate_http::FinalUrl;
+use chromulate_http::ResponseInfo;
 use futures_core::Stream;
 
-/// A response, with the URL that produced it.
+/// A response, with the URL that produced it and what it cost.
 pub struct Response {
     inner: chromulate_core::Response,
     url: Url,
+    timings: Option<Timings>,
     max_size: u64,
 }
 
@@ -34,15 +35,18 @@ impl fmt::Debug for Response {
 impl Response {
     pub(crate) fn new(mut inner: chromulate_core::Response, requested: Url, max_size: u64) -> Self {
         // The engine records which URL actually answered, which after a
-        // redirect chain is not the one the caller asked for. Taken by value:
-        // this facade is the extension's one consumer.
-        let url = inner
-            .extensions_mut()
-            .remove::<FinalUrl>()
-            .map_or(requested, |final_url| final_url.0);
+        // redirect chain is not the one the caller asked for, and how long each
+        // phase took. Taken by value: this facade is the extension's one
+        // consumer.
+        let info = inner.extensions_mut().remove::<ResponseInfo>();
+        let (url, timings) = match info {
+            Some(info) => (info.url, Some(info.timings)),
+            None => (requested, None),
+        };
         Self {
             inner,
             url,
+            timings,
             max_size,
         }
     }
@@ -72,6 +76,33 @@ impl Response {
     #[must_use]
     pub fn url(&self) -> &Url {
         &self.url
+    }
+
+    /// Where this request spent its time.
+    ///
+    /// `None` when the response did not come from the engine — a middleware
+    /// that answers from a cache produces a response that never touched the
+    /// network, and there is nothing honest to report for it.
+    ///
+    /// [`Timings`] is `Copy`, so take one before reading the body and read
+    /// [`Timings::elapsed`] afterwards to learn when the body finished:
+    ///
+    /// ```no_run
+    /// # async fn run() -> Result<(), chromulate::Error> {
+    /// let client = chromulate::Client::chrome()?;
+    /// let response = client.get("https://example.com/").send().await?;
+    ///
+    /// let timings = response.timings().expect("an engine response is timed");
+    /// let body = response.bytes().await?;
+    ///
+    /// println!("connect {:?}, head {:?}", timings.connect(), timings.head());
+    /// println!("{} bytes complete after {:?}", body.len(), timings.elapsed());
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn timings(&self) -> Option<Timings> {
+        self.timings
     }
 
     /// Whether the status is in the 2xx range.

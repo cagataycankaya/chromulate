@@ -113,7 +113,7 @@ pub use response::{BodyStream, Response};
 
 pub use chromulate_core::{
     Body, BoxError, BoxFuture, Error, Exchange, FetchDest, FetchMode, Middleware, Next, Origin,
-    RedirectPolicy, Request, RequestOptions, Resolve, Response as HttpResponse, Result,
+    RedirectPolicy, Request, RequestOptions, Resolve, Response as HttpResponse, Result, Timings,
 };
 pub use chromulate_profile::{CHROME_STABLE_CAPTURE, Platform, Profile, ProfileRegistry};
 
@@ -128,9 +128,9 @@ pub mod cookie {
 /// Connection pooling, retries, and rate limiting.
 pub mod engine {
     pub use chromulate_http::{
-        ConnectionIdentity, Engine, EngineBuilder, EngineConfig, FinalUrl, HstsStore,
-        Http2Fidelity, Pool, PoolConfig, PoolKey, Protocol, RateLimit, RateLimiter, RequestUrl,
-        Retry, RetryOn, RetryPolicy, UnsupportedSetting,
+        ConnectionIdentity, Engine, EngineBuilder, EngineConfig, HstsStore, Http2Fidelity, Pool,
+        PoolConfig, PoolKey, Protocol, RateLimit, RateLimiter, RequestUrl, ResponseInfo, Retry,
+        RetryOn, RetryPolicy, UnsupportedSetting,
     };
 }
 

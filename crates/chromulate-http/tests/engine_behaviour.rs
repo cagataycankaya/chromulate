@@ -978,3 +978,154 @@ async fn a_strict_transport_security_header_over_plaintext_is_not_recorded() {
     .await;
     assert_eq!(server.request_count(), 2);
 }
+
+// ------------------------------------------------------------------ timings
+
+/// The `ResponseInfo` the engine attaches, which is where the timings ride.
+fn info_of(response: &Response) -> &chromulate_http::ResponseInfo {
+    response
+        .extensions()
+        .get::<chromulate_http::ResponseInfo>()
+        .expect("the engine must attach the response info")
+}
+
+#[tokio::test]
+async fn a_request_that_opens_a_connection_times_the_phases_it_performed() {
+    let server = TestServer::always(Reply::text("body")).await;
+    let engine = engine_for(&server, &["example.test"]);
+
+    let response = engine
+        .send(get(&server.url_for("example.test", "/")))
+        .await
+        .expect("the request succeeds");
+    let timings = info_of(&response).timings;
+
+    assert!(
+        timings.resolve().is_some(),
+        "a request that had to resolve a name must report how long it took: {timings:?}"
+    );
+    assert!(
+        timings.connect().is_some(),
+        "a request that opened a socket must report how long it took: {timings:?}"
+    );
+    assert!(
+        timings.handshake().is_none(),
+        "a plaintext origin performs no TLS handshake, so there is nothing to time: {timings:?}"
+    );
+    assert!(
+        timings.head() > Duration::ZERO,
+        "the response head cannot have arrived before the request was sent: {timings:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_pooled_request_reports_no_connection_phases_rather_than_zero_ones() {
+    let server = TestServer::always(Reply::text("body")).await;
+    let engine = engine_for(&server, &["example.test"]);
+    let url = server.url_for("example.test", "/");
+
+    // The first request opens the connection; the body has to be read before
+    // an HTTP/1.1 connection goes back to the pool.
+    let _ = text_of(
+        engine
+            .send(get(&url))
+            .await
+            .expect("the first request succeeds"),
+    )
+    .await;
+
+    let response = engine
+        .send(get(&url))
+        .await
+        .expect("the second request succeeds");
+    let timings = info_of(&response).timings;
+
+    assert_eq!(
+        server.accepts(),
+        1,
+        "the fixture is only meaningful if the second request reused the connection"
+    );
+    // `Some(ZERO)` would read as "the handshake was instant". No handshake
+    // happened at all, and the difference is the whole point of the `Option`.
+    assert_eq!(timings.resolve(), None, "{timings:?}");
+    assert_eq!(timings.connect(), None, "{timings:?}");
+    assert_eq!(timings.handshake(), None, "{timings:?}");
+}
+
+#[tokio::test]
+async fn a_slow_origin_shows_up_in_the_time_to_head_and_not_in_the_connect_phases() {
+    let server = TestServer::always(Reply::text("body").delayed(Duration::from_millis(200))).await;
+    let engine = engine_for(&server, &["example.test"]);
+
+    let response = engine
+        .send(get(&server.url_for("example.test", "/")))
+        .await
+        .expect("the request succeeds");
+    let timings = info_of(&response).timings;
+
+    assert!(
+        timings.head() >= Duration::from_millis(200),
+        "an origin that thinks for 200ms must show it in the time to head: {timings:?}"
+    );
+    assert!(
+        timings.connect().expect("the connection was opened") < Duration::from_millis(200),
+        "the origin's thinking time must not be attributed to the connect phase: {timings:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_redirect_chain_separates_the_earlier_hops_from_the_final_one() {
+    let server = TestServer::start(|request| {
+        if request.target == "/start" {
+            // Slow enough to be measurable, and on the first hop only, so the
+            // delay can only appear as redirect time.
+            Reply::redirect(302, "/end").delayed(Duration::from_millis(200))
+        } else {
+            Reply::text("arrived")
+        }
+    })
+    .await;
+    let engine = engine_for(&server, &["example.test"]);
+
+    let response = engine
+        .send(get(&server.url_for("example.test", "/start")))
+        .await
+        .expect("the redirect is followed");
+    let timings = info_of(&response).timings;
+
+    assert_eq!(info_of(&response).url.path(), "/end");
+    assert!(
+        timings.redirect() >= Duration::from_millis(200),
+        "the first hop's 200ms belongs to redirect time: {timings:?}"
+    );
+    assert!(
+        timings.head() >= timings.redirect(),
+        "every milestone counts from the start of the request: {timings:?}"
+    );
+    // The second hop reuses the first hop's connection, so the reported phases
+    // describe the final hop and not the one that did the connecting.
+    assert_eq!(server.accepts(), 1);
+    assert_eq!(timings.connect(), None, "{timings:?}");
+}
+
+#[tokio::test]
+async fn reading_the_body_is_visible_in_elapsed_but_not_in_the_time_to_head() {
+    let server = TestServer::always(Reply::text("body")).await;
+    let engine = engine_for(&server, &["example.test"]);
+
+    let response = engine
+        .send(get(&server.url_for("example.test", "/")))
+        .await
+        .expect("the request succeeds");
+    let timings = info_of(&response).timings;
+    let head = timings.head();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let _ = text_of(response).await;
+
+    assert_eq!(timings.head(), head, "the head milestone is fixed");
+    assert!(
+        timings.elapsed() >= head + Duration::from_millis(50),
+        "elapsed read after the body is the time to body complete: {timings:?}"
+    );
+}
