@@ -421,7 +421,18 @@ impl Engine {
 
             // The socket has to be clean before its connection is reused, and
             // this body is about to be thrown away.
-            let _ = response.into_body().collect(REDIRECT_DRAIN_LIMIT).await;
+            //
+            // `REDIRECT_DRAIN_LIMIT` bounds how much is read, which is not the
+            // same as bounding how long it takes: a server that sends a
+            // `Content-Length` and then stops writing satisfies the byte limit
+            // forever. The deadline is what makes the drain give up, and it is
+            // safe to abandon here because a body that fails takes its
+            // connection with it rather than returning a half-read socket to
+            // the pool — so the cost of giving up is one connection, not a
+            // corrupted one.
+            let _ = bounded_by(response.into_body(), deadline)
+                .collect(REDIRECT_DRAIN_LIMIT)
+                .await;
 
             let next_body = if hop.drop_body {
                 Body::empty()

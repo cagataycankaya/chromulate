@@ -1129,3 +1129,48 @@ async fn reading_the_body_is_visible_in_elapsed_but_not_in_the_time_to_head() {
         "elapsed read after the body is the time to body complete: {timings:?}"
     );
 }
+
+/// A redirect body is thrown away, but it is still read off the socket first so
+/// the connection can be reused. That read had no deadline on it: a server that
+/// sends `302` with a `Content-Length` and then stops writing held the whole
+/// request open for as long as it cared to, regardless of what the caller asked
+/// for. The outer `timeout` here is the test harness, not the behaviour under
+/// test — without the fix it is what ends the test, and its presence is the
+/// difference between a red test and one that hangs the suite.
+#[tokio::test]
+async fn a_stalled_redirect_body_cannot_outlive_the_request_deadline() {
+    let server = TestServer::start(|recorded| {
+        if recorded.target == "/start" {
+            Reply::redirect(302, "/landing")
+                .with_header("content-length", "1024")
+                .stalling_after_head()
+        } else {
+            Reply::text("arrived")
+        }
+    })
+    .await;
+    let engine = tuned(&server, &["example.test"], |config| {
+        config.timeout = Some(Duration::from_millis(200));
+    });
+
+    let started = std::time::Instant::now();
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(3),
+        engine.send(get(&server.url_for("example.test", "/start"))),
+    )
+    .await;
+
+    let elapsed = started.elapsed();
+    assert!(
+        outcome.is_ok(),
+        "the drain ignored the 200ms deadline and was still going after {elapsed:?}"
+    );
+    assert!(
+        outcome.expect("checked above").is_err(),
+        "a request that could not finish inside its deadline must report an error"
+    );
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "the deadline was 200ms but the request took {elapsed:?}"
+    );
+}
