@@ -154,6 +154,47 @@ never grow and the cap saves nothing; that is the workload to size it against. F
 deployments, remember the advertised 15 MiB connection window — part of the Akamai
 fingerprint, so not tunable — is the number to plan per-connection memory against.
 
+## Where the CPU actually goes
+
+Measured with a sampling profiler (`sample` on macOS) attached to a dedicated
+single-client load — `cargo run --release -p chromulate-bench --bin profile -- 25 64`,
+1.7 million requests, 12 s of samples, concurrency 64 against the plaintext loopback
+origin. Percentages are of *busy* samples; threads parked in the scheduler are excluded,
+because counting them would measure how long the run was rather than what it did.
+
+| Category | % of busy samples |
+|---|---:|
+| Syscall I/O (`recvfrom`, `sendto`, `writev`) | **46.8%** |
+| Allocator and `memmove`/`memset` | 15.2% |
+| Unattributed / other | 10.5% |
+| Chromulate HTTP engine | 8.2% |
+| **Waiting on locks** | **6.8%** |
+| hyper / http / h2 | 6.8% |
+| Chromulate header engine | **2.8%** |
+| tokio runtime | 2.8% |
+| Chromulate cookie jar | 0.1% |
+
+Three things this settles.
+
+**The header engine is no longer the story.** This document used to carry an inference —
+that `HeaderEngine::apply` was "about half" the original throughput gap — labelled as an
+inference because nothing had profiled it. Profiled, after the precompute change, it is
+**2.8% of busy CPU**. The inference is retired; the number replaces it.
+
+**On loopback the client is I/O-bound, not CPU-bound.** Nearly half of busy time is in
+socket syscalls. That is a property of the benchmark as much as of the client — a real
+network moves time from syscalls to waiting — but it means per-request CPU work is not what
+limits throughput here, which is worth knowing before optimising any of the smaller rows.
+
+**Lock waiting is now larger than any single Chromulate component.** At 6.8% it is more
+than double the header engine. The call graph shows it arising from the pool mutex
+(`Pool::checkout` and `Pool::release`), the cookie jar's read lock, and the allocator's own
+internal locks — so a second run with the jar disabled attributes it: lock waiting barely
+moves (6.8% → 6.5%), which rules the cookie jar out and leaves the pool mutex and the
+allocator. That is the honest next target if this profile is ever the binding one, and it
+is measured rather than guessed — see §10.3 of the design document for why the single pool
+mutex is nonetheless not the bottleneck at 100 origins.
+
 ## Dependency bumps, 2026-08-04
 
 `md-5` and `sha2` 0.10 → 0.11, `base64` 0.22 → 0.23, `rand` 0.9 → 0.10, merged one at a
