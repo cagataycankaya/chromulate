@@ -53,7 +53,12 @@ step the order does not matter.
 1. `chromulate-core`, `chromulate-fingerprint` (independent of everything else)
 2. `chromulate-profile`
 3. `chromulate-header`, `chromulate-tls`, `chromulate-cookie`, `chromulate-compression`,
-   `chromulate-dns`, `chromulate-proxy`
+   `chromulate-dns`, `chromulate-proxy`, `chromulate-cache`, `chromulate-h3`
+
+   `chromulate-cache` must be here rather than later: `chromulate-http` depends on it
+   whenever the `cache` feature is on, so publishing the engine first fails. `chromulate-h3`
+   has no in-workspace consumer today, so its position is free — it sits here because it
+   depends only on `chromulate-core` and `chromulate-fingerprint`.
 4. `chromulate-http`
 5. `chromulate`
 6. `chromulate-cli`

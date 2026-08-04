@@ -201,8 +201,6 @@ repository; the measured claims behind the fidelity rows are in
 | HTTP cache (RFC 9111) | Yes, behind the off-by-default `cache` feature, in the `chromulate-cache` crate: storability, freshness, `ETag`/`Last-Modified` revalidation, `Vary` selection, invalidation on unsafe methods. What it deliberately omits — stale-while-revalidate, shared-cache semantics, ranges, `HEAD`, persistence — is listed in the crate's own documentation |
 | Conditional revalidation for scrapers | Yes, behind the off-by-default `validator-store` feature. Remembers `ETag`/`Last-Modified` per URL and replays them *regardless of whether the response was storable*. **This is deliberately not browser behaviour** and is a scraping tool, not a fidelity feature |
 | Early body abandonment | Yes: `Response::bytes_until` stops on a byte marker, a predicate, or a budget, and reports which. On HTTP/2 the stream is reset and the pooled connection survives; on HTTP/1.1 the connection is discarded, which is required for correctness. Measured on six product pages: **82% fewer bytes**, reproduced across two runs. The *time* saving is conditional — 35% in one run and nil in another, because it is bounded by how much of the request was transfer rather than the origin's think time. `reqwest` and `wreq` hand-rolling the same thing land within noise of this, so it is a convenience and a correctness feature, not a speed advantage |
-| Multipart bodies | No. Planned |
-| HTTP cache (RFC 9111) | No. Deliberately deferred — the middleware seam supports it when someone needs it |
 | WebSockets | No, and not planned here |
 | JavaScript, a DOM, rendering | **Never.** Permanent exclusions — use a browser |
 
@@ -230,6 +228,8 @@ repository; the measured claims behind the fidelity rows are in
 | `chromulate-compression` | Streaming `gzip`, `deflate`, `br`, and `zstd` decoding with an expansion guard. |
 | `chromulate-dns` | Resolution, caching, and single-flight collapsing of concurrent lookups. |
 | `chromulate-proxy` | HTTP `CONNECT` tunnelling, SOCKS5, and rotation. |
+| `chromulate-cache` | The RFC 9111 response cache, behind `chromulate-http`'s off-by-default `cache` feature. |
+| `chromulate-h3` | RFC 7838 `Alt-Svc` parsing and an alternative-service cache, plus the off-by-default `quic-spike`. Nothing in the workspace depends on it yet — the engine does not consume the parser. |
 | `chromulate-tls` | TLS configuration derived from a profile. |
 | `chromulate-http` | The engine: connection pool, HTTP/1.1 and HTTP/2, and the redirect loop. |
 | `chromulate-cli` | A command-line client for inspecting behaviour. |
@@ -245,6 +245,7 @@ graph TD
     http --> cookie["chromulate-cookie"]
     http --> compression["chromulate-compression"]
     http --> dns["chromulate-dns"]
+    http --> cache["chromulate-cache"]
     http --> proxy["chromulate-proxy"]
     tls --> profile["chromulate-profile"]
     tls --> fingerprint["chromulate-fingerprint"]
@@ -309,7 +310,7 @@ Also measured, and also not matching:
 - **HTTP/2 pseudo-header order** is `m,s,a,p` where Chrome sends `m,a,s,p`, and the first
   `HEADERS` frame carries no priority fields where Chrome's does. Both are fixed behaviour
   of the `h2` crate. The SETTINGS and connection window *do* match exactly.
-- **HTTP/3 and QUIC are not supported at all.** Chrome upgrades to HTTP/3 where an origin
+- **HTTP/3 and QUIC are not shipped.** `Alt-Svc` parsing and an alternative-service cache exist in `chromulate-h3`, and a QUIC spike behind the non-default `quic-spike` feature can complete a real HTTP/3 request — but it is a measurement rather than a product, for the reasons in [docs/architecture/04-http3-assessment.md](docs/architecture/04-http3-assessment.md). In any default build, Chrome upgrades to HTTP/3 where an origin
   advertises it; Chromulate stays on HTTP/2.
 - **There is one profile**: Chrome 151 on macOS. Presenting as Chrome on Windows or Linux,
   or as Firefox, needs a capture of that browser — the project does not allow a fingerprint

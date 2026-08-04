@@ -51,9 +51,9 @@ there is already an authoritative answer to what it is trying to produce.
 
 **Status: Done.**
 
-The Cargo workspace exists with thirteen members (`Cargo.toml:3-17`) — the twelve published
+The Cargo workspace exists with fifteen members (`Cargo.toml:3-19`) — the fourteen published
 crates plus `chromulate-bench`, which is `publish = false` — shared dependency versions, and
-workspace lints including `unsafe_code = "forbid"` (`Cargo.toml:87-90`).
+workspace lints including `unsafe_code = "forbid"` (`Cargo.toml:90-93`).
 
 `chromulate-core` is written: the error hierarchy
 (`crates/chromulate-core/src/error.rs`), the streaming body
@@ -124,7 +124,7 @@ use, public-suffix rejection, `SameSite` handling, and per-domain eviction.
 an expansion guard, and the default `Accept-Encoding` value `gzip, deflate, br, zstd`
 matching the capture (`chrome-151-macos.json:152`).
 
-`chromulate-dns` — `Resolve` implementations with TTL caching, single-flight collapsing of
+`chromulate-dns` — `Resolve` implementations with fixed-TTL caching, single-flight collapsing of
 concurrent lookups for one host, and IP version preference.
 
 `chromulate-proxy` — proxy URL parsing, `no_proxy` rules, HTTP `CONNECT` and SOCKS5
@@ -316,7 +316,7 @@ harness output before and after. Changes that do not improve a measured number a
 merged, however plausible the reasoning.
 
 The pool's concurrency model turned out to be a single `Mutex<PoolState>`
-(`crates/chromulate-http/src/pool.rs:246`), not a shard map, so there was no shard count for
+(`crates/chromulate-http/src/pool.rs:266`), not a shard map, so there was no shard count for
 the harness to settle — §10.3 of the design document found it flat to 100 origins once the
 release-path sweep was amortised. What remains open is whether the per-extension-boundary
 allocation of the boxed-future design (design document section 3.4) is measurable at all
@@ -343,19 +343,22 @@ the *first* request to an origin this process has never visited — `Client::wit
 the lighter answer, letting a caller seed a
 policy it already knows.
 
-**HTTP/3.** Architecture only until the open questions in section 15 of the design document
-are answered — principally whether one pool can sensibly hold both TCP and QUIC connections
-for an origin. The transport seam from Phase 5 is the natural place for it.
+**HTTP/3.** Split in two. `Alt-Svc` parsing and the alternative-service cache: **Done**, in
+`chromulate-h3`. The QUIC transport: **Speculative**, assessed and recommended against for
+now — a real request succeeds, but the handshake cannot be shaped through `quinn`'s public
+API and there is no Chrome-over-QUIC capture to measure its fidelity against, so shipping
+it would mean claiming a protocol surface nobody checked. See
+[`04-http3-assessment.md`](04-http3-assessment.md).
 
-**An HTTP cache.** Deferred from v1 because the `Middleware` seam already supports it and
-most target users do not want one. Revisited when someone needs it enough to maintain
-RFC 9111 correctness.
+**An HTTP cache.** **Done.** `chromulate-cache`, behind `chromulate-http`'s off-by-default
+`cache` feature. The parts of RFC 9111 it does not implement are listed in the crate's own
+documentation rather than left to be discovered.
 
 **Documentation.** An architecture book built from these documents, a cookbook of worked
 examples, a plugin guide covering the seven seams, and a performance guide that exists only
 once Phase 7 has produced numbers to put in it.
 
-**CI maturity.** The platform matrix on stable and on the 1.88 MSRV (`Cargo.toml:27`), Miri
+**CI maturity.** The platform matrix on stable and on the 1.88 MSRV (`Cargo.toml:28`), Miri
 over `chromulate-core` only (it has no I/O and is therefore tractable), coverage reporting,
 and a scheduled job running the `network-tests` suite separately from pull-request CI so
 that an unrelated upstream outage does not block a merge.

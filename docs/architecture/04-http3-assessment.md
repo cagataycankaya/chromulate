@@ -74,7 +74,7 @@ the graph — `advisories ok, bans ok, licenses ok, sources ok` — and needed n
 investigation.
 
 **The MSRV is exactly the workspace's, and it holds.** `quinn`'s `rust-version` is `1.85`
-and so is this workspace's (`Cargo.toml:27`). That is not comfortable margin; it is zero
+and so is this workspace's (`Cargo.toml:28`). That is not comfortable margin; it is zero
 margin, so it was checked rather than assumed:
 `cargo +1.85.0 check -p chromulate-h3 --all-features` exits `0` with the whole QUIC stack in
 the graph. A `quinn` patch release that raises its MSRV raises this project's, and the
@@ -83,7 +83,7 @@ the graph. A `quinn` patch release that raises its MSRV raises this project's, a
 That job is worth a warning, because running it locally turned up something this work did
 not cause and does not fix. `cargo +1.85.0 check --workspace --all-features` fails on the
 branch this crate was written from, for two reasons that have nothing to do with HTTP/3:
-`crates/chromulate-http/src/engine.rs:578` uses a `let` chain, stable in 1.88 and not in
+`crates/chromulate-http/src/engine.rs:745` uses a `let` chain, stable in 1.88 and not in
 1.85, and `rcgen` pulls `time@0.3.47`, which requires 1.88. Both reach the workspace through
 crates this change does not touch. The declared MSRV of `1.85` is therefore already wrong,
 and someone should either raise it or fix the two causes — out of scope here, recorded so it

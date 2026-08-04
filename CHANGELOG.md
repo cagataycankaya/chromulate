@@ -25,9 +25,10 @@ that breaking changes may land in a minor release.
   default because it grows a release binary by 1,766,656 bytes (measured); a lookup costs
   234.7-243.4 ns and allocates nothing. Precedence is `dynamic || preload`, matching
   Chromium, so an origin cannot take itself off the list with `max-age=0`. The ancestor walk
-  deliberately does not stop at the registrable domain: fifty-seven entries are bare TLDs
-  carrying `includeSubDomains`, and clamping would have silently unprotected everything
-  under them.
+  deliberately does not stop at the registrable domain: fifty-seven entries carry Chromium's `public-suffix`
+  policy, among them the bare TLDs `app`, `dev`, `bank`, `page` and `google` — 51 names in
+  the shipped blob have a single label, every one of them with `includeSubDomains` — and
+  clamping would have silently unprotected everything under them.
 - **An RFC 9111 HTTP cache**, as the new `chromulate-cache` crate, behind the off-by-default
   `cache` feature. Storability, freshness, the full §4.2.3 age correction,
   `ETag`/`Last-Modified` revalidation with correct `304` field merging, `Vary` selection, the
@@ -85,10 +86,9 @@ that breaking changes may land in a minor release.
   a 1,106,803-byte body. Bodies are not stored; the bound is 4096 URLs at a measured 326
   bytes each.
 
-- **`Client::hsts()`** — access to the HSTS store, so a caller can seed a policy for an
-  origin it already knows is HTTPS-only. Without it the store was learn-only, and the
-  *first* request of a process to such an origin was the one that would have gone out in
-  plaintext.
+- **`Client::with_hsts()`** — access to the HSTS store, so a caller can seed origins it
+  already knows about or inspect what a run learned. It takes a closure; see *Changed* for
+  why it is not the guard-returning `hsts()` this entry originally announced.
 - **`RequestBuilder::basic_auth` and `bearer_auth`.** Both mark the header value sensitive,
   so a credential does not reach a log through `HeaderMap`'s `Debug`. `basic_auth` always
   sends the colon: `user:` and `user` are different credentials on the wire.

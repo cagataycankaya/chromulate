@@ -58,6 +58,19 @@ form = ["dep:serde", "dep:serde_urlencoded"]
 # `RequestBuilder::multipart` and the `multipart` module. `tokio/fs` is pulled
 # in only here, for `Part::file`.
 multipart = ["dep:rand", "dep:tokio-util", "tokio/fs"]
+# Forwarded from `chromulate-http`, so a caller who depends on this crate alone —
+# which is what the README tells them to do — can reach them. Without these,
+# `cargo add chromulate --features cache` fails with "does not contain this
+# feature" and the fix is to add a second dependency the README never mentioned.
+#
+# Chromium's HSTS preload list, compiled in. See `chromulate-http`'s own entry
+# for what it costs.
+hsts-preload = ["chromulate-http/hsts-preload"]
+# The RFC 9111 cache in `chromulate-cache`.
+cache = ["chromulate-http/cache"]
+# Conditional revalidation independent of storability. Deliberately not browser
+# behaviour — read `ValidatorStore`'s documentation before enabling it.
+validator-store = ["chromulate-http/validator-store"]
 # Tests that reach the public internet. Off by default so `cargo test
 # --workspace` stays hermetic.
 network-tests = []

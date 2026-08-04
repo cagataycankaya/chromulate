@@ -114,9 +114,20 @@ Closing this needs a richer capture, not code.
 
 ## HTTP/3 and QUIC
 
-Not supported. There is no QUIC transport and no HTTP/3 client; ALPN offers `h2` and
-`http/1.1` only. The single mention of `h3` in the tree is in `capture.rs`, which
-recognises it in a *captured* ALPN list so a capture can be labelled as QUIC.
+Not shipped, and measured rather than guessed. No default build speaks HTTP/3: ALPN offers
+`h2` and `http/1.1` only.
+
+What does exist is `chromulate-h3` — RFC 7838 `Alt-Svc` parsing and an alternative-service
+cache, which is how a client learns an origin offers HTTP/3 — plus a QUIC spike behind the
+non-default `quic-spike` feature that completes a real HTTP/3 request. The spike is a
+measurement, not a product. The handshake it produces omits five extensions the Chrome
+capture carries, emits no GREASE, and its transport-parameter set cannot be shaped through
+`quinn`'s public API. Since this repository holds no Chrome-over-QUIC capture, the fidelity
+of an HTTP/3 path is not poor but *unmeasurable*, which is why it is not shipped. See
+[`architecture/04-http3-assessment.md`](architecture/04-http3-assessment.md).
+
+`capture.rs` also recognises `h3` in a *captured* ALPN list, so a capture can be labelled as
+QUIC.
 
 This is itself observable: modern Chrome upgrades to HTTP/3 on origins that advertise it
 via `Alt-Svc`, and Chromulate stays on HTTP/2.
