@@ -1,0 +1,47 @@
+[package]
+name = "chromulate-http"
+description = "The Chromulate HTTP engine: connection pool, HTTP/1.1 and HTTP/2, redirects, and middleware."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+chromulate-core.workspace = true
+chromulate-compression.workspace = true
+chromulate-dns.workspace = true
+chromulate-fingerprint.workspace = true
+chromulate-header.workspace = true
+chromulate-profile.workspace = true
+chromulate-proxy.workspace = true
+chromulate-tls.workspace = true
+
+bytes.workspace = true
+futures-core.workspace = true
+futures-util.workspace = true
+http.workspace = true
+http-body.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client", "http1", "http2"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+rand.workspace = true
+tokio = { workspace = true, features = ["net", "time", "rt", "sync"] }
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+chromulate-cookie.workspace = true
+flate2.workspace = true
+tokio = { workspace = true, features = ["full"] }
+
+[features]
+default = []
+# Tests that reach the public internet. Off by default so `cargo test --workspace`
+# stays hermetic.
+network-tests = []
+
+[lints]
+workspace = true

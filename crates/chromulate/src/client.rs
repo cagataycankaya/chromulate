@@ -1,0 +1,443 @@
+//! The client and its builder.
+
+use std::fmt;
+use std::sync::Arc;
+use std::time::Duration;
+
+use chromulate_compression::ExpansionGuard;
+use chromulate_cookie::Jar;
+use chromulate_core::{
+    CookieStore, Error, Middleware, RedirectPolicy, Resolve, Result, reexport::HeaderValue,
+};
+use chromulate_http::{Engine, EngineConfig, PoolConfig, Retry, RetryPolicy};
+use chromulate_profile::Profile;
+use chromulate_proxy::{Proxy, ProxyProvider, ProxyUrl, RoundRobin, Single};
+use chromulate_tls::TlsEngine;
+use http::Method;
+use http::header::{HeaderMap, HeaderName, USER_AGENT};
+
+use crate::request::RequestBuilder;
+
+/// The most of a response body [`crate::Response::bytes`] and
+/// [`crate::Response::text`] will hold in memory.
+///
+/// These are convenience methods, and a convenience method that a hostile
+/// server can use to exhaust the client's memory is not a convenience. A caller
+/// who genuinely wants an unbounded read streams the body instead.
+pub const DEFAULT_MAX_RESPONSE_SIZE: u64 = 64 * 1024 * 1024;
+
+/// A browser-identity HTTP client.
+///
+/// Cheap to clone; clones share the connection pool, the cookie jar, and the
+/// TLS session cache, so cloning a client is how you share one identity across
+/// tasks.
+#[derive(Clone)]
+pub struct Client {
+    inner: Arc<ClientInner>,
+}
+
+pub(crate) struct ClientInner {
+    pub(crate) engine: Engine,
+    pub(crate) profile: Arc<Profile>,
+    pub(crate) default_headers: HeaderMap,
+    pub(crate) max_response_size: u64,
+    pub(crate) cookies: Option<Arc<Jar>>,
+}
+
+impl fmt::Debug for Client {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Client")
+            .field("profile", &self.inner.profile.name)
+            .field("engine", &self.inner.engine)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Client {
+    /// A client with the shipped Chrome identity and browser defaults.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Config`] when the platform's trust store cannot be
+    /// read, or when the profile and the linked TLS provider have nothing in
+    /// common.
+    pub fn chrome() -> Result<Self> {
+        Self::builder().build()
+    }
+
+    /// Starts a builder.
+    #[must_use]
+    pub fn builder() -> ClientBuilder {
+        ClientBuilder::new()
+    }
+
+    /// The identity this client presents.
+    #[must_use]
+    pub fn profile(&self) -> &Arc<Profile> {
+        &self.inner.profile
+    }
+
+    /// The engine underneath, whose `tls()` and `http2_fidelity()` report how
+    /// far the wire form is from the profile's target.
+    #[must_use]
+    pub fn engine(&self) -> &Engine {
+        &self.inner.engine
+    }
+
+    /// The cookie jar, when this client keeps one.
+    #[must_use]
+    pub fn cookies(&self) -> Option<&Arc<Jar>> {
+        self.inner.cookies.as_ref()
+    }
+
+    /// Starts a request with an explicit method.
+    pub fn request(&self, method: Method, url: impl AsRef<str>) -> RequestBuilder {
+        RequestBuilder::new(Arc::clone(&self.inner), method, url.as_ref())
+    }
+
+    /// Starts a `GET`.
+    pub fn get(&self, url: impl AsRef<str>) -> RequestBuilder {
+        self.request(Method::GET, url)
+    }
+
+    /// Starts a `POST`.
+    pub fn post(&self, url: impl AsRef<str>) -> RequestBuilder {
+        self.request(Method::POST, url)
+    }
+
+    /// Starts a `PUT`.
+    pub fn put(&self, url: impl AsRef<str>) -> RequestBuilder {
+        self.request(Method::PUT, url)
+    }
+
+    /// Starts a `PATCH`.
+    pub fn patch(&self, url: impl AsRef<str>) -> RequestBuilder {
+        self.request(Method::PATCH, url)
+    }
+
+    /// Starts a `DELETE`.
+    pub fn delete(&self, url: impl AsRef<str>) -> RequestBuilder {
+        self.request(Method::DELETE, url)
+    }
+
+    /// Starts a `HEAD`.
+    pub fn head(&self, url: impl AsRef<str>) -> RequestBuilder {
+        self.request(Method::HEAD, url)
+    }
+}
+
+/// Assembles a [`Client`].
+pub struct ClientBuilder {
+    profile: Arc<Profile>,
+    cookie_store: bool,
+    timeout: Option<Duration>,
+    head_timeout: Option<Duration>,
+    connect_timeout: Option<Duration>,
+    redirect: RedirectPolicy,
+    resolver: Option<Arc<dyn Resolve>>,
+    proxies: Option<Arc<dyn ProxyProvider>>,
+    middleware: Vec<Arc<dyn Middleware>>,
+    retry: Option<Retry>,
+    default_headers: HeaderMap,
+    max_response_size: u64,
+    pool: PoolConfig,
+    decompression: ExpansionGuard,
+    tls: Option<TlsEngine>,
+    shared_jar: Option<Arc<Jar>>,
+}
+
+impl fmt::Debug for ClientBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ClientBuilder")
+            .field("profile", &self.profile.name)
+            .field("cookie_store", &self.cookie_store)
+            .field("timeout", &self.timeout)
+            .field("redirect", &self.redirect)
+            .field("middleware", &self.middleware.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for ClientBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ClientBuilder {
+    /// A builder with browser defaults.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            profile: Arc::new(Profile::chrome_stable()),
+            cookie_store: true,
+            timeout: None,
+            head_timeout: None,
+            connect_timeout: Some(Duration::from_secs(30)),
+            redirect: RedirectPolicy::default(),
+            resolver: None,
+            proxies: None,
+            middleware: Vec::new(),
+            retry: None,
+            default_headers: HeaderMap::new(),
+            max_response_size: DEFAULT_MAX_RESPONSE_SIZE,
+            pool: PoolConfig::default(),
+            decompression: ExpansionGuard::default(),
+            tls: None,
+            shared_jar: None,
+        }
+    }
+
+    /// Sets the browser identity.
+    #[must_use]
+    pub fn profile(mut self, profile: Profile) -> Self {
+        self.profile = Arc::new(profile);
+        self
+    }
+
+    /// Uses an already shared profile.
+    #[must_use]
+    pub fn shared_profile(mut self, profile: Arc<Profile>) -> Self {
+        self.profile = profile;
+        self
+    }
+
+    /// Turns the cookie jar on or off. On by default, as in a browser.
+    #[must_use]
+    pub fn cookie_store(mut self, enabled: bool) -> Self {
+        self.cookie_store = enabled;
+        self
+    }
+
+    /// Uses a specific cookie jar, so several clients can share a session.
+    #[must_use]
+    pub fn cookie_jar(mut self, jar: Arc<Jar>) -> Self {
+        self.cookie_store = true;
+        self.shared_jar = Some(jar);
+        self
+    }
+
+    /// Bounds a whole request, redirects included.
+    #[must_use]
+    pub fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Bounds the wait for one response head.
+    #[must_use]
+    pub fn head_timeout(mut self, timeout: Duration) -> Self {
+        self.head_timeout = Some(timeout);
+        self
+    }
+
+    /// Bounds establishing a connection.
+    #[must_use]
+    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = Some(timeout);
+        self
+    }
+
+    /// Routes every request through a proxy.
+    ///
+    /// Accepts `http`, `https`, `socks5` and `socks5h` URLs. Prefer `socks5h`
+    /// over `socks5`: `socks5` resolves the target hostname locally and so
+    /// leaks it to the local resolver, while `socks5h` hands the name to the
+    /// proxy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Config`] when the URL is not a usable proxy URL.
+    pub fn proxy(mut self, proxy: impl AsRef<str>) -> Result<Self> {
+        let url = ProxyUrl::parse(proxy.as_ref())?;
+        self.proxies = Some(Arc::new(Single::new(Proxy::new(url))));
+        Ok(self)
+    }
+
+    /// Rotates over a pool of proxies.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Config`] when any URL is not a usable proxy URL, or
+    /// when the list is empty.
+    pub fn proxy_pool<I, S>(mut self, proxies: I) -> Result<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let parsed = proxies
+            .into_iter()
+            .map(|raw| ProxyUrl::parse(raw.as_ref()).map(Proxy::new))
+            .collect::<Result<Vec<_>>>()?;
+        if parsed.is_empty() {
+            return Err(Error::config("a proxy pool needs at least one proxy"));
+        }
+        self.proxies = Some(Arc::new(RoundRobin::new(parsed)));
+        Ok(self)
+    }
+
+    /// Uses a proxy provider directly, for a rotation policy this crate does
+    /// not ship.
+    #[must_use]
+    pub fn proxy_provider(mut self, provider: Arc<dyn ProxyProvider>) -> Self {
+        self.proxies = Some(provider);
+        self
+    }
+
+    /// Replaces the DNS resolver.
+    #[must_use]
+    pub fn resolver(mut self, resolver: impl Resolve) -> Self {
+        self.resolver = Some(Arc::new(resolver));
+        self
+    }
+
+    /// Appends a middleware to the chain.
+    ///
+    /// Middleware wraps a whole logical request, so a chain sees one request
+    /// even when the engine follows several redirect hops to satisfy it.
+    #[must_use]
+    pub fn middleware(mut self, middleware: impl Middleware) -> Self {
+        self.middleware.push(Arc::new(middleware));
+        self
+    }
+
+    /// Retries failed requests.
+    ///
+    /// Off by default: retrying is a policy decision with a cost, and a client
+    /// that silently sends a request twice is surprising.
+    #[must_use]
+    pub fn retry(mut self, policy: RetryPolicy) -> Self {
+        self.retry = Some(Retry::with_policy(policy));
+        self
+    }
+
+    /// Sets what to do with 3xx responses.
+    #[must_use]
+    pub fn redirect(mut self, policy: RedirectPolicy) -> Self {
+        self.redirect = policy;
+        self
+    }
+
+    /// Overrides the profile's `User-Agent`.
+    ///
+    /// **This makes the client's identity incoherent.** The profile's user
+    /// agent is one part of a whole that also includes the TLS handshake, the
+    /// HTTP/2 preface, and the client hint brands, all captured together from
+    /// one browser build. Changing only this string produces a client claiming
+    /// to be something its handshake contradicts, which is more distinctive
+    /// than either the original profile or an honest non-browser client. Change
+    /// the profile instead unless a specific server requires a specific string.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Builder`] when the value is not a valid header value.
+    pub fn user_agent(self, value: impl AsRef<str>) -> Result<Self> {
+        self.default_header(USER_AGENT, value)
+    }
+
+    /// Adds a header sent with every request.
+    ///
+    /// A default header overrides what the profile would have produced for the
+    /// same name, and keeps the profile's position for it in the header order.
+    /// A name the profile does not know is appended after the profile's
+    /// headers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Builder`] when the name or value is not valid.
+    pub fn default_header<N>(mut self, name: N, value: impl AsRef<str>) -> Result<Self>
+    where
+        N: TryInto<HeaderName>,
+        N::Error: fmt::Display,
+    {
+        let name = name
+            .try_into()
+            .map_err(|error| Error::builder(format!("invalid header name: {error}")))?;
+        let value = HeaderValue::from_str(value.as_ref())
+            .map_err(|error| Error::builder(format!("invalid header value: {error}")))?;
+        self.default_headers.insert(name, value);
+        Ok(self)
+    }
+
+    /// Caps what [`crate::Response::bytes`] and [`crate::Response::text`] will
+    /// buffer.
+    #[must_use]
+    pub fn max_response_size(mut self, limit: u64) -> Self {
+        self.max_response_size = limit;
+        self
+    }
+
+    /// Sets the connection pool limits.
+    #[must_use]
+    pub fn pool(mut self, pool: PoolConfig) -> Self {
+        self.pool = pool;
+        self
+    }
+
+    /// Sets the decompression limits.
+    #[must_use]
+    pub fn decompression(mut self, guard: ExpansionGuard) -> Self {
+        self.decompression = guard;
+        self
+    }
+
+    /// Uses a TLS engine other than the one the profile would build, for a
+    /// custom trust store or a shared session cache.
+    #[must_use]
+    pub fn tls(mut self, tls: TlsEngine) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+
+    /// Builds the client.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Config`] when the profile cannot produce a TLS
+    /// configuration, which usually means the platform trust store could not be
+    /// read.
+    pub fn build(self) -> Result<Client> {
+        let mut config = EngineConfig::new(Arc::clone(&self.profile));
+        config.timeout = self.timeout;
+        config.head_timeout = self.head_timeout;
+        config.connect_timeout = self.connect_timeout;
+        config.redirect = self.redirect;
+        config.pool = self.pool;
+
+        let jar = if self.cookie_store {
+            Some(self.shared_jar.unwrap_or_else(|| Arc::new(Jar::new())))
+        } else {
+            None
+        };
+
+        let mut builder = Engine::builder(config).decompression(self.decompression);
+        if let Some(resolver) = self.resolver {
+            builder = builder.resolver(resolver);
+        }
+        if let Some(proxies) = self.proxies {
+            builder = builder.proxies(proxies);
+        }
+        if let Some(tls) = self.tls {
+            builder = builder.tls(tls);
+        }
+        if let Some(retry) = self.retry {
+            builder = builder.retry(retry);
+        }
+        if let Some(jar) = &jar {
+            builder = builder.cookies(Arc::clone(jar) as Arc<dyn CookieStore>);
+        }
+        for middleware in self.middleware {
+            builder = builder.middleware(middleware);
+        }
+
+        Ok(Client {
+            inner: Arc::new(ClientInner {
+                engine: builder.build()?,
+                profile: self.profile,
+                default_headers: self.default_headers,
+                max_response_size: self.max_response_size,
+                cookies: jar,
+            }),
+        })
+    }
+}

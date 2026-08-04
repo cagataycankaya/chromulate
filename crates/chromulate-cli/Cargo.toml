@@ -1,0 +1,30 @@
+[package]
+name = "chromulate-cli"
+description = "A command-line client for inspecting Chromulate's browser networking behaviour."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "chromulate"
+path = "src/main.rs"
+# The binary shares its name with the `chromulate` library crate, and rustdoc writes both
+# to `doc/chromulate/`. A binary has no API worth documenting, so it opts out rather than
+# racing the library for the path. See rust-lang/cargo#6313.
+doc = false
+
+[dependencies]
+chromulate = { workspace = true, features = ["json"] }
+
+clap.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "io-std", "io-util"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true
