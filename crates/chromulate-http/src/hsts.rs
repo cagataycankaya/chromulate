@@ -29,6 +29,22 @@ use url::Url;
 /// long-running crawler spend and never give back.
 pub const DEFAULT_HOST_CAPACITY: usize = 10_000;
 
+/// Seconds from the Unix epoch to roughly the year 4000 — far enough that no
+/// process outlives it, near enough to stay inside what every platform can
+/// represent.
+const FAR_FUTURE_SECS: u64 = 64_000_000_000;
+
+/// The expiry used when the requested `max-age` cannot be added to the current
+/// time without overflowing.
+///
+/// A function rather than a `const` because `SystemTime::checked_add` cannot be
+/// called in one.
+fn far_future() -> SystemTime {
+    SystemTime::UNIX_EPOCH
+        .checked_add(Duration::from_secs(FAR_FUTURE_SECS))
+        .unwrap_or(SystemTime::UNIX_EPOCH)
+}
+
 /// One origin's policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Policy {
@@ -98,10 +114,21 @@ impl HstsStore {
             return;
         }
 
+        // `max-age` is server-controlled and the grammar puts no ceiling on it,
+        // while `SystemTime + Duration` panics on overflow rather than
+        // saturating — so a single `max-age=9223372036854775807` response took
+        // the process down. The addition is checked, and a value too large to
+        // represent becomes the longest one that can be: the directive is
+        // asking for a policy that lasts effectively forever, and that is what
+        // forever means here.
+        let expires = now
+            .checked_add(Duration::from_secs(directive.max_age))
+            .unwrap_or_else(far_future);
+
         self.hosts.insert(
             host,
             Policy {
-                expires: now + Duration::from_secs(directive.max_age),
+                expires,
                 include_subdomains: directive.include_subdomains,
             },
         );
@@ -332,6 +359,51 @@ mod tests {
             odd.as_str(),
             "https://example.com:8080/x",
             "the policy is about the scheme, not about relocating a non-default port"
+        );
+    }
+
+    #[test]
+    fn an_enormous_max_age_is_clamped_rather_than_overflowing() {
+        // `SystemTime + Duration` panics on overflow and `max-age` has no
+        // ceiling in the grammar, so this exact header took the process down
+        // with one response. The value is the one an attacker would send rather
+        // than a tidy round number, because that is what was reached for.
+        let mut store = HstsStore::new();
+        store.record("evil.example", "max-age=9223372036854775807", true, now());
+        assert!(
+            store.applies_to("evil.example", now()),
+            "a clamped policy must still be a live policy"
+        );
+
+        let mut store = HstsStore::new();
+        store.record(
+            "evil.example",
+            &format!("max-age={}", u64::MAX),
+            true,
+            now(),
+        );
+        assert!(store.applies_to("evil.example", now()));
+    }
+
+    #[test]
+    fn a_clamped_policy_expires_in_the_future_rather_than_at_the_epoch() {
+        // The failure this guards is a fallback that saturates downwards: the
+        // store would hold an entry `applies_to` reads as already expired, so
+        // the origin would silently lose its protection instead of gaining a
+        // very long one — a downgrade produced by the overflow fix itself.
+        let mut store = HstsStore::new();
+        store.record(
+            "evil.example",
+            &format!("max-age={}", u64::MAX),
+            true,
+            now(),
+        );
+        assert!(
+            store.applies_to(
+                "evil.example",
+                SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000_000)
+            ),
+            "the clamp must land far in the future, not at the epoch"
         );
     }
 
