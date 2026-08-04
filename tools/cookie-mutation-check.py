@@ -120,13 +120,39 @@ MUTATIONS = [
         "F3 per-store tidy widened back to the whole jar",
         "jar.rs",
         """        for site in &touched {
+            let per_domain = self.limits.per_domain;
+            let trim_target = self.limits.domain_purge_target();
             store.with_site(site, |bucket| {
-                bucket.remove_expired(now);
-                bucket.trim_to(self.limits.per_domain);
+                if bucket.len() > per_domain {
+                    bucket.remove_expired(now);
+                    bucket.trim_to(trim_target);
+                }
             });
         }""",
         "        store.tidy_every_site(now, self.limits.per_domain);",
         ["storing_a_cookie_for_each_of_many_sites_stays_linear_in_the_number_of_sites"],
+    ),
+    (
+        "P8 per-domain purge batch reverted to exact-cap trimming",
+        "jar.rs",
+        """                if bucket.len() > per_domain {
+                    bucket.remove_expired(now);
+                    bucket.trim_to(trim_target);
+                }""",
+        """                bucket.remove_expired(now);
+                bucket.trim_to(per_domain);""",
+        ["per_domain_eviction_cost_amortises_once_a_bucket_is_full"],
+    ),
+    (
+        "P8 global purge batch reverted to exact-cap eviction",
+        "jar.rs",
+        """    pub const fn purge_batch(&self) -> usize {
+        self.total / 10
+    }""",
+        """    pub const fn purge_batch(&self) -> usize {
+        0
+    }""",
+        ["eviction_cost_amortises_across_inserts_once_the_jar_is_full"],
     ),
     (
         # Both halves have to go. Either one alone leaves the test green - see the note on

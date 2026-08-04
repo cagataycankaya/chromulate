@@ -28,9 +28,54 @@ pub struct JarLimits {
     /// Maximum cookies kept for a single registrable domain (a domain and all of its
     /// subdomains share one bucket, so `Domain=example.com` and a host-only cookie on
     /// `api.example.com` count against the same limit).
+    ///
+    /// Like [`JarLimits::total`], a ceiling rather than a level: a store that pushes a
+    /// bucket past it purges one sixth below it in a single pass (Chromium's
+    /// `kDomainPurgeCookies = 30` against `kMaxCookiesPerHost = 180`, the same ratio),
+    /// so a bucket under sustained pressure oscillates between five sixths of the cap
+    /// and the cap.
     pub per_domain: usize,
     /// Maximum cookies kept across the whole jar, regardless of domain.
+    ///
+    /// This is a ceiling the jar never exceeds at rest, not a level it sits at: a store
+    /// that pushes past it purges one [`JarLimits::purge_batch`] below it in a single
+    /// pass, so a jar under sustained pressure oscillates between `total - purge_batch`
+    /// and `total`.
     pub total: usize,
+}
+
+impl JarLimits {
+    /// How far below [`JarLimits::total`] an overflowing jar is purged in one pass.
+    ///
+    /// Evicting exactly one cookie per overflowing store would scan the whole jar for
+    /// the least-recently-used victim on every store — the permanent state of a
+    /// long-running crawl once the jar fills. Purging a batch amortises that scan over
+    /// the next `purge_batch` stores. Chromium's `CookieMonster` batches for the same
+    /// reason (`kPurgeCookies = 300` against `kMaxCookies = 3300`); the tenth used here
+    /// keeps the same ratio. Totals under ten purge in batches of one, which is the
+    /// exact-cap behaviour small test jars rely on.
+    #[must_use]
+    pub const fn purge_batch(&self) -> usize {
+        self.total / 10
+    }
+
+    /// The level an overflowing jar is purged down to.
+    const fn purge_target(&self) -> usize {
+        self.total.saturating_sub(self.purge_batch())
+    }
+
+    /// How far below [`JarLimits::per_domain`] an overflowing bucket is trimmed in one
+    /// pass — one sixth, Chromium's `kDomainPurgeCookies` to `kMaxCookiesPerHost`
+    /// ratio. Per-domain caps under six trim exactly to the cap.
+    #[must_use]
+    pub const fn domain_purge_batch(&self) -> usize {
+        self.per_domain / 6
+    }
+
+    /// The level an overflowing bucket is trimmed down to.
+    const fn domain_purge_target(&self) -> usize {
+        self.per_domain.saturating_sub(self.domain_purge_batch())
+    }
 }
 
 impl Default for JarLimits {
@@ -253,23 +298,23 @@ impl Store {
         self.total = self.sites.values().map(Bucket::len).sum();
     }
 
-    /// Evicts cookies until the jar holds no more than `limit`: expired ones first, then
-    /// least recently used.
+    /// When the jar holds more than `cap`, evicts down to `target`: expired cookies
+    /// first, then least recently used.
     ///
     /// One pass over the jar, holding on to no more than the `doomed_count` worst
     /// candidates seen so far. The jar is never flattened into a temporary its own size,
     /// and ranking expired cookies below every live one drops them ahead of anything
-    /// still in use without a separate sweep of every bucket — which matters because the
-    /// common case here is a jar sitting exactly at its cap, evicting one cookie per
-    /// stored cookie, for as long as the crawl runs.
+    /// still in use without a separate sweep of every bucket.
     ///
-    /// The previous implementation rebuilt a flattened, key-cloned view of every cookie in
-    /// the jar once per individual eviction.
-    fn enforce_total(&mut self, now: SystemTime, limit: usize) {
-        if self.total <= limit {
+    /// `target` sits a purge batch below `cap` (see [`JarLimits::purge_batch`]), so a
+    /// jar under sustained store pressure pays this scan once per batch rather than once
+    /// per store. The previous implementation evicted exactly to the cap, which meant
+    /// one full scan per stored cookie for the whole life of a full jar.
+    fn enforce_total(&mut self, now: SystemTime, cap: usize, target: usize) {
+        if self.total <= cap {
             return;
         }
-        let doomed_count = self.total - limit;
+        let doomed_count = self.total - target;
 
         let mut worst: BinaryHeap<(EvictionRank, &str, usize)> =
             BinaryHeap::with_capacity(doomed_count + 1);
@@ -529,7 +574,7 @@ impl Jar {
         }
 
         store.tidy_every_site(now, self.limits.per_domain);
-        store.enforce_total(now, self.limits.total);
+        store.enforce_total(now, self.limits.total, self.limits.purge_target());
     }
 
     /// Recovers the read lock even if a prior holder panicked: a panic elsewhere does
@@ -703,13 +748,24 @@ impl CookieStore for Jar {
             });
         }
 
+        // Tidying a bucket rescans it, so it runs only when the bucket has
+        // actually outgrown its cap, and then trims one purge batch below the
+        // cap — expired cookies first, since `remove_expired` runs ahead of
+        // the trim — so the next batch of stores into the same bucket does
+        // not rescan it. An under-cap bucket keeps any expired cookies until
+        // it fills; lookups already filter them and the global purge ranks
+        // them first.
         for site in &touched {
+            let per_domain = self.limits.per_domain;
+            let trim_target = self.limits.domain_purge_target();
             store.with_site(site, |bucket| {
-                bucket.remove_expired(now);
-                bucket.trim_to(self.limits.per_domain);
+                if bucket.len() > per_domain {
+                    bucket.remove_expired(now);
+                    bucket.trim_to(trim_target);
+                }
             });
         }
-        store.enforce_total(now, self.limits.total);
+        store.enforce_total(now, self.limits.total, self.limits.purge_target());
     }
 }
 
@@ -1075,6 +1131,100 @@ mod tests {
         assert_eq!(total, 1);
         // The most recently stored cookie (b) survives; a was least recently used.
         assert!(cookies_for_no_context(&jar, &url("https://b.test/")).is_some());
+    }
+
+    #[test]
+    fn eviction_cost_amortises_across_inserts_once_the_jar_is_full() {
+        let jar = Jar::with_limits(JarLimits {
+            per_domain: 1000,
+            total: 100,
+        });
+        for i in 0..100 {
+            set(&jar, &format!("https://s{i}.test/"), "c=1");
+        }
+        assert_eq!(
+            jar.export().cookies.len(),
+            100,
+            "the fixture must sit at the cap"
+        );
+
+        let baseline = entries_examined();
+        for i in 100..130 {
+            set(&jar, &format!("https://s{i}.test/"), "c=1");
+        }
+        let examined = entries_examined() - baseline;
+
+        // Evicting exactly one cookie per insert scans the whole jar every
+        // time: 30 inserts examine >= 30 * 100 entries. A batched purge pays
+        // one scan per batch of total/10, so the same 30 inserts examine a few
+        // hundred. The threshold sits between the two regimes.
+        assert!(
+            examined < 1500,
+            "storing 30 cookies into a full jar examined {examined} entries — eviction is not amortised"
+        );
+    }
+
+    #[test]
+    fn a_purge_evicts_the_least_recently_used_batch_and_keeps_the_newcomer() {
+        let jar = Jar::with_limits(JarLimits {
+            per_domain: 1000,
+            total: 20,
+        });
+        for i in 0..20 {
+            set(&jar, &format!("https://s{i}.test/"), "c=1");
+        }
+        // Refresh the first five, which counts as an access: s5 is now the
+        // least recently used.
+        for i in 0..5 {
+            set(&jar, &format!("https://s{i}.test/"), "c=1");
+        }
+
+        set(&jar, "https://newcomer.test/", "c=1");
+
+        // The overflow purges one batch (total / 10 = 2) below the cap: the
+        // jar drops from 21 to 18, and the three evicted are the three least
+        // recently used — s5, s6, s7.
+        assert_eq!(jar.export().cookies.len(), 18);
+        assert!(cookies_for_no_context(&jar, &url("https://newcomer.test/")).is_some());
+        assert!(cookies_for_no_context(&jar, &url("https://s0.test/")).is_some());
+        assert!(cookies_for_no_context(&jar, &url("https://s8.test/")).is_some());
+        for evicted in 5..8 {
+            assert!(
+                cookies_for_no_context(&jar, &url(&format!("https://s{evicted}.test/"))).is_none(),
+                "s{evicted} was among the least recently used and must be purged"
+            );
+        }
+    }
+
+    #[test]
+    fn per_domain_eviction_cost_amortises_once_a_bucket_is_full() {
+        let jar = Jar::with_limits(JarLimits {
+            per_domain: 60,
+            total: 100_000,
+        });
+        for i in 0..60 {
+            set(&jar, "https://example.com/", &format!("c{i}=1"));
+        }
+        assert_eq!(
+            jar.export().cookies.len(),
+            60,
+            "the bucket must sit at its cap"
+        );
+
+        let baseline = entries_examined();
+        for i in 60..90 {
+            set(&jar, "https://example.com/", &format!("c{i}=1"));
+        }
+        let examined = entries_examined() - baseline;
+
+        // Rescanning the whole bucket on every store costs 30 inserts about
+        // 30 * 2 * 60 entries. A batched purge (per_domain / 6, Chromium's
+        // kDomainPurgeCookies ratio) pays one scan per 10 inserts. The
+        // threshold sits between the two regimes.
+        assert!(
+            examined < 1200,
+            "storing 30 cookies into a full bucket examined {examined} entries — per-domain eviction is not amortised"
+        );
     }
 
     #[test]

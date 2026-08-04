@@ -94,6 +94,21 @@ fn fill(jar: &Jar, domains: usize, per_domain: usize, expect_held: Option<usize>
     held
 }
 
+/// Asserts a jar under insert pressure ended inside the purge band.
+///
+/// The total cap is a ceiling, not a level: an overflowing store purges one
+/// batch (a tenth of the cap) below it, so a jar under sustained inserts
+/// oscillates between `cap - purge_batch` and `cap`. Ending outside that band
+/// would mean the fixture was not exercising a full jar at all.
+fn assert_within_purge_band(jar: &Jar, cap: usize) {
+    let floor = cap - JarLimits::default().purge_batch();
+    let held = jar.export().cookies.len();
+    assert!(
+        (floor..=cap).contains(&held),
+        "after the insert benchmark the jar holds {held}, outside the purge band {floor}..={cap}"
+    );
+}
+
 /// Asserts a lookup really returns cookies before its timing is trusted.
 fn check_lookup(jar: &Jar, url: &Url, context: &CookieContext, expect_cookies: usize) {
     let value = jar.cookies_for(url, context).unwrap_or_else(|| {
@@ -179,15 +194,17 @@ fn benches(c: &mut Criterion) {
     // one cost but two, and they are separable:
     //
     // - `replace` never evicts at all — the identity already exists.
-    // - `insert_one_domain` piles new names onto a single domain, so it crosses
-    //   the 180 per-domain cap as well as the 3,000 total, and pays for both.
+    // - `insert_one_domain` piles new names onto a single domain, so it engages
+    //   the 180 per-domain cap as well as the 3,000 total.
     // - `insert_many_domains` puts each new cookie on a domain of its own, so
     //   per-domain trimming never fires and only the global least-recently-used
     //   pass runs.
     //
-    // The last two apart are what separate "eviction is expensive" from "the
-    // *global* scan is what is expensive", which are different claims with
-    // different fixes.
+    // Both caps purge in batches (a tenth of the total, a sixth of the
+    // per-domain cap), so what these rows time is the amortised steady state:
+    // mostly cheap stores, with one bucket- or jar-wide scan per batch. The
+    // worst single store still pays a full scan; the rows report the cost a
+    // crawler actually experiences per store, which is the amortised one.
     let default_cap = JarLimits::default().total;
     let fresh: Vec<HeaderValue> = (0..4096).map(set_cookie).collect();
     let one_each: Vec<Url> = (100_000..104_096).map(site).collect();
@@ -215,11 +232,7 @@ fn benches(c: &mut Criterion) {
                 jar.store(black_box(&target), &mut std::iter::once(header));
             });
         });
-        assert_eq!(
-            jar.export().cookies.len(),
-            default_cap,
-            "the jar must still sit at its cap after the insert benchmark"
-        );
+        assert_within_purge_band(&jar, default_cap);
     }
     {
         let jar = Jar::with_limits(JarLimits::default());
@@ -233,11 +246,7 @@ fn benches(c: &mut Criterion) {
                 jar.store(black_box(url), &mut std::iter::once(&plain));
             });
         });
-        assert_eq!(
-            jar.export().cookies.len(),
-            default_cap,
-            "the jar must still sit at its cap after the insert benchmark"
-        );
+        assert_within_purge_band(&jar, default_cap);
     }
 
     write.finish();
