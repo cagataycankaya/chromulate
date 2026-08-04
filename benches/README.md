@@ -6,9 +6,10 @@ without re-running it on your own machine, because none of these figures are
 properties of Chromulate alone — they are properties of Chromulate on one
 machine under one load.
 
-The measured results from the run that introduced this harness are in
-`.superpowers/preflight/2026-08-04-chromulate-agent-P1-report.md`, together with
-the CPU and toolchain they came from.
+The measured results live in [`docs/performance.md`](../docs/performance.md)
+(current, after the 2026-08-04 optimisation wave) and
+[`docs/performance-baseline.md`](../docs/performance-baseline.md) (the state that
+wave started from), together with the CPU and toolchain they came from.
 
 ## What is here
 

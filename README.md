@@ -156,8 +156,11 @@ while let Some(chunk) = stream.next().await {
   specification, with the reasoning and the rejected alternatives.
 - [Roadmap](docs/architecture/03-roadmap.md) — what exists, what is next, what is
   speculative.
-- [Performance baseline](docs/performance-baseline.md) — measured throughput against
-  `reqwest`, allocations per request, and memory, with what the measurement does not cover.
+- [Performance](docs/performance.md) — the measured current state: throughput at parity
+  with `reqwest`, 48 allocations per request, constant-memory streaming — and what each
+  change in the optimisation wave was worth, with what the measurements do not cover.
+- [Performance baseline](docs/performance-baseline.md) — the measured state the wave
+  started from, kept unchanged so the two can be compared.
 
 ## What Chromulate does not do
 

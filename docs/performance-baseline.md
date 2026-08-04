@@ -9,7 +9,8 @@ Everything here is measured. Where something is inferred rather than measured, i
 
 > **Status (2026-08-04, later the same day):** the optimisation opportunities at the end of
 > this document have since been applied and re-measured on the same machine and harness.
-> This document is kept as the *before* record; the after numbers are in the
+> This document is kept as the *before* record; the after numbers, and what each change
+> was worth, are in [`performance.md`](performance.md), with the summary in the
 > [changelog](../CHANGELOG.md) under "Changed — performance". Headlines: throughput parity
 > with reqwest (paired medians 0.93–1.09x, was 0.79–0.88x), 48 allocations per steady-state
 > request (was 127; reqwest 49), full-jar cookie insert 1.3–1.9 µs amortised (was ~21–22 µs).
