@@ -15,6 +15,18 @@
 //!   there is no name to attach the policy to.
 //! - **`max-age=0` removes the policy** rather than refreshing it (§6.1.1), so
 //!   an origin can turn HSTS off.
+//!
+//! What none of that can do is protect the *first* request to an origin this
+//! process has never visited, because the plaintext request is what teaches the
+//! store. The `hsts-preload` feature adds the other half — Chromium's preload
+//! list, compiled in. The `preload` module, which exists only under that feature
+//! and so is deliberately not linked here, documents what it costs and where the
+//! data came from. It is off by default. Callers see no difference either way:
+//! [`HstsStore::applies_to`] answers the question and never says which half
+//! answered it.
+
+#[cfg(feature = "hsts-preload")]
+pub mod preload;
 
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
@@ -136,6 +148,11 @@ impl HstsStore {
     }
 
     /// Whether requests to `host` must use HTTPS.
+    ///
+    /// The answer folds together what responses have taught this store and, when
+    /// the `hsts-preload` feature is on, the compiled-in preload list. Callers
+    /// are not told which one answered, and do not need a second call to find
+    /// out.
     #[must_use]
     pub fn applies_to(&self, host: &str, now: SystemTime) -> bool {
         if is_ip_literal(host) {
@@ -164,7 +181,39 @@ impl HstsStore {
             }
             rest = parent;
         }
-        false
+
+        // Precedence between what a response taught this store and what the
+        // preload list says. Everything above is the dynamic answer; this is the
+        // preloaded one, written in Chromium's order —
+        // `GetDynamicSTSState(host, result) || GetStaticSTSState(host, result)`
+        // in `net/http/transport_security_state.cc`, revision
+        // 7be0edc636b0e7b0143e2700ecf5c8af750d09ec.
+        //
+        // Being honest about what that order buys: nothing observable. Moving
+        // `preload_covers` above the dynamic lookups was tried as a mutation and
+        // the whole suite stayed green, because `a || b` and `b || a` answer the
+        // same question and this function answers a `bool`. The order is here
+        // because it is the one the reference implementation uses and because it
+        // is the cheaper branch second, not because a test can tell.
+        //
+        // What *is* observable, and what the precedence rule actually decides, is
+        // that neither answer can be a *negative* that cancels the other. RFC 6797
+        // §8.1 says a zero `max-age` means the UA "MUST remove its cached HSTS
+        // Policy information", and `record` above does exactly that — to this
+        // store. A pre-loaded list is not that cache; §12.3 describes it as
+        // configured into the user agent "in a manner similar to how root CA
+        // certificates are embedded in browsers 'at the factory'". So removing
+        // the dynamic entry leaves the preloaded one standing and an origin
+        // cannot take itself off the list with a response header. Chromium
+        // arrives from the other side: `AddHSTSInternal` erases the dynamic entry
+        // when `max-age` is zero rather than storing a negative one, so there is
+        // never a dynamic "no" for a static "yes" to lose to.
+        //
+        // Two layers, and they are guarded separately. Deleting this call turns
+        // `max_age_zero_cannot_take_a_host_off_the_preload_list` red and leaves
+        // `max_age_zero_still_removes_a_dynamic_policy_for_a_host_that_is_not_preloaded`
+        // green; stopping `record` from removing does the reverse. Both were run.
+        preload_covers(&host)
     }
 
     /// Rewrites `url` to HTTPS when a policy demands it, reporting whether it
@@ -213,6 +262,24 @@ impl HstsStore {
             self.hosts.remove(&soonest);
         }
     }
+}
+
+/// Whether the compiled-in preload list demands HTTPS for `host`.
+///
+/// The seam that keeps `applies_to` — and therefore every call site above it —
+/// the same function in both builds. Without the feature the `preload` module
+/// does not exist, the blob is not linked, and this is the `false` below.
+#[cfg(feature = "hsts-preload")]
+fn preload_covers(host: &str) -> bool {
+    preload::covers(host)
+}
+
+/// Whether the compiled-in preload list demands HTTPS for `host`.
+///
+/// The default build has no preload list, so nothing is preloaded.
+#[cfg(not(feature = "hsts-preload"))]
+fn preload_covers(_host: &str) -> bool {
+    false
 }
 
 /// The directives this crate models from an `STS` header value.

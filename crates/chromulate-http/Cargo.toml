@@ -50,6 +50,19 @@ default = []
 # Tests that reach the public internet. Off by default so `cargo test --workspace`
 # stays hermetic.
 network-tests = []
+# Chromium's HSTS preload list, compiled into the binary. Off by default because
+# it is not free: `data/hsts-preload/preload.bin` is 1,749,625 bytes and all of it
+# is linked in. Measured on the release `chromulate` CLI binary, macOS arm64:
+# 9,049,920 bytes without the feature, 10,816,576 with it, a growth of 1,766,656 —
+# the blob plus 17,031 bytes of lookup code and alignment. What it buys is
+# protection for the *first* request to an origin this process has never visited,
+# which is the one case a store learned from responses cannot cover.
+#
+# Cargo features are additive and unify across a dependency graph, so any crate in
+# the build enabling this turns it on for every consumer of `chromulate-http` in
+# that build. The behaviour it adds is "upgrade more requests to HTTPS", which is
+# safe to acquire unexpectedly, but it is worth knowing that is how it can arrive.
+hsts-preload = []
 
 [lints]
 workspace = true
