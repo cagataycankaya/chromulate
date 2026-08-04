@@ -695,3 +695,57 @@ fn a_credential_is_not_echoed_when_it_cannot_be_encoded() {
         "the error must not quote the credential back: {message}"
     );
 }
+
+// ----------------------------------------------------------------- timings
+
+#[tokio::test]
+async fn a_response_reports_where_the_request_spent_its_time() {
+    let server = TestServer::always(Reply::text("hello").delayed(Duration::from_millis(150))).await;
+    let client = client_for(&server, &["example.test"]);
+
+    let response = client
+        .get(server.url_for("example.test", "/page"))
+        .send()
+        .await
+        .expect("the request must succeed");
+
+    let timings = response
+        .timings()
+        .expect("a response the engine produced carries its timings");
+    assert!(timings.resolve().is_some(), "{timings:?}");
+    assert!(timings.connect().is_some(), "{timings:?}");
+    assert!(timings.head() >= Duration::from_millis(150), "{timings:?}");
+
+    // The documented shape: hold the `Copy` timings across the body read and
+    // `elapsed` afterwards is the time to body complete.
+    let body = response.bytes().await.expect("the body must be readable");
+    assert_eq!(&body[..], b"hello");
+    assert!(timings.elapsed() >= timings.head(), "{timings:?}");
+}
+
+#[tokio::test]
+async fn a_pooled_response_reports_no_connection_phases() {
+    let server = TestServer::always(Reply::text("hello")).await;
+    let client = client_for(&server, &["example.test"]);
+    let url = server.url_for("example.test", "/page");
+
+    let _ = client
+        .get(&url)
+        .send()
+        .await
+        .expect("the first request must succeed")
+        .bytes()
+        .await
+        .expect("the body must be readable");
+
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .expect("the second request must succeed");
+    let timings = response.timings().expect("the timings must be attached");
+
+    assert_eq!(server.accepts(), 1, "the second request must have pooled");
+    assert_eq!(timings.connect(), None, "{timings:?}");
+    assert_eq!(timings.handshake(), None, "{timings:?}");
+}

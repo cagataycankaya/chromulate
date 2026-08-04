@@ -21,6 +21,7 @@
 pub mod body;
 pub mod error;
 pub mod request;
+pub mod timings;
 pub mod traits;
 pub mod uri;
 
@@ -29,6 +30,7 @@ pub use error::{BoxError, Error, Phase, Result};
 pub use request::{
     CookieContext, FetchDest, FetchMode, RedirectPolicy, Request, RequestOptions, Response,
 };
+pub use timings::Timings;
 pub use traits::{BoxFuture, CookieStore, Exchange, HostPort, Middleware, Next, Resolve};
 pub use uri::{Origin, referrer_for};
 

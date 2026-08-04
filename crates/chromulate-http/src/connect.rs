@@ -5,9 +5,9 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use chromulate_core::{Body, Error, HostPort, Origin, Phase, Resolve, Result};
+use chromulate_core::{Body, Error, HostPort, Origin, Phase, Resolve, Result, Timings};
 use chromulate_profile::Profile;
 use chromulate_proxy::{Proxy, ProxyProvider};
 use chromulate_tls::{Alpn, HandshakeInfo, TlsEngine, TlsStream};
@@ -196,11 +196,17 @@ impl Connector {
         }
     }
 
-    /// Opens a new connection along `route`.
+    /// Opens a new connection along `route`, timing each phase into `timings`.
+    ///
+    /// Only the phases this call actually performs are recorded, so a caller
+    /// that was served from the pool never reaches here and its `timings` keep
+    /// reporting `None` — which is the distinction between "no handshake" and
+    /// "an instant handshake".
     pub(crate) async fn connect(
         &self,
         route: &Route,
         deadline: &Deadline,
+        timings: &mut Timings,
     ) -> Result<(PoolKey, Connection)> {
         let origin = &route.origin;
         let target = HostPort::new(origin.host().to_owned(), origin.port());
@@ -219,15 +225,21 @@ impl Connector {
                     .flatten()
                     .min()
                     .unwrap_or(DEFAULT_PROXY_BUDGET);
-                deadline
+                let started = Instant::now();
+                let stream = deadline
                     .run(
                         Phase::Connect,
                         self.connect_timeout,
                         proxy.connect(&target, budget),
                     )
-                    .await?
+                    .await?;
+                // No resolve phase is recorded: the proxy resolves the target
+                // name, and whatever it cost is inside the tunnel setup.
+                timings.record_connect(started.elapsed());
+                stream
             }
             None => {
+                let started = Instant::now();
                 let addresses = deadline
                     .run(
                         Phase::Resolve,
@@ -235,17 +247,23 @@ impl Connector {
                         self.resolver.resolve(target.clone()),
                     )
                     .await?;
-                deadline
+                let resolved = Instant::now();
+                timings.record_resolve(resolved.saturating_duration_since(started));
+
+                let stream = deadline
                     .run(
                         Phase::Connect,
                         self.connect_timeout,
                         dial(&addresses, &target),
                     )
-                    .await?
+                    .await?;
+                timings.record_connect(resolved.elapsed());
+                stream
             }
         };
 
         let (stream, alpn) = if origin.is_secure() {
+            let started = Instant::now();
             let tls = deadline
                 .run(
                     Phase::Handshake,
@@ -253,6 +271,7 @@ impl Connector {
                     self.tls.connect(stream, origin.host()),
                 )
                 .await?;
+            timings.record_handshake(started.elapsed());
             let info = HandshakeInfo::of_stream(&tls);
             tracing::debug!(
                 alpn = info.alpn.as_ref().map(Alpn::as_str),
@@ -283,6 +302,11 @@ impl Connector {
             protocol,
         };
 
+        // Shares `Phase::Handshake` with the TLS handshake for timeout
+        // attribution but is deliberately not added to the recorded handshake
+        // time: a caller reading "handshake" against a captured trace means the
+        // TLS one, and folding hyper's preface into it would make the two
+        // numbers incomparable.
         let connection = deadline
             .run(
                 Phase::Handshake,

@@ -21,6 +21,23 @@ that breaking changes may land in a minor release.
 - **CI: Miri over `chromulate-core`** (verified locally first — 31 tests pass under it,
   including the `tokio` ones) and **a nightly schedule for the live network tests**, so
   that "a site changed" and "we broke it" stop looking the same.
+- **Per-phase request timings — `chromulate::Timings`, read from
+  `Response::timings()`.** Resolve, connect, TLS handshake, redirect time and time to
+  response head, with `Timings::elapsed()` read after the body for the time to body
+  complete. `std::time::Instant` throughout: no metrics crate, no exporter, no new
+  dependency. The connection phases are `Option<Duration>`, because a request served from
+  the pool performs none of them and `Some(ZERO)` would claim it performed them
+  instantly. After a redirect chain the phases describe the final hop and the earlier
+  hops are `Timings::redirect()`. Measured at **48 allocations per steady-state request,
+  unchanged** (`--bin allocs`, n=3, spread 0.0%).
+
+### Changed
+
+- **`chromulate_http::FinalUrl` is now `chromulate_http::ResponseInfo`**, a struct
+  carrying the final URL *and* the timings. One extension rather than two:
+  `http::Extensions` boxes every value it stores, so a second insert would have been a
+  49th allocation on a path whose count is a published figure. `chromulate::Response`
+  consumes it as before, so the facade API is unchanged.
 
 ### Fixed
 

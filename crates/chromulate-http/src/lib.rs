@@ -69,7 +69,7 @@ pub mod pool;
 pub mod redirect;
 pub mod time;
 
-pub use engine::{Engine, EngineBuilder, EngineConfig, FinalUrl, RequestUrl};
+pub use engine::{Engine, EngineBuilder, EngineConfig, RequestUrl, ResponseInfo};
 pub use hsts::{DEFAULT_HOST_CAPACITY, HstsStore};
 pub use http2::{DEFAULT_CONNECTION_WINDOW, Http2Fidelity, UnsupportedSetting};
 pub use middleware::{RateLimit, RateLimiter, Retry, RetryOn, RetryPolicy};
