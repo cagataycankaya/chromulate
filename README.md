@@ -194,6 +194,9 @@ Also measured, and also not matching:
   of the `h2` crate. The SETTINGS and connection window *do* match exactly.
 - **HTTP/3 and QUIC are not supported at all.** Chrome upgrades to HTTP/3 where an origin
   advertises it; Chromulate stays on HTTP/2.
+- **There is one profile**: Chrome 151 on macOS. Presenting as Chrome on Windows or Linux,
+  or as Firefox, needs a capture of that browser — the project does not allow a fingerprint
+  constant that was not observed, so this cannot be filled in from documentation.
 - **High-entropy client hints have no values.** The `Accept-CH` round trip works, but the
   shipped profile carries nothing for `Sec-CH-UA-Arch` and friends, so a server that asks
   gets nothing where Chrome would answer.

@@ -148,6 +148,27 @@ RFC 8701's `0x?A?A`. The golden Chrome 151 tests and the live network tests stay
 action version to keep current, and bumping it would have left the job green while
 verifying nothing.
 
+### Added — HSTS, supply-chain checks, and profile verification
+
+- **HTTP Strict Transport Security (RFC 6797).** An origin that has sent
+  `Strict-Transport-Security` is never spoken to in plaintext again — the upgrade happens
+  before the request is sent, because a redirect would already be too late. A header
+  arriving over cleartext is ignored (§8.1), IP-literal hosts take no policy (§8.1.1), and
+  `max-age=0` removes one (§6.1.1). The store is bounded.
+- **`chromulate verify`** rebuilds every shipped profile from the capture compiled into the
+  binary and compares JA4, JA3, the Akamai fingerprint, the header order and the user agent
+  against what ships. It enforces the project's strictest rule — no hand-written fingerprint
+  constant — from outside the test suite, and runs as its own CI job. Proven by mutation:
+  changing one window-update constant produces a diff and exit 1.
+- **`cargo deny` in CI**, covering advisories, licences, duplicate versions and source
+  registries. It found two real things on its first run: a stack-exhaustion advisory in
+  `time` reachable through a dev-dependency added the same day, and `webpki-roots` shipping
+  Mozilla's CA data under a licence the policy had not listed.
+- **Adversarial sweeps for the expansion guard**, covering four codings against
+  incompressible, highly compressible and mixed payloads, plus truncation, trailing garbage,
+  bit flips and mismatched codings. Mutation-checked. Not a substitute for coverage-guided
+  fuzzing, but it runs in CI on stable, which `cargo fuzz` cannot.
+
 ### Fixed — HTTP/2 connections were never pooled
 
 Found by measuring a real HTTPS origin for the first time.
