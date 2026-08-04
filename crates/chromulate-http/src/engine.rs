@@ -179,6 +179,8 @@ pub struct EngineBuilder {
     retry: Option<Retry>,
     #[cfg(feature = "cache")]
     cache: Option<Arc<chromulate_cache::HttpCache>>,
+    #[cfg(feature = "validator-store")]
+    validators: Option<Arc<crate::validators::ValidatorStore>>,
 }
 
 impl fmt::Debug for EngineBuilder {
@@ -206,6 +208,8 @@ impl EngineBuilder {
             retry: None,
             #[cfg(feature = "cache")]
             cache: None,
+            #[cfg(feature = "validator-store")]
+            validators: None,
         }
     }
 
@@ -296,6 +300,19 @@ impl EngineBuilder {
         self
     }
 
+    /// Remembers response validators and replays them as conditional requests.
+    ///
+    /// This is deliberately not browser behaviour: a browser does not revalidate
+    /// a response it was told not to store. Read
+    /// [`ValidatorStore`](crate::validators::ValidatorStore)'s documentation,
+    /// which states the divergence and its measured reach, before turning it on.
+    #[cfg(feature = "validator-store")]
+    #[must_use]
+    pub fn validators(mut self, validators: Arc<crate::validators::ValidatorStore>) -> Self {
+        self.validators = Some(validators);
+        self
+    }
+
     /// Builds the engine.
     ///
     /// # Errors
@@ -334,6 +351,8 @@ impl EngineBuilder {
                 retry: self.retry,
                 #[cfg(feature = "cache")]
                 cache: self.cache,
+                #[cfg(feature = "validator-store")]
+                validators: self.validators,
                 config: self.config,
                 connector,
                 pool,
@@ -376,6 +395,8 @@ struct EngineInner {
     retry: Option<Retry>,
     #[cfg(feature = "cache")]
     cache: Option<Arc<chromulate_cache::HttpCache>>,
+    #[cfg(feature = "validator-store")]
+    validators: Option<Arc<crate::validators::ValidatorStore>>,
 }
 
 impl fmt::Debug for Engine {
@@ -591,6 +612,14 @@ impl Engine {
         // to be settled before headers are built. That is why the connection is
         // acquired first even though nothing has been sent yet.
         *request.version_mut() = protocol.version();
+        // Before `apply_headers`, so a replayed validator travels the same path a
+        // caller's own header would, rather than being appended afterwards by a
+        // different route.
+        #[cfg(feature = "validator-store")]
+        if let Some(validators) = &self.inner.validators {
+            validators.condition(url, request);
+        }
+
         let ordered = self.apply_headers(request, url, options)?;
 
         let outgoing = outgoing_request(request, url, protocol, body, ordered)?;
@@ -607,6 +636,11 @@ impl Engine {
         timings.record_head();
 
         self.record_response(url, &response);
+
+        #[cfg(feature = "validator-store")]
+        if let Some(validators) = &self.inner.validators {
+            validators.observe(url, request.method(), &response);
+        }
         Ok(response)
     }
 

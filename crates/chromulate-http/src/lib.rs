@@ -81,3 +81,11 @@ pub use redirect::{CREDENTIAL_HEADERS, crosses_origin, is_redirect, method_after
 pub use time::{Clock, Sleeper, SystemClock, TimeSource, TokioSleeper};
 #[cfg(feature = "validator-store")]
 pub use validators::{DEFAULT_URL_CAPACITY, ValidatorStore, Validators};
+
+/// The cache this engine drives, re-exported so a caller enabling the `cache`
+/// feature does not have to name `chromulate-cache` in their own manifest.
+///
+/// Read its documentation before turning the feature on: it lists what of
+/// RFC 9111 it deliberately does not implement.
+#[cfg(feature = "cache")]
+pub use chromulate_cache::{CacheConfig, CacheStatus, CacheStorage, HttpCache, MemoryStore};

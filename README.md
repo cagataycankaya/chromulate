@@ -160,7 +160,7 @@ repository; the measured claims behind the fidelity rows are in
 |---|---|
 | HTTP/1.1 and HTTP/2 | Yes, chosen by ALPN, with connection pooling for both |
 | TLS 1.2 and 1.3 | Yes, over `rustls` with the platform trust store |
-| HTTP/3 and QUIC | **No.** Not implemented; Chrome upgrades where an origin offers it and this does not |
+| HTTP/3 and QUIC | **Assessed, not shipped.** `Alt-Svc` parsing and an alternative-service cache exist in `chromulate-h3`, which is how a client learns an origin offers HTTP/3. QUIC itself is behind the non-default `quic-spike` feature and is a measurement, not a product: a real HTTP/3 request succeeds, but the handshake omits five extensions the Chrome capture carries, emits no GREASE, and its transport-parameter set cannot be shaped through `quinn`'s public API. Shipping it would mean claiming a protocol surface nobody has a capture to check — see [docs/architecture/04-http3-assessment.md](docs/architecture/04-http3-assessment.md) |
 | Connection pool keyed by profile identity | Yes — two profiles never share a connection, which is what stops a request being observed with another identity's fingerprint |
 | HSTS | Yes. Learned from responses, applied before the request leaves; a header arriving over cleartext is ignored |
 | HSTS preload list | Yes, behind the off-by-default `hsts-preload` feature: Chromium's complete list, 94,628 entries, which protects the first request to an origin. Off by default because it grows a release binary by 1,766,656 bytes (measured) |
@@ -197,6 +197,10 @@ repository; the measured claims behind the fidelity rows are in
 | Middleware | Yes — a `Middleware`/`Next` chain, plus six other extension seams |
 | `basic_auth` / `bearer_auth` | Yes, marked sensitive so credentials stay out of logs |
 | JSON, form and query helpers | Yes |
+| `multipart/form-data` | Yes, behind the off-by-default `multipart` feature, and streaming: a `Part::file` goes from disk to socket without being buffered. The encoding follows a recorded capture of Chrome 151 rather than RFC 7578 alone, and the boundary is verified absent from every buffered part before use |
+| HTTP cache (RFC 9111) | Yes, behind the off-by-default `cache` feature, in the `chromulate-cache` crate: storability, freshness, `ETag`/`Last-Modified` revalidation, `Vary` selection, invalidation on unsafe methods. What it deliberately omits — stale-while-revalidate, shared-cache semantics, ranges, `HEAD`, persistence — is listed in the crate's own documentation |
+| Conditional revalidation for scrapers | Yes, behind the off-by-default `validator-store` feature. Remembers `ETag`/`Last-Modified` per URL and replays them *regardless of whether the response was storable*. **This is deliberately not browser behaviour** and is a scraping tool, not a fidelity feature |
+| Early body abandonment | Yes: `Response::bytes_until` stops on a byte marker, a predicate, or a budget, and reports which. On HTTP/2 the stream is reset and the pooled connection survives; on HTTP/1.1 the connection is discarded, which is required for correctness |
 | Multipart bodies | No. Planned |
 | HTTP cache (RFC 9111) | No. Deliberately deferred — the middleware seam supports it when someone needs it |
 | WebSockets | No, and not planned here |
