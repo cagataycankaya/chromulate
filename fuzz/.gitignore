@@ -1,0 +1,11 @@
+# Sanitizer build output.
+/target
+# libFuzzer's own working state. Crash and timeout artefacts are reproduction
+# cases: when one appears, commit it as a regression seed under `corpus/`
+# rather than leaving it here.
+/artifacts
+/coverage
+# The lock file is not committed: `fuzz` is excluded from the workspace, so this
+# would be a second lock file describing the same dependency graph, drifting
+# from `Cargo.lock` without anything checking that it had.
+Cargo.lock
