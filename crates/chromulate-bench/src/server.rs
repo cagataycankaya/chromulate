@@ -217,6 +217,17 @@ pub fn start_many(count: usize, worker_threads: usize) -> io::Result<Origins> {
     })
 }
 
+/// The same routes, reachable from the HTTPS origin in [`crate::tls_server`].
+///
+/// Sharing one route table is what makes the plaintext and TLS figures
+/// comparable: any difference between them is the protocol stack, not two
+/// servers doing different work.
+pub(crate) async fn route_public(
+    request: Request<Incoming>,
+) -> Result<Response<ServerBody>, Infallible> {
+    route(request).await
+}
+
 async fn route(request: Request<Incoming>) -> Result<Response<ServerBody>, Infallible> {
     let path = request.uri().path().to_owned();
 

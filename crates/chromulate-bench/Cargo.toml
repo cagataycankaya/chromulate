@@ -21,14 +21,24 @@ bytes.workspace = true
 futures-util.workspace = true
 http.workspace = true
 http-body-util.workspace = true
-hyper = { workspace = true, features = ["server", "http1"] }
+hyper = { workspace = true, features = ["server", "http1", "http2"] }
 hyper-util = { workspace = true, features = ["tokio"] }
 reqwest.workspace = true
 tokio = { workspace = true, features = ["full"] }
 url.workspace = true
 
+# Only the TLS origin needs these, and only under the `live` feature.
+rcgen = { version = "0.14", optional = true }
+rustls = { workspace = true, optional = true }
+rustls-pki-types = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+
 [[bin]]
 name = "live"
+required-features = ["live"]
+
+[[bin]]
+name = "tlsbench"
 required-features = ["live"]
 
 [features]
@@ -41,6 +51,10 @@ required-features = ["live"]
 # a `reqwest` with no TLS stack at all. Run those **without** this feature, or
 # their figures are not comparable with the ones in `docs/performance.md`.
 live = [
+    "dep:rcgen",
+    "dep:rustls",
+    "dep:rustls-pki-types",
+    "dep:tokio-rustls",
     "reqwest/rustls",
     "reqwest/http2",
     "reqwest/charset",

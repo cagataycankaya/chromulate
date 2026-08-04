@@ -14,6 +14,8 @@
 
 pub mod server;
 pub mod stats;
+#[cfg(feature = "live")]
+pub mod tls_server;
 
 use std::process;
 
