@@ -88,7 +88,21 @@ enum Slot {
     /// A completed resolution, valid until `expires_at`.
     Cached {
         outcome: Arc<CacheOutcome>,
-        expires_at: Instant,
+        /// When this entry stops being valid, or [`None`] for one that never
+        /// does.
+        ///
+        /// [`None`] is what a TTL too large to add to the current instant
+        /// becomes. `Instant + Duration` panics on overflow, and the TTLs are
+        /// caller-supplied through a public constructor that validates nothing,
+        /// so the addition has to be checked. Unlike the same fix in
+        /// `chromulate-http`'s HSTS store, there is no far-future constant to
+        /// saturate to: `SystemTime` has an epoch to count from, `Instant` does
+        /// not, and the largest representable one is a platform detail this
+        /// crate cannot name. So the fallback is stated in the type rather than
+        /// approximated by a number. It loses nothing — a caller asking for a
+        /// TTL of centuries is asking for an entry that outlives the process,
+        /// and an entry that never expires is exactly that.
+        expires_at: Option<Instant>,
     },
 }
 
@@ -145,7 +159,10 @@ impl Cache {
             target,
             Slot::Cached {
                 outcome: Arc::clone(outcome),
-                expires_at: now + ttl,
+                // A zero TTL still yields `Some(now)`, which no later `now`
+                // compares as unexpired, so passing zero keeps disabling the
+                // cache rather than turning it on forever.
+                expires_at: now.checked_add(ttl),
             },
         );
         sweep(&mut slots, now);
@@ -155,7 +172,7 @@ impl Cache {
 /// Drops expired entries, and in-flight markers whose lookup has gone away.
 fn sweep(slots: &mut Slots, now: Instant) {
     slots.entries.retain(|_, slot| match slot {
-        Slot::Cached { expires_at, .. } => *expires_at > now,
+        Slot::Cached { expires_at, .. } => expires_at.is_none_or(|at| at > now),
         Slot::InFlight(weak) => weak.upgrade().is_some(),
     });
     slots.sweep_at = slots.entries.len().saturating_mul(2).max(MIN_SWEEP_SIZE);
@@ -196,6 +213,16 @@ impl<R: Resolve> CachingResolver<R> {
     }
 
     /// Wraps `inner` with the given positive and negative TTLs.
+    ///
+    /// Both are taken as given rather than clamped to some ceiling, which is a
+    /// deliberate difference from how `chromulate-http`'s rate limiter
+    /// sanitises its input. That clamp exists because a rate of zero is not a
+    /// slow rate, it is not a rate at all, and the code downstream divides by
+    /// it. A TTL of a thousand years is not nonsense in the same way: it is a
+    /// caller saying "hold this until I exit", which is a coherent thing to
+    /// want. Computing an entry's expiry is total over every [`Duration`], so
+    /// there is nothing left for a ceiling to protect — and a ceiling would
+    /// quietly answer a different question than the one the caller asked.
     pub fn new(inner: R, positive_ttl: Duration, negative_ttl: Duration) -> Self {
         Self::with_clock(inner, positive_ttl, negative_ttl, Arc::new(SystemClock))
     }
@@ -246,7 +273,9 @@ impl<R: Resolve> CachingResolver<R> {
                 Some(Slot::Cached {
                     outcome,
                     expires_at,
-                }) if *expires_at > now => Some(Action::UseCached(Arc::clone(outcome))),
+                }) if expires_at.is_none_or(|at| at > now) => {
+                    Some(Action::UseCached(Arc::clone(outcome)))
+                }
                 // An in-flight marker that no longer upgrades belonged to a
                 // lookup every caller abandoned, so it decides nothing here.
                 Some(Slot::InFlight(weak)) => weak.upgrade().map(Action::Await),
@@ -643,6 +672,119 @@ mod tests {
             .expect("an abandoned lookup must not decide the next caller's answer");
         assert_eq!(addrs, vec![addr()]);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    /// The reproduction, written against the constructor a caller actually
+    /// reaches for: `CachingResolver::new` validates nothing, so the TTL it is
+    /// handed lands in the expiry arithmetic unchanged. It runs on the real
+    /// clock deliberately — `Instant::now()` is what the panicking addition
+    /// used as its left-hand side.
+    #[tokio::test]
+    async fn an_unrepresentable_positive_ttl_does_not_panic_on_the_first_resolution() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(Semaphore::new(1_000));
+        let inner = CountingResolver {
+            calls: Arc::clone(&calls),
+            gate,
+            result: Ok(vec![addr()]),
+        };
+        let resolver = CachingResolver::new(inner, Duration::MAX, Duration::from_secs(5));
+
+        let addrs = resolver
+            .resolve(HostPort::new("example.com", 443))
+            .await
+            .expect("a resolution must not be taken down by the TTL it is cached under");
+        assert_eq!(addrs, vec![addr()]);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// The same for the negative TTL, which is settled by a different arm of the
+    /// same match and would be missed by a success-only test.
+    #[tokio::test]
+    async fn an_unrepresentable_negative_ttl_does_not_panic_on_the_first_failure() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(Semaphore::new(1_000));
+        let inner = CountingResolver {
+            calls: Arc::clone(&calls),
+            gate,
+            result: Err("no such host".to_string()),
+        };
+        let resolver = CachingResolver::new(inner, Duration::from_secs(60), Duration::MAX);
+
+        resolver
+            .resolve(HostPort::new("missing.example", 443))
+            .await
+            .expect_err("the lookup fails, but caching the failure must not panic");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// The other end of the range, and the one the checked addition could most
+    /// easily have broken: `None` has to mean "never expires" without zero
+    /// accidentally joining it, since both are edges of the same conversion.
+    #[tokio::test]
+    async fn a_zero_ttl_still_disables_the_cache() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(Semaphore::new(1_000));
+        let inner = CountingResolver {
+            calls: Arc::clone(&calls),
+            gate,
+            result: Ok(vec![addr()]),
+        };
+        let clock = FakeClock::new();
+        let resolver =
+            CachingResolver::with_clock(inner, Duration::ZERO, Duration::ZERO, clock.clone());
+        let target = HostPort::new("example.com", 443);
+
+        // The clock never advances, so nothing but a zero TTL can expire this.
+        for _ in 0..3 {
+            resolver
+                .resolve(target.clone())
+                .await
+                .expect("every lookup should succeed");
+        }
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "a zero TTL must re-resolve every time"
+        );
+    }
+
+    /// A TTL too large to represent means "cache this for as long as I am
+    /// running", so the entry has to survive an arbitrarily long wait rather
+    /// than merely not panic.
+    #[tokio::test]
+    async fn an_unrepresentable_ttl_caches_for_as_long_as_the_process_lives() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(Semaphore::new(1_000));
+        let inner = CountingResolver {
+            calls: Arc::clone(&calls),
+            gate,
+            result: Ok(vec![addr()]),
+        };
+        let clock = FakeClock::new();
+        let resolver = CachingResolver::with_clock(
+            inner,
+            Duration::MAX,
+            Duration::from_secs(5),
+            clock.clone(),
+        );
+        let target = HostPort::new("example.com", 443);
+
+        resolver
+            .resolve(target.clone())
+            .await
+            .expect("first lookup should succeed");
+
+        clock.advance(Duration::from_secs(100 * 365 * 24 * 60 * 60));
+        resolver
+            .resolve(target)
+            .await
+            .expect("lookup a century later should still be served from the cache");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "an expiry too distant to represent must never come due"
+        );
     }
 
     #[tokio::test]
