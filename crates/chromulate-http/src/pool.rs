@@ -241,6 +241,11 @@ struct PoolState {
     /// HTTP/2 connections, which stay in the map while in use because they are
     /// multiplexed.
     multiplexed: HashMap<PoolKey, Connection>,
+    /// Entries across both maps, kept in step by every insert and remove, so
+    /// asking whether the pool is full does not walk it.
+    held: usize,
+    /// When the last full expiry sweep ran; see [`Pool::sweep_if_due`].
+    last_sweep: Instant,
 }
 
 impl Pool {
@@ -251,6 +256,8 @@ impl Pool {
             inner: Arc::new(Mutex::new(PoolState {
                 idle: HashMap::new(),
                 multiplexed: HashMap::new(),
+                held: 0,
+                last_sweep: Instant::now(),
             })),
             config,
         }
@@ -277,7 +284,8 @@ impl Pool {
     /// multiplexes. An HTTP/1.1 connection is removed and must be returned with
     /// [`Pool::release`] once the response body is finished with.
     pub(crate) fn checkout(&self, key: &PoolKey) -> Option<Connection> {
-        let mut state = self.lock();
+        let mut guard = self.lock();
+        let state = &mut *guard;
 
         if let Some(shared) = state.multiplexed.get(key) {
             if shared.is_usable() {
@@ -286,6 +294,7 @@ impl Pool {
                 }
             } else {
                 state.multiplexed.remove(key);
+                state.held -= 1;
             }
         }
 
@@ -293,6 +302,7 @@ impl Pool {
         let idle_timeout = self.config.idle_timeout;
         let entries = state.idle.get_mut(key)?;
         while let Some(entry) = entries.pop() {
+            state.held -= 1;
             if now.duration_since(entry.since) < idle_timeout && entry.connection.is_usable() {
                 return Some(entry.connection);
             }
@@ -311,37 +321,50 @@ impl Pool {
         if !connection.is_usable() {
             return;
         }
-        let mut state = self.lock();
+        let mut guard = self.lock();
+        let state = &mut *guard;
 
         if matches!(connection, Connection::Http2(_)) {
             match state.multiplexed.get(key) {
                 Some(existing) if existing.is_usable() => {}
                 _ => {
-                    state.multiplexed.insert(key.clone(), connection);
+                    if state.multiplexed.insert(key.clone(), connection).is_none() {
+                        state.held += 1;
+                    }
                 }
             }
             return;
         }
 
-        Self::evict_expired(&mut state, self.config.idle_timeout);
-        if Self::count(&state) >= self.config.max_total {
-            Self::evict_oldest(&mut state);
+        self.sweep_if_due(state);
+        if state.held >= self.config.max_total {
+            // The globally oldest entry is also the first to expire, so the
+            // at-cap path does not need a separate expiry sweep.
+            Self::evict_oldest(state);
         }
 
         let entries = state.idle.entry(key.clone()).or_default();
         if entries.len() >= self.config.max_per_host {
+            // Bounded by `max_per_host`, so this stays O(one bucket) rather
+            // than O(pool).
             entries.remove(0);
+            state.held -= 1;
         }
         entries.push(Idle {
             connection,
             since: Instant::now(),
         });
+        state.held += 1;
     }
 
     /// The number of connections currently held.
+    ///
+    /// Counts what the maps hold, which between sweeps can include entries
+    /// that have already outlived the idle timeout; they are discarded the
+    /// next time their key is checked out or a sweep runs.
     #[must_use]
     pub fn len(&self) -> usize {
-        Self::count(&self.lock())
+        self.lock().held
     }
 
     /// Whether the pool holds nothing.
@@ -355,23 +378,40 @@ impl Pool {
         let mut state = self.lock();
         state.idle.clear();
         state.multiplexed.clear();
+        state.held = 0;
     }
 
-    fn count(state: &PoolState) -> usize {
-        state.idle.values().map(Vec::len).sum::<usize>() + state.multiplexed.len()
+    /// Runs a full expiry sweep at most once per quarter of the idle timeout.
+    ///
+    /// The sweep walks every entry in the pool, and doing that on every
+    /// release put the whole pool behind one O(pool) scan per request. Expiry
+    /// does not need that freshness: an expired entry is already rejected at
+    /// checkout, and the at-cap path evicts oldest-first, so the sweep's only
+    /// job is to stop long-idle keys nobody checks out from holding sockets —
+    /// a quarter of the timeout bounds that overstay.
+    fn sweep_if_due(&self, state: &mut PoolState) {
+        let now = Instant::now();
+        if now.duration_since(state.last_sweep) < self.config.idle_timeout / 4 {
+            return;
+        }
+        state.last_sweep = now;
+        Self::evict_expired(state, self.config.idle_timeout);
     }
 
     fn evict_expired(state: &mut PoolState, idle_timeout: Duration) {
         let now = Instant::now();
+        let mut kept = 0;
         state.idle.retain(|_, entries| {
             entries.retain(|entry| {
                 now.duration_since(entry.since) < idle_timeout && entry.connection.is_usable()
             });
+            kept += entries.len();
             !entries.is_empty()
         });
         state
             .multiplexed
             .retain(|_, connection| connection.is_usable());
+        state.held = kept + state.multiplexed.len();
     }
 
     /// Drops the connection that has been idle longest, so that reaching the
@@ -393,6 +433,7 @@ impl Pool {
             && let Some(entries) = state.idle.get_mut(&key)
         {
             entries.remove(index);
+            state.held -= 1;
             if entries.is_empty() {
                 state.idle.remove(&key);
             }
@@ -407,7 +448,7 @@ impl fmt::Debug for Pool {
             .field("config", &self.config)
             .field("idle_keys", &state.idle.len())
             .field("multiplexed_keys", &state.multiplexed.len())
-            .field("connections", &Self::count(&state))
+            .field("connections", &state.held)
             .finish()
     }
 }
@@ -490,6 +531,117 @@ mod tests {
         let key = key_for(&Profile::chrome_stable(), "example.com", Protocol::Http11);
         assert!(pool.checkout(&key).is_none());
         assert!(pool.is_empty());
+    }
+
+    /// A live HTTP/1.1 connection over an in-memory duplex pipe. The server
+    /// half is returned so the test controls when the connection dies: hyper
+    /// reports a sender closed once its peer is gone.
+    async fn h1_connection() -> (Connection, tokio::io::DuplexStream) {
+        let (client, server) = tokio::io::duplex(1024);
+        let (sender, driver) = http1::Builder::new()
+            .handshake::<_, Body>(hyper_util::rt::TokioIo::new(client))
+            .await
+            .expect("an in-memory handshake succeeds");
+        tokio::spawn(driver);
+        (Connection::Http1(sender), server)
+    }
+
+    fn small_pool(max_per_host: usize, max_total: usize, idle_timeout: Duration) -> Pool {
+        Pool::new(PoolConfig {
+            idle_timeout,
+            max_per_host,
+            max_total,
+        })
+    }
+
+    #[tokio::test]
+    async fn len_tracks_releases_and_checkouts() {
+        let pool = small_pool(6, 100, Duration::from_secs(90));
+        let profile = Profile::chrome_stable();
+        let key_a = key_for(&profile, "a.example", Protocol::Http11);
+        let key_b = key_for(&profile, "b.example", Protocol::Http11);
+
+        let (first, _first_io) = h1_connection().await;
+        let (second, _second_io) = h1_connection().await;
+        let (third, _third_io) = h1_connection().await;
+        pool.release(&key_a, first);
+        pool.release(&key_a, second);
+        pool.release(&key_b, third);
+        assert_eq!(pool.len(), 3);
+
+        let taken = pool
+            .checkout(&key_a)
+            .expect("a pooled connection comes back");
+        assert_eq!(pool.len(), 2);
+
+        pool.release(&key_a, taken);
+        assert_eq!(pool.len(), 3);
+
+        pool.clear();
+        assert!(pool.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_total_cap_is_enforced_on_every_release() {
+        let pool = small_pool(10, 2, Duration::from_secs(90));
+        let profile = Profile::chrome_stable();
+
+        let mut io_keepalive = Vec::new();
+        for host in ["a.example", "b.example", "c.example", "d.example"] {
+            let (connection, io) = h1_connection().await;
+            io_keepalive.push(io);
+            pool.release(&key_for(&profile, host, Protocol::Http11), connection);
+            assert!(
+                pool.len() <= 2,
+                "after releasing for {host} the pool holds {}",
+                pool.len()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_per_host_cap_keeps_the_newest_connection() {
+        let pool = small_pool(1, 100, Duration::from_secs(90));
+        let profile = Profile::chrome_stable();
+        let key = key_for(&profile, "a.example", Protocol::Http11);
+
+        let (first, _first_io) = h1_connection().await;
+        let (second, _second_io) = h1_connection().await;
+        pool.release(&key, first);
+        pool.release(&key, second);
+        assert_eq!(pool.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_dead_connection_is_not_pooled() {
+        let pool = small_pool(6, 100, Duration::from_secs(90));
+        let profile = Profile::chrome_stable();
+        let key = key_for(&profile, "a.example", Protocol::Http11);
+
+        let (connection, server_io) = h1_connection().await;
+        drop(server_io);
+        // The driver needs a poll to observe the closed pipe.
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        pool.release(&key, connection);
+        assert!(pool.is_empty(), "a closed connection must not be pooled");
+    }
+
+    #[tokio::test]
+    async fn an_expired_entry_is_not_handed_back() {
+        let pool = small_pool(6, 100, Duration::from_millis(10));
+        let profile = Profile::chrome_stable();
+        let key = key_for(&profile, "a.example", Protocol::Http11);
+
+        let (connection, _io) = h1_connection().await;
+        pool.release(&key, connection);
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        assert!(
+            pool.checkout(&key).is_none(),
+            "an entry older than the idle timeout must not be reused"
+        );
     }
 
     #[test]
