@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -53,8 +54,15 @@ impl Protocol {
 /// handshake (JA4), the HTTP/2 preface (the Akamai fingerprint), and the
 /// `User-Agent`. A profile that differs in any of them is a different client on
 /// the wire and must not be served from another profile's connection.
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct ConnectionIdentity(Arc<str>);
+#[derive(Clone)]
+pub struct ConnectionIdentity {
+    text: Arc<str>,
+    /// The content's hash, computed once at construction. A pool probe hashes
+    /// the key two to three times per request, and the identity string —
+    /// dominated by the user agent — is around 200 bytes; writing a cached
+    /// word instead keeps that off the request path.
+    content_hash: u64,
+}
 
 impl ConnectionIdentity {
     /// Computes the identity of a profile.
@@ -63,27 +71,47 @@ impl ConnectionIdentity {
     /// whole ClientHello specification by way of the JA4 computation.
     #[must_use]
     pub fn of(profile: &Profile) -> Self {
-        Self(
-            format!(
-                "{}|{}|{}",
-                profile.ja4(),
-                profile.akamai_http2(),
-                profile.user_agent
-            )
-            .into(),
+        let text: Arc<str> = format!(
+            "{}|{}|{}",
+            profile.ja4(),
+            profile.akamai_http2(),
+            profile.user_agent
         )
+        .into();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        Self {
+            content_hash: hasher.finish(),
+            text,
+        }
     }
 
     /// The identity as a string, for logs and tests.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.text
+    }
+}
+
+impl PartialEq for ConnectionIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        // The hash first: two different identities almost always part ways on
+        // one word instead of a 200-byte string compare.
+        self.content_hash == other.content_hash && self.text == other.text
+    }
+}
+
+impl Eq for ConnectionIdentity {}
+
+impl Hash for ConnectionIdentity {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.content_hash);
     }
 }
 
 impl fmt::Debug for ConnectionIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ConnectionIdentity({})", self.0)
+        write!(f, "ConnectionIdentity({})", self.text)
     }
 }
 
@@ -124,7 +152,12 @@ impl fmt::Display for PoolKey {
         if let Some(proxy) = &self.proxy {
             write!(f, " via {proxy}")?;
         }
-        write!(f, " [{} {}]", self.protocol.as_str(), self.identity.0)
+        write!(
+            f,
+            " [{} {}]",
+            self.protocol.as_str(),
+            self.identity.as_str()
+        )
     }
 }
 

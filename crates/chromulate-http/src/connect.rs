@@ -167,18 +167,28 @@ impl Connector {
     /// HTTP/2 comes first because a browser holding an h2 connection to an
     /// origin reuses it rather than opening a second one.
     pub(crate) fn candidate_keys(&self, route: &Route) -> Vec<PoolKey> {
-        let template = |protocol| PoolKey {
+        let preferred = PoolKey {
             scheme: route.origin.scheme().into(),
             host: route.origin.host().into(),
             port: route.origin.port(),
             proxy: route.label.clone(),
             identity: self.identity.clone(),
-            protocol,
+            protocol: if route.origin.is_secure() {
+                Protocol::Http2
+            } else {
+                Protocol::Http11
+            },
         };
         if route.origin.is_secure() {
-            vec![template(Protocol::Http2), template(Protocol::Http11)]
+            // Every field but the protocol is shared, so the fallback key
+            // clones reference counts rather than copying the strings again.
+            let fallback = PoolKey {
+                protocol: Protocol::Http11,
+                ..preferred.clone()
+            };
+            vec![preferred, fallback]
         } else {
-            vec![template(Protocol::Http11)]
+            vec![preferred]
         }
     }
 
