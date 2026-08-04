@@ -3,19 +3,26 @@
 //!
 //! See the crate documentation for why the authoritative result is a `Vec`
 //! rather than the request's own `HeaderMap`.
+//!
+//! Everything about a profile that does not change between requests — the
+//! parsed header names, the constant values, the invalid-value diagnostics —
+//! is computed once, when the engine is built. `apply` only resolves the
+//! handful of values that genuinely depend on the request: `host`, `origin`,
+//! `referer`, the `sec-fetch-*` family, and granted client hints.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use chromulate_core::{Error, FetchMode, Origin, Request, RequestOptions, Result, referrer_for};
 use chromulate_profile::Profile;
 use http::{HeaderName, HeaderValue, Method, Version};
 use url::Url;
 
-use crate::accept::accept_for;
+use crate::accept::accept_fallback;
 use crate::client_hints::{AcceptChStore, HighEntropyHint, HighEntropyHints};
 use crate::fetch_site::FetchSite;
-use crate::order::{contains, insert_after, insert_before};
+use crate::order::{Named, contains, insert_after, insert_before};
 use crate::priority::priority_for;
 
 /// Marks a navigation as caused by a direct user activation — a clicked
@@ -37,6 +44,7 @@ pub struct UserActivatedNavigation;
 pub struct HeaderEngine {
     profile: Arc<Profile>,
     high_entropy: HighEntropyHints,
+    prepared: Prepared,
 }
 
 impl HeaderEngine {
@@ -47,9 +55,11 @@ impl HeaderEngine {
     /// records them.
     #[must_use]
     pub fn new(profile: Arc<Profile>) -> Self {
+        let prepared = Prepared::build(&profile, &HighEntropyHints::default());
         Self {
             profile,
             high_entropy: HighEntropyHints::default(),
+            prepared,
         }
     }
 
@@ -58,6 +68,7 @@ impl HeaderEngine {
     #[must_use]
     pub fn with_high_entropy_hints(mut self, hints: HighEntropyHints) -> Self {
         self.high_entropy = hints;
+        self.prepared = Prepared::build(&self.profile, &self.high_entropy);
         self
     }
 
@@ -99,13 +110,19 @@ impl HeaderEngine {
         let method = request.method().clone();
         let fetch_site = FetchSite::compute(options.initiator.as_ref(), &target);
         let origin_header =
-            origin_header_value(options.mode, &method, options.initiator.as_ref(), &target);
+            origin_header_value(options.mode, &method, options.initiator.as_ref(), &target)
+                .map(|value| request_value("origin", value))
+                .transpose()?;
         let referer = options
             .referrer
             .as_ref()
-            .and_then(|from| referrer_for(from, url));
+            .and_then(|from| referrer_for(from, url))
+            .map(|value| request_value("referer", value))
+            .transpose()?;
         let host_value = if needs_host(request.version()) {
             host_header_value(url)
+                .map(|value| request_value("host", value))
+                .transpose()?
         } else {
             None
         };
@@ -114,18 +131,20 @@ impl HeaderEngine {
             .get::<UserActivatedNavigation>()
             .is_some();
         let granted = accept_ch.granted_for(&target);
-        let granted_order: Vec<HighEntropyHint> = HighEntropyHint::ALL_IN_EMIT_ORDER
-            .into_iter()
-            .filter(|hint| granted.contains(hint))
-            .collect();
 
+        let base = if options.mode == FetchMode::Navigate {
+            &self.prepared.navigate
+        } else {
+            &self.prepared.subresource
+        };
         let order = build_order(
-            self.navigate_order(options.mode),
+            base,
+            &self.prepared,
             host_value.is_some(),
             origin_header.is_some(),
             referer.is_some(),
             user_activated,
-            &granted_order,
+            &granted,
         );
 
         let ctx = Ctx {
@@ -138,45 +157,41 @@ impl HeaderEngine {
             granted,
         };
 
-        let caller_headers = request.headers().clone();
-        let mut known_names = HashSet::with_capacity(order.len());
-        let mut result = Vec::with_capacity(order.len());
+        let caller_headers = std::mem::take(request.headers_mut());
+        let headers = request.headers_mut();
+        headers.reserve(order.len() + caller_headers.len());
+        let mut result = Vec::with_capacity(order.len() + caller_headers.len());
 
-        for name in &order {
-            let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) else {
-                continue;
-            };
+        for (position, slot) in order.iter().enumerate() {
             // `build_order` keeps a name out of the order when the capture
             // already places it, but a capture that lists one twice would
             // still reach here twice, and this loop walks positionally.
-            if !known_names.insert(header_name.clone()) {
+            if order[..position]
+                .iter()
+                .any(|earlier| earlier.header_name == slot.header_name)
+            {
                 continue;
             }
 
-            let mut caller_values = caller_headers.get_all(&header_name).into_iter();
+            let mut caller_values = caller_headers.get_all(&slot.header_name).into_iter();
             if let Some(first) = caller_values.next() {
                 // The caller wins over the profile, in the profile's slot —
                 // for every value they supplied, not just the first.
-                request
-                    .headers_mut()
-                    .insert(header_name.clone(), first.clone());
-                result.push((header_name.clone(), first.clone()));
+                headers.insert(slot.header_name.clone(), first.clone());
+                result.push((slot.header_name.clone(), first.clone()));
                 for extra in caller_values {
-                    request
-                        .headers_mut()
-                        .append(header_name.clone(), extra.clone());
-                    result.push((header_name.clone(), extra.clone()));
+                    headers.append(slot.header_name.clone(), extra.clone());
+                    result.push((slot.header_name.clone(), extra.clone()));
                 }
-            } else if let Some(value) = self.engine_value(name, &ctx)? {
-                request
-                    .headers_mut()
-                    .insert(header_name.clone(), value.clone());
-                result.push((header_name, value));
+            } else if let Some(value) = self.slot_value(slot, &ctx)? {
+                headers.insert(slot.header_name.clone(), value.clone());
+                result.push((slot.header_name.clone(), value));
             }
         }
 
         for (name, value) in &caller_headers {
-            if !known_names.contains(name) {
+            if !order.iter().any(|slot| slot.header_name == *name) {
+                headers.append(name.clone(), value.clone());
                 result.push((name.clone(), value.clone()));
             }
         }
@@ -184,107 +199,314 @@ impl HeaderEngine {
         Ok(result)
     }
 
-    /// The header order to start from.
-    ///
-    /// Navigations use the captured navigation order directly — this is the
-    /// one order `chrome-151-macos.json` actually observed. Everything else
-    /// falls back to that same order through
-    /// `chromulate_profile::HeaderOrder::subresource_or_navigate`, because
-    /// the capture only exercised a navigation and recorded no subresource
-    /// order at all. That fallback is **derived, not observed**: it is a
-    /// placeholder built from the one order this crate has, not a claim
-    /// that a real subresource fetch orders its headers the same way. See
-    /// the crate's report for this as a tracked gap.
-    fn navigate_order(&self, mode: FetchMode) -> &[String] {
-        if mode == FetchMode::Navigate {
-            &self.profile.header_order.navigate
-        } else {
-            self.profile.header_order.subresource_or_navigate()
-        }
-    }
-
-    /// Computes the value this engine would send for `name`.
-    ///
-    /// `Ok(None)` means the header does not apply to this request. An error
-    /// means the profile carries a value the `http` crate cannot encode —
-    /// a control character transcribed into a capture, say. Those two used to
-    /// be the same answer, so an unencodable `user-agent` simply vanished
-    /// from the wire order with nothing raised and nothing logged; the
-    /// loudest fidelity break this crate can have, delivered silently.
+    /// Resolves the value a slot contributes to this request, or `None` when
+    /// the header does not apply.
     ///
     /// # Errors
     ///
-    /// Returns [`chromulate_core::Error::Config`] naming `name` when the
-    /// computed value is not a valid header value.
-    fn engine_value(&self, name: &str, ctx: &Ctx<'_>) -> Result<Option<HeaderValue>> {
-        let Some(value) = self.engine_value_string(name, ctx) else {
-            return Ok(None);
-        };
-        HeaderValue::from_str(&value).map(Some).map_err(|_| {
-            Error::config(format!(
-                "the profile's value for header `{name}` is not a valid HTTP header value: {value:?}"
-            ))
+    /// Returns [`chromulate_core::Error::Config`] naming the header when the
+    /// profile's value for it could not be encoded — the loudest fidelity
+    /// break this crate can have, reported rather than silently dropped.
+    fn slot_value(&self, slot: &Slot, ctx: &Ctx<'_>) -> Result<Option<HeaderValue>> {
+        match &slot.value {
+            SlotValue::Constant(value) => Ok(Some(value.clone())),
+            SlotValue::Absent => Ok(None),
+            SlotValue::Invalid(value) => Err(invalid_value_error(&slot.name, value)),
+            SlotValue::Dynamic(dynamic) => self.dynamic_value(*dynamic, ctx),
+        }
+    }
+
+    /// Resolves a value that depends on the request rather than the profile.
+    fn dynamic_value(&self, dynamic: DynamicValue, ctx: &Ctx<'_>) -> Result<Option<HeaderValue>> {
+        Ok(match dynamic {
+            DynamicValue::Accept => Some(self.accept_value(ctx)?),
+            DynamicValue::SecFetchSite => Some(HeaderValue::from_static(ctx.fetch_site.as_str())),
+            DynamicValue::SecFetchMode => Some(HeaderValue::from_static(ctx.options.mode.as_str())),
+            DynamicValue::SecFetchDest => Some(HeaderValue::from_static(ctx.options.dest.as_str())),
+            DynamicValue::SecFetchUser => {
+                ctx.user_activated.then(|| HeaderValue::from_static("?1"))
+            }
+            DynamicValue::UpgradeInsecureRequests => {
+                (ctx.options.mode == FetchMode::Navigate).then(|| HeaderValue::from_static("1"))
+            }
+            DynamicValue::Priority => {
+                Some(HeaderValue::from_static(priority_for(ctx.options.dest)))
+            }
+            DynamicValue::Referer => ctx.referer.clone(),
+            DynamicValue::Origin => ctx.origin_header.clone(),
+            DynamicValue::Host => ctx.host_value.clone(),
+            DynamicValue::Hint(hint) => {
+                if !ctx.granted.contains(&hint) {
+                    return Ok(None);
+                }
+                match self.prepared.hint_value(hint) {
+                    PreparedValue::Valid(value) => Some(value.clone()),
+                    PreparedValue::Invalid(value) => {
+                        return Err(invalid_value_error(hint.header_name(), value));
+                    }
+                    PreparedValue::Missing => None,
+                }
+            }
         })
     }
 
-    /// The unencoded value for `name`, or `None` when the header does not
-    /// apply to this request.
-    fn engine_value_string(&self, name: &str, ctx: &Ctx<'_>) -> Option<String> {
-        let value = match name {
-            // `Profile::sec_ch_ua` renders the GREASE brand entry
-            // (`"Not=A?Brand";v="99"` in the capture) verbatim from static
-            // profile data. This engine does not model whether Chrome
-            // varies that entry's separator characters or list position per
-            // request, per session, or per build — a single capture cannot
-            // show that, and inventing a permutation rule would be
-            // fabricating fingerprint data. Tracked as a gap in the crate's
-            // report.
-            "sec-ch-ua" => self.profile.sec_ch_ua(),
-            "sec-ch-ua-mobile" => self
-                .profile
-                .observed_headers
-                .get("sec-ch-ua-mobile")?
-                .clone(),
-            "sec-ch-ua-platform" => self.profile.sec_ch_ua_platform(),
-            "sec-ch-ua-platform-version" => {
-                self.high_entropy_value(HighEntropyHint::PlatformVersion, ctx)?
-            }
-            "sec-ch-ua-arch" => self.high_entropy_value(HighEntropyHint::Arch, ctx)?,
-            "sec-ch-ua-bitness" => self.high_entropy_value(HighEntropyHint::Bitness, ctx)?,
-            "sec-ch-ua-full-version-list" => {
-                self.high_entropy_value(HighEntropyHint::FullVersionList, ctx)?
-            }
-            "sec-ch-ua-model" => self.high_entropy_value(HighEntropyHint::Model, ctx)?,
-            "upgrade-insecure-requests" if ctx.options.mode == FetchMode::Navigate => {
-                "1".to_owned()
-            }
-            "upgrade-insecure-requests" => return None,
-            "user-agent" => self.profile.user_agent.clone(),
-            "accept" => accept_for(ctx.options.dest, &self.profile.accept),
-            "sec-fetch-site" => ctx.fetch_site.as_str().to_owned(),
-            "sec-fetch-mode" => ctx.options.mode.as_str().to_owned(),
-            "sec-fetch-user" if ctx.user_activated => "?1".to_owned(),
-            "sec-fetch-user" => return None,
-            "sec-fetch-dest" => ctx.options.dest.as_str().to_owned(),
-            "referer" => ctx.referer.clone()?,
-            "origin" => ctx.origin_header.clone()?,
-            "accept-encoding" => self.profile.accept_encoding.clone(),
-            "accept-language" => self.profile.accept_language.clone(),
-            "priority" => priority_for(ctx.options.dest).to_owned(),
-            "host" => ctx.host_value.clone()?,
-            _ => return None,
-        };
-        Some(value)
+    /// The `Accept` value for this request's destination.
+    ///
+    /// A document (or iframe) gets the profile's own captured value; every
+    /// other destination gets the uncaptured fallback from [`crate::accept`].
+    fn accept_value(&self, ctx: &Ctx<'_>) -> Result<HeaderValue> {
+        match accept_fallback(ctx.options.dest) {
+            Some(fallback) => Ok(HeaderValue::from_static(fallback)),
+            None => match &self.prepared.document_accept {
+                PreparedValue::Valid(value) => Ok(value.clone()),
+                PreparedValue::Invalid(value) => Err(invalid_value_error("accept", value)),
+                // `Prepared::build` always encodes the profile's `accept`
+                // into `Valid` or `Invalid`; `Missing` exists for hints.
+                PreparedValue::Missing => Err(invalid_value_error("accept", "")),
+            },
+        }
+    }
+}
+
+/// The error for a profile value the `http` crate cannot encode. Those used
+/// to be silently dropped, so an unencodable `user-agent` simply vanished
+/// from the wire order with nothing raised and nothing logged; the loudest
+/// fidelity break this crate can have, delivered silently.
+fn invalid_value_error(name: &str, value: &str) -> Error {
+    Error::config(format!(
+        "the profile's value for header `{name}` is not a valid HTTP header value: {value:?}"
+    ))
+}
+
+/// Encodes a per-request derived value — `host`, `origin`, `referer` —
+/// reusing the `String`'s own buffer rather than copying it.
+fn request_value(name: &str, value: String) -> Result<HeaderValue> {
+    HeaderValue::from_maybe_shared(Bytes::from(value.into_bytes())).map_err(|_| {
+        Error::config(format!(
+            "the computed value for header `{name}` is not a valid HTTP header value"
+        ))
+    })
+}
+
+/// Everything about the profile that `apply` would otherwise re-derive on
+/// every request: parsed names, constant values, and the two plans the
+/// profile's captured orders describe.
+#[derive(Debug, Clone)]
+struct Prepared {
+    /// The navigation order, one slot per captured name.
+    navigate: Vec<Slot>,
+    /// The subresource order, which for the shipped capture falls back to
+    /// the navigation order (see [`HeaderEngine`]'s order documentation).
+    subresource: Vec<Slot>,
+    /// `host`, inserted at the front when HTTP/1.x needs it.
+    host: Slot,
+    /// `origin`, inserted before `sec-fetch-site` when the request carries one.
+    origin: Slot,
+    /// `referer`, inserted after `sec-fetch-dest` when the request carries one.
+    referer: Slot,
+    /// `sec-fetch-user`, inserted before `sec-fetch-dest` on user activation.
+    sec_fetch_user: Slot,
+    /// One slot per high-entropy hint, in emit order.
+    hints: Vec<Slot>,
+    /// The profile's captured `accept` value for a document navigation.
+    document_accept: PreparedValue,
+    /// Per-hint values, aligned with [`HighEntropyHint::ALL_IN_EMIT_ORDER`].
+    hint_values: Vec<PreparedValue>,
+}
+
+impl Prepared {
+    fn build(profile: &Profile, high_entropy: &HighEntropyHints) -> Self {
+        let navigate = plan_of(&profile.header_order.navigate, profile);
+        let subresource = plan_of(profile.header_order.subresource_or_navigate(), profile);
+        let hints = HighEntropyHint::ALL_IN_EMIT_ORDER
+            .into_iter()
+            .filter_map(|hint| {
+                slot(
+                    hint.header_name(),
+                    SlotValue::Dynamic(DynamicValue::Hint(hint)),
+                )
+            })
+            .collect();
+        let hint_values = HighEntropyHint::ALL_IN_EMIT_ORDER
+            .into_iter()
+            .map(|hint| match high_entropy.value_for(hint) {
+                Some(value) => prepared_value(value.to_owned()),
+                None => PreparedValue::Missing,
+            })
+            .collect();
+        Self {
+            navigate,
+            subresource,
+            host: known_slot("host", DynamicValue::Host),
+            origin: known_slot("origin", DynamicValue::Origin),
+            referer: known_slot("referer", DynamicValue::Referer),
+            sec_fetch_user: known_slot("sec-fetch-user", DynamicValue::SecFetchUser),
+            hints,
+            document_accept: prepared_value(profile.accept.clone()),
+            hint_values,
+        }
     }
 
-    /// The value for a high-entropy hint, if it has been granted by
-    /// `Accept-CH` for this origin and this profile has data for it.
-    fn high_entropy_value(&self, hint: HighEntropyHint, ctx: &Ctx<'_>) -> Option<String> {
-        if !ctx.granted.contains(&hint) {
-            return None;
-        }
-        self.high_entropy.value_for(hint).map(str::to_owned)
+    /// The prepared value for `hint`.
+    fn hint_value(&self, hint: HighEntropyHint) -> &PreparedValue {
+        let position = HighEntropyHint::ALL_IN_EMIT_ORDER
+            .into_iter()
+            .position(|candidate| candidate == hint)
+            .unwrap_or(0);
+        &self.hint_values[position]
     }
+}
+
+/// One name in a header order: its parsed form plus how its value is found.
+#[derive(Debug, Clone)]
+struct Slot {
+    /// The lowercase wire name, as the capture spells it.
+    name: Box<str>,
+    /// The name parsed once, so the request path never re-parses it.
+    header_name: HeaderName,
+    value: SlotValue,
+}
+
+impl Named for &Slot {
+    fn order_name(&self) -> &str {
+        &self.name
+    }
+}
+
+/// How a slot's value is produced.
+#[derive(Debug, Clone)]
+enum SlotValue {
+    /// A constant of the profile, encoded and promoted once.
+    Constant(HeaderValue),
+    /// Computed per request.
+    Dynamic(DynamicValue),
+    /// The profile carries a value the `http` crate cannot encode; emitting
+    /// this slot reports it. Kept for the diagnostic, not for the wire.
+    Invalid(String),
+    /// The engine has no value for this name; only a caller can supply one.
+    Absent,
+}
+
+/// A per-profile value that may be missing or unencodable.
+#[derive(Debug, Clone)]
+enum PreparedValue {
+    Valid(HeaderValue),
+    Invalid(String),
+    Missing,
+}
+
+/// The per-request computations `apply` can be asked for.
+#[derive(Debug, Clone, Copy)]
+enum DynamicValue {
+    Accept,
+    SecFetchSite,
+    SecFetchMode,
+    SecFetchDest,
+    SecFetchUser,
+    UpgradeInsecureRequests,
+    Priority,
+    Referer,
+    Origin,
+    Host,
+    Hint(HighEntropyHint),
+}
+
+/// Builds the slots for one captured order.
+fn plan_of(order: &[String], profile: &Profile) -> Vec<Slot> {
+    order
+        .iter()
+        .filter_map(|name| slot(name, classify(name, profile)))
+        .collect()
+}
+
+/// A slot for `name`, or `None` when the name is not a valid header name —
+/// the same names the previous per-request parse skipped.
+fn slot(name: &str, value: SlotValue) -> Option<Slot> {
+    let header_name = HeaderName::from_bytes(name.as_bytes()).ok()?;
+    Some(Slot {
+        name: name.into(),
+        header_name: promoted(header_name),
+        value,
+    })
+}
+
+/// A slot for a name this crate itself supplies, which is always valid.
+fn known_slot(name: &'static str, dynamic: DynamicValue) -> Slot {
+    slot(name, SlotValue::Dynamic(dynamic))
+        .expect("names supplied by this crate are valid header names")
+}
+
+/// How the engine finds a value for `name` — the classification that
+/// `engine_value_string` used to redo on every request.
+fn classify(name: &str, profile: &Profile) -> SlotValue {
+    match name {
+        // `Profile::sec_ch_ua` renders the GREASE brand entry
+        // (`"Not=A?Brand";v="99"` in the capture) verbatim from static
+        // profile data. This engine does not model whether Chrome
+        // varies that entry's separator characters or list position per
+        // request, per session, or per build — a single capture cannot
+        // show that, and inventing a permutation rule would be
+        // fabricating fingerprint data. Tracked as a gap in the crate's
+        // report.
+        "sec-ch-ua" => constant(profile.sec_ch_ua()),
+        "sec-ch-ua-mobile" => match profile.observed_headers.get("sec-ch-ua-mobile") {
+            Some(value) => constant(value.clone()),
+            None => SlotValue::Absent,
+        },
+        "sec-ch-ua-platform" => constant(profile.sec_ch_ua_platform()),
+        "sec-ch-ua-platform-version" => {
+            SlotValue::Dynamic(DynamicValue::Hint(HighEntropyHint::PlatformVersion))
+        }
+        "sec-ch-ua-arch" => SlotValue::Dynamic(DynamicValue::Hint(HighEntropyHint::Arch)),
+        "sec-ch-ua-bitness" => SlotValue::Dynamic(DynamicValue::Hint(HighEntropyHint::Bitness)),
+        "sec-ch-ua-full-version-list" => {
+            SlotValue::Dynamic(DynamicValue::Hint(HighEntropyHint::FullVersionList))
+        }
+        "sec-ch-ua-model" => SlotValue::Dynamic(DynamicValue::Hint(HighEntropyHint::Model)),
+        "upgrade-insecure-requests" => SlotValue::Dynamic(DynamicValue::UpgradeInsecureRequests),
+        "user-agent" => constant(profile.user_agent.clone()),
+        "accept" => SlotValue::Dynamic(DynamicValue::Accept),
+        "sec-fetch-site" => SlotValue::Dynamic(DynamicValue::SecFetchSite),
+        "sec-fetch-mode" => SlotValue::Dynamic(DynamicValue::SecFetchMode),
+        "sec-fetch-user" => SlotValue::Dynamic(DynamicValue::SecFetchUser),
+        "sec-fetch-dest" => SlotValue::Dynamic(DynamicValue::SecFetchDest),
+        "referer" => SlotValue::Dynamic(DynamicValue::Referer),
+        "origin" => SlotValue::Dynamic(DynamicValue::Origin),
+        "accept-encoding" => constant(profile.accept_encoding.clone()),
+        "accept-language" => constant(profile.accept_language.clone()),
+        "priority" => SlotValue::Dynamic(DynamicValue::Priority),
+        "host" => SlotValue::Dynamic(DynamicValue::Host),
+        _ => SlotValue::Absent,
+    }
+}
+
+/// Encodes a profile constant, keeping the diagnostic when it cannot be.
+fn constant(value: String) -> SlotValue {
+    match HeaderValue::from_str(&value) {
+        Ok(encoded) => SlotValue::Constant(promoted(encoded)),
+        Err(_) => SlotValue::Invalid(value),
+    }
+}
+
+/// Encodes a per-profile value that may also be absent.
+fn prepared_value(value: String) -> PreparedValue {
+    match HeaderValue::from_str(&value) {
+        Ok(encoded) => PreparedValue::Valid(promoted(encoded)),
+        Err(_) => PreparedValue::Invalid(value),
+    }
+}
+
+/// Pays a `Bytes`-backed value's promotion cost here, at construction.
+///
+/// A `HeaderName` or `HeaderValue` built from a `&str` is backed by a
+/// vec-backed `Bytes`, whose *first* clone allocates a shared header and
+/// converts both copies to the reference-counted representation; every
+/// clone after that is a count bump. Cloning once here moves that one
+/// allocation off the per-request path.
+fn promoted<T: Clone>(value: T) -> T {
+    let shared = value.clone();
+    drop(value);
+    shared
 }
 
 /// Per-request facts the engine needs while resolving header values, kept
@@ -292,9 +514,9 @@ impl HeaderEngine {
 struct Ctx<'a> {
     options: &'a RequestOptions,
     fetch_site: FetchSite,
-    referer: Option<String>,
-    origin_header: Option<String>,
-    host_value: Option<String>,
+    referer: Option<HeaderValue>,
+    origin_header: Option<HeaderValue>,
+    host_value: Option<HeaderValue>,
     user_activated: bool,
     granted: HashSet<HighEntropyHint>,
 }
@@ -346,7 +568,7 @@ fn origin_header_value(
     needed.then(|| initiator.ascii_serialization())
 }
 
-/// Builds the final header name order: the profile's captured order, plus
+/// Builds the final header order: the profile's captured order, plus
 /// whatever this specific request needs that the capture did not carry.
 ///
 /// The insertion points for `host`, `origin`, `sec-fetch-user`, and
@@ -367,47 +589,54 @@ fn origin_header_value(
 /// capture taken over HTTP/1.1 necessarily records `host`, and any capture of
 /// a CORS fetch or a form POST records `origin`, and `Profile::from_capture`
 /// is the documented way to add a browser.
-fn build_order(
-    base: &[String],
+fn build_order<'plan>(
+    base: &'plan [Slot],
+    prepared: &'plan Prepared,
     needs_host: bool,
     needs_origin: bool,
     needs_referer: bool,
     user_activated: bool,
-    granted_high_entropy: &[HighEntropyHint],
-) -> Vec<String> {
-    let mut order = base.to_vec();
+    granted: &HashSet<HighEntropyHint>,
+) -> Vec<&'plan Slot> {
+    let mut order: Vec<&Slot> = base.iter().collect();
 
     if needs_host && !contains(&order, "host") {
-        order.insert(0, "host".to_owned());
+        order.insert(0, &prepared.host);
     }
 
     // High-entropy hints join the low-entropy group Chrome already sends.
-    let anchor = order.iter().position(|name| name == "sec-ch-ua-platform");
-    let mut inserted = 0;
-    for hint in granted_high_entropy {
-        let name = hint.header_name();
-        if contains(&order, name) {
-            continue;
-        }
-        match anchor {
-            Some(anchor) => {
-                order.insert(anchor + 1 + inserted, name.to_owned());
-                inserted += 1;
+    if !granted.is_empty() {
+        let anchor = order
+            .iter()
+            .position(|slot| slot.order_name() == "sec-ch-ua-platform");
+        let mut inserted = 0;
+        for hint_slot in &prepared.hints {
+            let SlotValue::Dynamic(DynamicValue::Hint(hint)) = hint_slot.value else {
+                continue;
+            };
+            if !granted.contains(&hint) || contains(&order, &hint_slot.name) {
+                continue;
             }
-            None => order.push(name.to_owned()),
+            match anchor {
+                Some(anchor) => {
+                    order.insert(anchor + 1 + inserted, hint_slot);
+                    inserted += 1;
+                }
+                None => order.push(hint_slot),
+            }
         }
     }
 
     if needs_origin {
-        insert_before(&mut order, "sec-fetch-site", "origin");
+        insert_before(&mut order, "sec-fetch-site", &prepared.origin);
     }
 
     if user_activated {
-        insert_before(&mut order, "sec-fetch-dest", "sec-fetch-user");
+        insert_before(&mut order, "sec-fetch-dest", &prepared.sec_fetch_user);
     }
 
     if needs_referer {
-        insert_after(&mut order, "sec-fetch-dest", "referer");
+        insert_after(&mut order, "sec-fetch-dest", &prepared.referer);
     }
 
     order
@@ -668,5 +897,30 @@ mod tests {
             error.to_string().contains("user-agent"),
             "the error must name the header that could not be encoded, got: {error}"
         );
+    }
+
+    #[test]
+    fn the_map_after_apply_carries_every_emitted_header_and_the_callers_extras() {
+        let engine = HeaderEngine::new(Arc::new(Profile::chrome_stable()));
+        let (mut request, url, options) = navigation_to("https://example.com/", Version::HTTP_2);
+        request
+            .headers_mut()
+            .append("x-trace", HeaderValue::from_static("a"));
+
+        let emitted = engine
+            .apply(&mut request, &url, &options, &AcceptChStore::new())
+            .expect("header planning should succeed");
+
+        for (name, value) in &emitted {
+            assert!(
+                request
+                    .headers()
+                    .get_all(name)
+                    .into_iter()
+                    .any(|held| held == value),
+                "the request map must hold `{name}` after apply"
+            );
+        }
+        assert_eq!(request.headers().len(), emitted.len());
     }
 }

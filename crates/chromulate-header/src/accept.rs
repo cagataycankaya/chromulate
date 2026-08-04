@@ -34,22 +34,23 @@ const IMAGE: &str = "image/avif,image/webp,image/apng,image/svg+xml,*/*;q=0.8";
 /// fetch.
 const WILDCARD: &str = "*/*";
 
-/// Returns the `Accept` value for `dest`.
+/// Returns the uncaptured fallback `Accept` value for `dest`, or `None` for
+/// the destinations whose value is the profile's own captured `accept` —
+/// [`FetchDest::Document`] and [`FetchDest::Iframe`], since a nested
+/// document is fetched the same way a top-level one is.
 ///
-/// `document_accept` is the profile's own captured value for a document
-/// navigation, reused verbatim for [`FetchDest::Document`] and
-/// [`FetchDest::Iframe`] since a nested document is fetched the same way a
-/// top-level one is.
-pub(crate) fn accept_for(dest: FetchDest, document_accept: &str) -> String {
+/// Every returned value is a static, so the engine can encode it without
+/// allocating.
+pub(crate) const fn accept_fallback(dest: FetchDest) -> Option<&'static str> {
     match dest {
-        FetchDest::Document | FetchDest::Iframe => document_accept.to_owned(),
-        FetchDest::Style => STYLE.to_owned(),
-        FetchDest::Image => IMAGE.to_owned(),
+        FetchDest::Document | FetchDest::Iframe => None,
+        FetchDest::Style => Some(STYLE),
+        FetchDest::Image => Some(IMAGE),
         // `FetchDest::Script | Font | Empty`, plus any destination a future
         // version of `FetchDest` adds (it is `#[non_exhaustive]`): all get
         // the same wildcard a script or a programmatic fetch gets, which is
         // also Chromium's own fallback.
-        _ => WILDCARD.to_owned(),
+        _ => Some(WILDCARD),
     }
 }
 
@@ -57,39 +58,30 @@ pub(crate) fn accept_for(dest: FetchDest, document_accept: &str) -> String {
 mod tests {
     use super::*;
 
-    const DOCUMENT_ACCEPT: &str = "text/html,application/xhtml+xml";
+    #[test]
+    fn only_documents_and_iframes_use_the_profiles_captured_value() {
+        // `None` routes the engine to the profile's own captured `accept`;
+        // that the engine really emits it verbatim is asserted by the
+        // integration test against the capture, not here.
+        assert_eq!(accept_fallback(FetchDest::Document), None);
+        assert_eq!(accept_fallback(FetchDest::Iframe), None);
+    }
 
     #[test]
-    fn document_script_style_and_image_each_get_a_distinct_accept_value() {
+    fn script_style_and_image_each_get_a_distinct_fallback_value() {
         // This test checks the mechanism — that each destination routes to
         // its own value and no two collide — not the fidelity of the
-        // uncaptured constants themselves. `document` is the only one
-        // checked against a specific expected string, because it is the
-        // only one this crate's capture actually observed; see the module
-        // docs for why the others are not asserted against a fixed value.
-        let document = accept_for(FetchDest::Document, DOCUMENT_ACCEPT);
-        let script = accept_for(FetchDest::Script, DOCUMENT_ACCEPT);
-        let style = accept_for(FetchDest::Style, DOCUMENT_ACCEPT);
-        let image = accept_for(FetchDest::Image, DOCUMENT_ACCEPT);
+        // uncaptured constants themselves; see the module docs for why they
+        // are not asserted against fixed strings.
+        let script = accept_fallback(FetchDest::Script).expect("scripts use a fallback");
+        let style = accept_fallback(FetchDest::Style).expect("styles use a fallback");
+        let image = accept_fallback(FetchDest::Image).expect("images use a fallback");
 
-        assert_eq!(
-            document, DOCUMENT_ACCEPT,
-            "the document value must be the profile's captured value, verbatim"
-        );
-
-        let values = [&document, &script, &style, &image];
+        let values = [script, style, image];
         for (i, a) in values.iter().enumerate() {
             for (j, b) in values.iter().enumerate() {
                 assert!(i == j || a != b, "accept values must be pairwise distinct");
             }
         }
-    }
-
-    #[test]
-    fn an_iframe_is_fetched_like_a_document() {
-        assert_eq!(
-            accept_for(FetchDest::Iframe, DOCUMENT_ACCEPT),
-            DOCUMENT_ACCEPT
-        );
     }
 }

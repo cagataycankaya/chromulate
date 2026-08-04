@@ -10,6 +10,7 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
+bytes.workspace = true
 chromulate-core.workspace = true
 chromulate-profile.workspace = true
 http.workspace = true

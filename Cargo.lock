@@ -358,6 +358,7 @@ dependencies = [
 name = "chromulate-header"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "chromulate-core",
  "chromulate-profile",
  "criterion",
