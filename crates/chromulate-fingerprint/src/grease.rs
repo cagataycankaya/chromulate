@@ -1,7 +1,10 @@
 //! The reserved GREASE code points (RFC 8701).
 
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+// `random_range` moved from `Rng` to `RngExt` in rand 0.10; `RngExt` is
+// blanket-implemented for every `Rng`, so the bounds below are unchanged and
+// only the import is needed.
+use rand::{Rng, RngExt as _, SeedableRng};
 use serde::{Deserialize, Serialize};
 
 /// One of the sixteen reserved GREASE code points, `0x?A?A`.

@@ -22,7 +22,9 @@ use chromulate_core::{
     Body, BoxFuture, Exchange, Request, Response, Result, reexport::HeaderValue,
 };
 use http::{Method, StatusCode};
-use rand::Rng as _;
+// `random_range` moved from `Rng` to `RngExt` in rand 0.10; `RngExt` is
+// blanket-implemented for every `Rng`.
+use rand::RngExt as _;
 
 use crate::time::TimeSource;
 
