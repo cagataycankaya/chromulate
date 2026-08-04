@@ -42,6 +42,15 @@ enum Command {
     Fingerprint(FingerprintArgs),
     /// List the profiles this build ships.
     Profiles,
+    /// Recompute every shipped profile from its capture and report any drift.
+    ///
+    /// The project's rule is that no fingerprint constant may be written by
+    /// hand — every one is transcribed from an observed capture. This checks
+    /// that rule from outside the test suite: it rebuilds each profile from the
+    /// capture bytes and compares the result with what the binary ships, so a
+    /// hand-edited constant is a non-zero exit rather than a subtle change in
+    /// what a server sees.
+    Verify,
 }
 
 #[derive(Debug, Args)]
@@ -118,6 +127,7 @@ async fn main() -> ExitCode {
         Command::Get(args) => run_get(args).await,
         Command::Fingerprint(args) => run_fingerprint(&args),
         Command::Profiles => run_profiles(),
+        Command::Verify => run_verify(),
     };
 
     ExitCode::from(code)
@@ -147,6 +157,106 @@ fn run_profiles() -> u8 {
         }
     }
     EXIT_OK
+}
+
+/// Rebuilds every shipped profile from its capture and reports drift.
+///
+/// A profile is a transcription of an observed capture, so rebuilding it from
+/// those bytes must reproduce what the binary ships. When it does not, either
+/// the capture changed or a constant was edited by hand — and the second is the
+/// failure mode this project's rules exist to prevent, because a hand-written
+/// fingerprint value looks exactly like a captured one in a diff.
+fn run_verify() -> u8 {
+    let mut failures = 0usize;
+
+    // Only profiles with a capture in the binary can be checked. A profile
+    // without one is reported as unverifiable rather than passed over, because
+    // "no capture" is precisely the state the rules forbid.
+    let captures: [(&str, &str); 1] = [("chrome", chromulate::CHROME_STABLE_CAPTURE)];
+
+    let registry = ProfileRegistry::with_builtin();
+    let mut names: Vec<&str> = registry.names().collect();
+    names.sort_unstable();
+
+    // Aliases resolve to the same profile, and verifying one twice would report
+    // a second result for a thing that was already checked — or, worse, a
+    // failure for an alias that has no capture of its own.
+    let mut seen: Vec<String> = Vec::new();
+
+    for name in names {
+        let Some(shipped) = registry.get(name) else {
+            continue;
+        };
+        let identity = format!("{}/{}", shipped.name, shipped.version);
+        if seen.contains(&identity) {
+            println!("{name:<10} alias of {}", shipped.name);
+            continue;
+        }
+        seen.push(identity);
+
+        let Some((_, capture)) = captures.iter().find(|(key, _)| *key == shipped.name) else {
+            println!("{name:<10} UNVERIFIABLE  no capture is compiled in for this profile");
+            failures += 1;
+            continue;
+        };
+
+        let rebuilt = match Profile::from_capture(capture) {
+            Ok(rebuilt) => rebuilt,
+            Err(error) => {
+                println!("{name:<10} FAILED        the capture does not parse: {error}");
+                failures += 1;
+                continue;
+            }
+        };
+
+        // The fingerprints are compared before the whole profile, because they
+        // are what a server sees: a difference here is a fidelity break, while
+        // a difference in, say, the profile's own name is only bookkeeping.
+        let mut drift: Vec<String> = Vec::new();
+        for (label, shipped_value, rebuilt_value) in [
+            ("ja4", shipped.ja4(), rebuilt.ja4()),
+            ("ja3", shipped.ja3(), rebuilt.ja3()),
+            ("akamai", shipped.akamai_http2(), rebuilt.akamai_http2()),
+        ] {
+            if shipped_value != rebuilt_value {
+                drift.push(format!(
+                    "{label}: ships {shipped_value}, capture gives {rebuilt_value}"
+                ));
+            }
+        }
+        if shipped.header_order != rebuilt.header_order {
+            drift.push("header order differs from the capture".to_owned());
+        }
+        if shipped.user_agent != rebuilt.user_agent {
+            drift.push(format!(
+                "user agent: ships {:?}, capture gives {:?}",
+                shipped.user_agent, rebuilt.user_agent
+            ));
+        }
+
+        if drift.is_empty() {
+            println!(
+                "{name:<10} ok            {} {} matches its capture",
+                shipped.name, shipped.version
+            );
+        } else {
+            failures += 1;
+            println!("{name:<10} DRIFTED       {}", shipped.name);
+            for line in drift {
+                println!("{:<10}               {line}", "");
+            }
+        }
+    }
+
+    if failures == 0 {
+        EXIT_OK
+    } else {
+        eprintln!(
+            "\n{failures} profile(s) did not match their capture. A fingerprint constant that \
+             was not observed is the one thing this project's rules forbid outright."
+        );
+        EXIT_REQUEST_FAILED
+    }
 }
 
 fn run_fingerprint(args: &FingerprintArgs) -> u8 {

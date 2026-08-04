@@ -72,6 +72,20 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --workspace --no-deps --all-features
 
+  profiles:
+    name: Profiles match their captures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The rule this enforces is the project's strictest: no fingerprint
+      # constant may be written by hand. The golden tests check the computed
+      # fingerprints; this rebuilds each profile from its capture bytes and
+      # compares it with what the binary ships, so an edited constant fails
+      # here rather than changing what a server sees.
+      - run: cargo run --release -p chromulate-cli -- verify
+
   supply-chain:
     name: Advisories and licences
     runs-on: ubuntu-latest

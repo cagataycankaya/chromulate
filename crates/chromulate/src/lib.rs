@@ -115,7 +115,7 @@ pub use chromulate_core::{
     Body, BoxError, BoxFuture, Error, Exchange, FetchDest, FetchMode, Middleware, Next, Origin,
     RedirectPolicy, Request, RequestOptions, Resolve, Response as HttpResponse, Result,
 };
-pub use chromulate_profile::{Platform, Profile, ProfileRegistry};
+pub use chromulate_profile::{CHROME_STABLE_CAPTURE, Platform, Profile, ProfileRegistry};
 
 /// The cookie jar and its vocabulary.
 pub mod cookie {
