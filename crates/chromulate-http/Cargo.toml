@@ -41,6 +41,10 @@ tokio = { workspace = true, features = ["full", "test-util"] }
 # The emitted-shape test needs a TLS origin that negotiates h2 by ALPN, because
 # that is the only way this crate produces an HTTP/2 connection at all.
 rcgen = "0.14"
+# The same version hyper already links. `early_stop.rs` stands up an h2 origin
+# with it so that a cancelled body can be observed as a `RST_STREAM` at the
+# server, rather than inferred from the client staying alive.
+h2 = "0.4"
 rustls.workspace = true
 rustls-pki-types.workspace = true
 tokio-rustls.workspace = true

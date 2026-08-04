@@ -111,7 +111,7 @@ mod response;
 
 pub use client::{Client, ClientBuilder, DEFAULT_MAX_RESPONSE_SIZE};
 pub use request::RequestBuilder;
-pub use response::{BodyStream, Response};
+pub use response::{BodyStream, Prefix, Response, Stop, StopReason};
 
 pub use chromulate_core::{
     Body, BoxError, BoxFuture, Error, Exchange, FetchDest, FetchMode, Middleware, Next, Origin,
