@@ -33,6 +33,23 @@ that breaking changes may land in a minor release.
 
 ### Changed
 
+- **A response head now has a thirty-second default bound.** `EngineConfig::new` and
+  `ClientBuilder::new` both default `head_timeout` to 30s, matching the existing
+  `connect_timeout` default. Before this, a default-configured client had no bound at all on
+  a server that accepted a connection and then went quiet — only connection *establishment*
+  was bounded. The whole-request `timeout` deliberately stays `None`: a large download, a
+  streamed response and an SSE stream all legitimately run long, and no default tells one of
+  those from a hang.
+
+  **This breaks long polling** and anything else that withholds the response head until an
+  event fires; there the silence is the protocol, not a stall. Those callers want the new
+  `ClientBuilder::no_head_timeout()`, or `EngineConfig { head_timeout: None, .. }`.
+  `head_timeout(Duration)` can only set `Some`, which is why the opt-out is its own method.
+
+  The default is set in both places on purpose: `ClientBuilder::build` overwrites
+  `config.head_timeout` unconditionally, so a default set only on `EngineConfig` would have
+  left the facade — the primary public API — unbounded.
+
 - **`chromulate_http::FinalUrl` is now `chromulate_http::ResponseInfo`**, a struct
   carrying the final URL *and* the timings. One extension rather than two:
   `http::Extensions` boxes every value it stores, so a second insert would have been a
@@ -45,6 +62,19 @@ that breaking changes may land in a minor release.
   nothing checked: the file was not wired into rustdoc, and one example used three
   variables it never declared. They are doctests now, so a change that breaks one fails
   `cargo test`.
+- **A timeout larger than the monotonic clock could represent panicked the process.**
+  `ClientBuilder::timeout` and `RequestBuilder::timeout` pass a caller's `Duration` through
+  unvalidated, so `Duration::MAX` was one public call from `Instant::now() + total` and
+  `overflow when adding duration to instant`. Such a budget now reads as no deadline at all,
+  which is the same request: `Instant` has no epoch, so there is no portable far-future
+  value to saturate to, and `Deadline` already carries "no limit" as `at: None`.
+- **A large DNS cache TTL panicked on the first lookup it cached.** `CachingResolver::new`
+  validates nothing, so `Duration::MAX` as a positive or negative TTL reached `now + ttl` in
+  `Cache::settle` and panicked the first time a result was stored. Reachable from the
+  facade, which re-exports the resolver. Expiries are computed with a checked addition now,
+  and a TTL too large to represent caches the entry for the life of the process. TTLs are
+  deliberately not clamped at construction: unlike a rate of zero, a TTL of centuries is a
+  coherent request, and a ceiling would have made the checked addition unreachable.
 - **A caller's rate limit could panic the process.** `RateLimit`'s fields are public, so
   `RateLimit { per_second: 0.0, burst: 1.0 }` reached a limiter without passing the
   assertion in `RateLimit::per_second`. `reserve` then divided the token debt by that rate

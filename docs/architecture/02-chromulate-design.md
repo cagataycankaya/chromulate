@@ -641,11 +641,19 @@ for that number recorded at `request.rs:103-104`.
 ### 4.4 Cancellation and deadlines
 
 Two deadlines exist because they answer different questions.
-`RequestOptions::head_timeout` (`request.rs:129`) bounds the time to a response head and is
-the one that detects an unresponsive origin. `RequestOptions::timeout` (`request.rs:127`)
+`RequestOptions::head_timeout` (`request.rs:131`) bounds the time to a response head and is
+the one that detects an unresponsive origin. `RequestOptions::timeout` (`request.rs:124`)
 bounds the whole request including redirects and body, and is the one that bounds resource
 use. A single timeout cannot do both: setting it tight enough to detect a dead server makes
 it too tight for a large download.
+
+That difference decides which of them is on by default. `head_timeout` defaults to thirty
+seconds, in both `EngineConfig::new` and `ClientBuilder::new` — the builder overwrites the
+engine's value wholesale, so a default set in only one of them would be invisible. The
+whole-request `timeout` defaults to `None`, because a large download, a streamed response
+and an SSE stream all legitimately run long and no default distinguishes one of those from
+a hang. Long polling is the case where even the head wait is wrong, since there the silence
+is the protocol; `ClientBuilder::no_head_timeout` exists for it.
 
 Cancellation is structural rather than cooperative. Dropping the response future drops the
 body, which drops the stream, which returns the connection to the pool or closes it. There
