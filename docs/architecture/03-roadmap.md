@@ -150,7 +150,10 @@ any browser.
 
 ## Phase 3: Transport, HTTP, and a working client
 
-**Status: Next.**
+**Status: Done.** Every item in the definition below is met and covered by a test, with two
+worth naming because they are the ones a reader would doubt: two profiles sharing a pool
+never share a connection (`pool.rs`, and end to end in `engine_behaviour.rs`), and
+`chromulate verify` rebuilds each profile from its capture and fails on drift.
 
 `chromulate-tls` translates a `ClientHelloSpec` into a rustls configuration: cipher order
 from a custom `CryptoProvider`, group order, ALPN, certificate compression, resumption.
@@ -187,7 +190,17 @@ maintenance a reviewable process rather than a research project.
 
 ## Phase 4: Emitted-shape verification
 
-**Status: Next, immediately after Phase 3.**
+**Status: Mostly done.** The ClientHello is decoded off the wire and compared with the
+profile field by field (`chromulate-tls/tests/emitted_client_hello.rs`), and the HTTP/2
+preface is recorded from a local TLS origin and compared likewise, including the
+pseudo-header order decoded out of the HPACK block
+(`chromulate-http/tests/emitted_http2.rs`). The measured deltas are written up in
+[`../fidelity.md`](../fidelity.md).
+
+Two items remain: the diffs live as assertions inside the tests rather than as separate
+checked-in artifacts, and `Client::identity_report()` does not exist — the CLI's
+`fingerprint` subcommand reports the same information, but from the profile and the
+provider's capabilities rather than from a measurement.
 
 This is the most valuable phase on the roadmap and the one most likely to be skipped,
 because everything appears to work without it.
@@ -307,10 +320,12 @@ access to browsers and a capture procedure, not code — the loader already exis
 `Accept` values, subresource header order, non-document `priority` values, and high-entropy
 client hints.
 
-**HSTS.** A store consulted before the request leaves, populated from
-`Strict-Transport-Security` responses, with an optional preload list behind a feature flag.
-This should land before 1.0, because an engine that makes a plaintext request where a
-browser would not has an observable behavioural difference and a real downgrade exposure.
+**HSTS.** **Done**, except the preload list. A store is consulted before the request leaves
+and is populated from `Strict-Transport-Security` responses; a header arriving over
+cleartext is ignored, IP literals take no policy, and `max-age=0` removes one. The preload
+list is still open, and is the part that protects the *first* request to an origin this
+process has never visited — `Client::hsts()` is the interim answer, letting a caller seed a
+policy it already knows.
 
 **HTTP/3.** Architecture only until the open questions in section 15 of the design document
 are answered — principally whether one pool can sensibly hold both TCP and QUIC connections

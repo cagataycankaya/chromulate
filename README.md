@@ -133,6 +133,69 @@ while let Some(chunk) = stream.next().await {
 }
 ```
 
+## Features
+
+What ships today, and what is not here. Every "yes" below is covered by tests in the
+repository; the measured claims behind the fidelity rows are in
+[docs/fidelity.md](docs/fidelity.md).
+
+### Protocol and transport
+
+| | |
+|---|---|
+| HTTP/1.1 and HTTP/2 | Yes, chosen by ALPN, with connection pooling for both |
+| TLS 1.2 and 1.3 | Yes, over `rustls` with the platform trust store |
+| HTTP/3 and QUIC | **No.** Not implemented; Chrome upgrades where an origin offers it and this does not |
+| Connection pool keyed by profile identity | Yes — two profiles never share a connection, which is what stops a request being observed with another identity's fingerprint |
+| HSTS | Yes. Learned from responses, applied before the request leaves; a header arriving over cleartext is ignored |
+| HSTS preload list | No. Planned behind a feature flag |
+| Proxies | Yes: HTTP `CONNECT`, SOCKS5 and SOCKS5h, with rotation and `NO_PROXY` |
+| DNS | Yes: caching, TTL-aware, with concurrent lookups for one name collapsed into one |
+| Happy Eyeballs (RFC 8305) | **No.** Addresses are tried in the resolver's order; a browser races the families. A latency difference, not an observable one |
+
+### Browser identity
+
+| | |
+|---|---|
+| Header set, values and order | **Exact match** against the capture |
+| HTTP/2 SETTINGS and connection window | **Exact match** |
+| HTTP/2 pseudo-header order | **No** — `h2` emits `m,s,a,p` where Chrome sends `m,a,s,p` |
+| HTTP/2 HEADERS priority | **No** — `h2` exposes no way to set it |
+| TLS ClientHello / JA4 | **Does not match.** `rustls` builds its own; ten cipher suites against fifteen, no GREASE |
+| GREASE (RFC 8701) | Modelled and tested, but never reaches the wire |
+| `Sec-Fetch-*` derivation | Yes, from the request's fetch context |
+| Low-entropy client hints (`Sec-CH-UA*`) | Yes |
+| High-entropy client hints | Mechanism yes, values no — the capture never exercised an `Accept-CH` round trip |
+| Profiles shipped | One: Chrome 151 on macOS. Others need a capture; none will be written by hand |
+
+### Client behaviour
+
+| | |
+|---|---|
+| Cookie jar | Yes: domain and path matching, `SameSite`, `Secure`, `__Host-`/`__Secure-` prefixes, bounded eviction, JSON export and import |
+| Redirects | Yes, with per-hop cookies and credentials dropped when a hop crosses origins |
+| Decompression | Yes: `gzip`, `deflate`, `br`, `zstd`, streaming, with a decompression-bomb guard |
+| Streaming bodies | Yes, both directions; a 256 MiB response streams at a 1.39 MiB peak |
+| Timeouts | Yes: whole-request, response-head, and connect, separately |
+| Retry with backoff and jitter | Yes, idempotent methods by default |
+| Rate limiting | Yes |
+| Middleware | Yes — a `Middleware`/`Next` chain, plus six other extension seams |
+| `basic_auth` / `bearer_auth` | Yes, marked sensitive so credentials stay out of logs |
+| JSON, form and query helpers | Yes |
+| Multipart bodies | No. Planned |
+| HTTP cache (RFC 9111) | No. Deliberately deferred — the middleware seam supports it when someone needs it |
+| WebSockets | No, and not planned here |
+| JavaScript, a DOM, rendering | **Never.** Permanent exclusions — use a browser |
+
+### Tooling
+
+| | |
+|---|---|
+| CLI | `get`, `fingerprint`, `profiles`, `verify` |
+| Benchmarks | Throughput against `reqwest`, allocations per request, memory, multi-origin, concurrent TLS, a live-origin harness, and a soak test |
+| Fidelity checks | Emitted ClientHello and HTTP/2 preface parsed back off the wire and compared with the profile |
+| Supply chain | `cargo deny` in CI: advisories, licences, duplicate versions, source registries |
+
 ## Workspace layout
 
 | Crate | Responsibility |

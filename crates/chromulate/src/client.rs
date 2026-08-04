@@ -90,6 +90,29 @@ impl Client {
         self.inner.cookies.as_ref()
     }
 
+    /// Exclusive access to the HSTS store this client consults before every
+    /// request.
+    ///
+    /// Policies are learned from `Strict-Transport-Security` responses, so a
+    /// freshly built client knows nothing and its *first* request to an
+    /// HTTPS-only origin is the one that would go out in plaintext. Seeding the
+    /// store closes that window:
+    ///
+    /// ```no_run
+    /// # use std::time::SystemTime;
+    /// let client = chromulate::Client::chrome()?;
+    /// client
+    ///     .hsts()
+    ///     .record("internal.example", "max-age=31536000; includeSubDomains", true, SystemTime::now());
+    /// # Ok::<(), chromulate::Error>(())
+    /// ```
+    ///
+    /// The guard holds a lock the request path takes, so drop it before
+    /// issuing requests.
+    pub fn hsts(&self) -> std::sync::RwLockWriteGuard<'_, chromulate_http::HstsStore> {
+        self.inner.engine.hsts()
+    }
+
     /// Starts a request with an explicit method.
     pub fn request(&self, method: Method, url: impl AsRef<str>) -> RequestBuilder {
         RequestBuilder::new(Arc::clone(&self.inner), method, url.as_ref())

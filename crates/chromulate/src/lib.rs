@@ -128,9 +128,9 @@ pub mod cookie {
 /// Connection pooling, retries, and rate limiting.
 pub mod engine {
     pub use chromulate_http::{
-        ConnectionIdentity, Engine, EngineBuilder, EngineConfig, FinalUrl, Http2Fidelity, Pool,
-        PoolConfig, PoolKey, Protocol, RateLimit, RateLimiter, RequestUrl, Retry, RetryOn,
-        RetryPolicy, UnsupportedSetting,
+        ConnectionIdentity, Engine, EngineBuilder, EngineConfig, FinalUrl, HstsStore,
+        Http2Fidelity, Pool, PoolConfig, PoolKey, Protocol, RateLimit, RateLimiter, RequestUrl,
+        Retry, RetryOn, RetryPolicy, UnsupportedSetting,
     };
 }
 

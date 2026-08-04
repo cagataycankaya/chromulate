@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  schedule:
+    # The live network tests exercise real origins, so they drift for reasons
+    # this repository never changes: a site alters its TLS terms, an echo
+    # service moves, a CDN starts negotiating something else. Running them
+    # nightly separates "we broke it" from "the internet moved", which a
+    # per-push run cannot.
+    - cron: "17 4 * * *"
 
 env:
   CARGO_TERM_COLOR: always
@@ -71,6 +78,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --workspace --no-deps --all-features
+
+  miri:
+    name: Miri over chromulate-core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      # Only `chromulate-core`, and deliberately: Miri cannot run I/O, so it
+      # cannot see the crates that do any. Core is the one with no I/O at all,
+      # which makes it both tractable and the right place to look — it holds
+      # the body and URI types every other crate builds on.
+      - run: cargo miri test -p chromulate-core
 
   profiles:
     name: Profiles match their captures

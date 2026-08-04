@@ -533,16 +533,17 @@ impl Engine {
         }
     }
 
-    /// Records everything a response teaches the client about the origin.
-    /// A handle to the HSTS store, for tests that need to establish a policy
-    /// without a TLS origin.
+    /// Exclusive access to the HSTS store.
     ///
-    /// Recording a policy requires a response that arrived over TLS, which the
-    /// hermetic test harness cannot produce; without this, the engine's use of
-    /// a policy could only be tested against a live HTTPS server, which is to
-    /// say not in `cargo test`.
-    #[doc(hidden)]
-    pub fn hsts_store_for_test(&self) -> std::sync::RwLockWriteGuard<'_, crate::hsts::HstsStore> {
+    /// Policies are normally learned from responses, but a caller may want to
+    /// seed one — a private origin that is HTTPS-only but has never been
+    /// visited in this process gets no protection from a store that is still
+    /// empty, and the first request is the one that would go out in plaintext.
+    /// It is also how a test establishes a policy without a TLS origin.
+    ///
+    /// The returned guard holds a lock that the request path takes, so drop it
+    /// before issuing requests.
+    pub fn hsts(&self) -> std::sync::RwLockWriteGuard<'_, crate::hsts::HstsStore> {
         self.inner
             .hsts
             .write()
@@ -564,6 +565,7 @@ impl Engine {
         }
     }
 
+    /// Records everything a response teaches the client about the origin.
     fn record_response(&self, url: &Url, response: &Response) {
         if let Some(cookies) = &self.inner.cookies {
             let mut set_cookie = response.headers().get_all(SET_COOKIE).iter();

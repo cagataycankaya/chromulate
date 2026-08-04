@@ -620,3 +620,78 @@ async fn a_form_body_is_url_encoded_with_the_matching_content_type() {
     );
     assert_eq!(received.body_text(), "name=chromulate&kind=http+client");
 }
+
+#[test]
+fn basic_auth_encodes_the_colon_separated_pair_and_marks_it_sensitive() {
+    let client = Client::chrome().expect("the client must build");
+    let request = client
+        .get("https://example.com/")
+        .basic_auth("aladdin", Some("open sesame"))
+        .build()
+        .expect("the request must build");
+
+    let value = request
+        .headers()
+        .get(http::header::AUTHORIZATION)
+        .expect("the header must be set");
+    // RFC 7617's own example, so this checks the encoding rather than
+    // re-deriving it with the same code under test.
+    assert_eq!(
+        value.to_str().expect("ascii"),
+        "Basic YWxhZGRpbjpvcGVuIHNlc2FtZQ=="
+    );
+    assert!(
+        value.is_sensitive(),
+        "a credential must be marked sensitive so Debug does not print it"
+    );
+}
+
+#[test]
+fn basic_auth_without_a_password_still_sends_the_separator() {
+    let client = Client::chrome().expect("the client must build");
+    let request = client
+        .get("https://example.com/")
+        .basic_auth("user", None::<&str>)
+        .build()
+        .expect("the request must build");
+
+    let value = request
+        .headers()
+        .get(http::header::AUTHORIZATION)
+        .expect("the header must be set");
+    // "user:" not "user" — they are different credentials on the wire.
+    assert_eq!(value.to_str().expect("ascii"), "Basic dXNlcjo=");
+}
+
+#[test]
+fn bearer_auth_sets_the_scheme_and_marks_it_sensitive() {
+    let client = Client::chrome().expect("the client must build");
+    let request = client
+        .get("https://example.com/")
+        .bearer_auth("t0ken")
+        .build()
+        .expect("the request must build");
+
+    let value = request
+        .headers()
+        .get(http::header::AUTHORIZATION)
+        .expect("the header must be set");
+    assert_eq!(value.to_str().expect("ascii"), "Bearer t0ken");
+    assert!(value.is_sensitive());
+}
+
+#[test]
+fn a_credential_is_not_echoed_when_it_cannot_be_encoded() {
+    let client = Client::chrome().expect("the client must build");
+    let error = client
+        .get("https://example.com/")
+        .bearer_auth("has\nnewline")
+        .build()
+        .expect_err("a header value with a newline must be refused");
+
+    let message = error.to_string();
+    assert!(
+        !message.contains("newline") || !message.contains("has\nnewline"),
+        "the error must not quote the credential back: {message}"
+    );
+}

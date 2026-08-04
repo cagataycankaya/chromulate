@@ -1107,12 +1107,21 @@ before assuming either.**
 ### 7.5 Address selection
 
 `chromulate-dns` returns addresses in preference order, with `PreferIpv6` as the browser-
-like default. `chromulate-http` connects with a staggered race in the style of RFC 8305:
-start the first address, and if no connection is established within a short delay, start the
-next in parallel rather than waiting for the first to time out. This turns a black-holed
-IPv6 route from a multi-second stall into a sub-second one. The delay is configurable; a
-browser-like default is in the low hundreds of milliseconds. **The value has not been tuned
-against measurements — UNMEASURED.**
+like default. **`chromulate-http` then tries them in that order, one at a time**
+(`connect.rs`, `dial`): this section previously described a staggered RFC 8305 race, and
+that race is not implemented. The code says so at the call site, and this paragraph now
+agrees with it.
+
+The consequence is worth stating plainly, because it is the kind of gap that sounds like a
+fidelity problem and is not: a black-holed IPv6 route stalls until the connect timeout
+rather than for the few hundred milliseconds a browser would take. That is a **latency**
+difference, not an observable one — a server cannot see which of a client's addresses it
+tried first — so it is a quality-of-implementation item rather than an identity one.
+
+Implementing it means starting the first address, and if no connection is established
+within a short delay, starting the next in parallel instead of waiting for the first to
+time out. The delay would be configurable with a browser-like default in the low hundreds
+of milliseconds. **Not implemented, and therefore UNMEASURED.**
 
 ---
 

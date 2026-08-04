@@ -288,6 +288,7 @@ dependencies = [
 name = "chromulate"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.0",
  "bytes",
  "chromulate-compression",
  "chromulate-cookie",

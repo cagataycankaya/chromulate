@@ -933,7 +933,7 @@ async fn a_recorded_hsts_policy_upgrades_a_later_plaintext_request() {
     // The policy can only be recorded from a TLS response, and this harness is
     // plaintext, so the store is reached directly to set up the state under
     // test. What is being tested is what the engine does *with* a policy.
-    engine.hsts_store_for_test().record(
+    engine.hsts().record(
         "example.test",
         "max-age=31536000",
         true,

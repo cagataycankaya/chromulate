@@ -100,6 +100,53 @@ impl RequestBuilder {
         })
     }
 
+    /// Sets `Authorization: Basic`, encoding the credentials as RFC 7617 requires.
+    ///
+    /// The password is optional because the scheme allows an empty one, and the
+    /// colon is always sent: `user:` and `user` are different credentials on
+    /// the wire, so omitting the separator would quietly send the wrong one.
+    ///
+    /// The value is marked sensitive, so `HeaderMap`'s `Debug` renders it as
+    /// `Sensitive` rather than putting the credential in a log line.
+    #[must_use]
+    pub fn basic_auth(self, username: impl AsRef<str>, password: Option<impl AsRef<str>>) -> Self {
+        use base64::Engine as _;
+
+        let raw = format!(
+            "{}:{}",
+            username.as_ref(),
+            password.as_ref().map_or("", AsRef::as_ref)
+        );
+        let encoded = base64::engine::general_purpose::STANDARD.encode(raw);
+        self.sensitive_header(http::header::AUTHORIZATION, format!("Basic {encoded}"))
+    }
+
+    /// Sets `Authorization: Bearer`.
+    ///
+    /// The value is marked sensitive; see [`RequestBuilder::basic_auth`].
+    #[must_use]
+    pub fn bearer_auth(self, token: impl AsRef<str>) -> Self {
+        self.sensitive_header(
+            http::header::AUTHORIZATION,
+            format!("Bearer {}", token.as_ref()),
+        )
+    }
+
+    /// Sets a header whose value must never reach a log.
+    fn sensitive_header(self, name: HeaderName, value: String) -> Self {
+        self.with(move |parts| {
+            // The value is never quoted into the error: it is the credential.
+            let mut value = HeaderValue::from_str(&value).map_err(|_| {
+                Error::builder(format!(
+                    "the value for `{name}` is not a valid header value"
+                ))
+            })?;
+            value.set_sensitive(true);
+            parts.headers.insert(name, value);
+            Ok(())
+        })
+    }
+
     /// Adds several headers at once.
     #[must_use]
     pub fn headers(self, headers: HeaderMap) -> Self {
