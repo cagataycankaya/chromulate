@@ -163,7 +163,7 @@ repository; the measured claims behind the fidelity rows are in
 | HTTP/3 and QUIC | **No.** Not implemented; Chrome upgrades where an origin offers it and this does not |
 | Connection pool keyed by profile identity | Yes — two profiles never share a connection, which is what stops a request being observed with another identity's fingerprint |
 | HSTS | Yes. Learned from responses, applied before the request leaves; a header arriving over cleartext is ignored |
-| HSTS preload list | No. Planned behind a feature flag |
+| HSTS preload list | Yes, behind the off-by-default `hsts-preload` feature: Chromium's complete list, 94,628 entries, which protects the first request to an origin. Off by default because it grows a release binary by 1,766,656 bytes (measured) |
 | Proxies | Yes: HTTP `CONNECT`, SOCKS5 and SOCKS5h, with rotation and `NO_PROXY` |
 | DNS | Yes: caching, TTL-aware, with concurrent lookups for one name collapsed into one |
 | Happy Eyeballs (RFC 8305) | **No.** Addresses are tried in the resolver's order; a browser races the families. A latency difference, not an observable one |
