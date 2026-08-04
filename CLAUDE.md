@@ -34,6 +34,19 @@ provenance in `crates/chromulate-profile/data/`: what was captured, from which b
 build, on which platform, and when. Never hand-write a fingerprint constant that was not
 observed.
 
+### A map keyed by server-controlled input carries a capacity
+
+The set of keys in these maps is chosen by the servers a crawl visits, not by the caller,
+so "it only grows as much as the workload needs" is not true of any of them. Every such
+store in this workspace pairs a capacity with an eviction policy, and the pairing is the
+rule: a cap with no eviction is a stall, and eviction with no cap is decoration.
+`AltSvcCache`, `ValidatorStore`, `AcceptChStore`, the resumption store, the cookie jar,
+the DNS cache and the response cache all do this today. Reclaiming only when a caller
+remembers to call `purge_expired` does not count — that is a cap the caller can forget.
+
+A capacity of zero is raised to one everywhere here, because a store that cannot hold the
+entry it was just handed is a silently disabled feature rather than a small one.
+
 ### Correctness constraints that are easy to get wrong
 
 - Chrome randomises ClientHello extension **order** on every connection, so JA3 is not

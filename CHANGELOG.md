@@ -22,8 +22,8 @@ that breaking changes may land in a minor release.
   `force-https` entries from Chromium at revision `7be0edc6`, compiled in as a
   1,749,625-byte sorted table. It protects the first request to an origin this process has
   never visited, which is the one case a store learned from responses cannot cover. Off by
-  default because it grows a release binary by 1,766,656 bytes (measured); a lookup costs
-  234.7-243.4 ns and allocates nothing. Precedence is `dynamic || preload`, matching
+  default because it grows a release binary by 1,750,560 bytes (measured — `__TEXT,__const` +1,748,992 for the table, `__text` +960 for the code); a lookup costs
+  269-283 ns and allocates nothing, roughly 33 ns of which is canonicalising the host. Precedence is `dynamic || preload`, matching
   Chromium, so an origin cannot take itself off the list with `max-age=0`. The ancestor walk
   deliberately does not stop at the registrable domain: fifty-seven entries carry Chromium's `public-suffix`
   policy, among them the bare TLDs `app`, `dev`, `bank`, `page` and `google` — 51 names in

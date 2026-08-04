@@ -1880,7 +1880,10 @@ sent, which is the whole point: a redirect would already be too late.
 is the part that protects the *first* request to an origin this process has never visited.
 It is a feature rather than a default because it is large: all 94,628 `force-https` entries
 from Chromium at revision `7be0edc6`, a 1,749,625-byte table that grows a release binary by
-1,766,656 bytes (measured). A lookup costs 234.7-243.4 ns and allocates nothing.
+1,750,560 bytes (measured — `__TEXT,__const` +1,748,992 for the table, `__text` +960 for the
+code; an earlier figure of 17,031 bytes of "lookup code" was segment padding read as code). A
+lookup costs 269-283 ns and allocates nothing; roughly 33 ns of that is canonicalising the
+host, which is what makes a trailing root label match its entry.
 
 Precedence is `dynamic || preload`, matching Chromium's `GetDynamicSTSState(host, result)
 || GetStaticSTSState(host, result)`. The consequence worth knowing is that a dynamic
