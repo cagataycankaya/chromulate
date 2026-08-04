@@ -1,0 +1,54 @@
+# `cargo deny` configuration.
+#
+# Three questions this answers on every push, none of which a test can:
+# does a dependency have a known vulnerability, is its licence one this project
+# can ship under, and is the same crate being linked twice at incompatible
+# versions.
+#
+# Run locally with `cargo deny check`.
+
+[advisories]
+# Fail on any security advisory. Unmaintained crates are a warning rather than
+# an error: an advisory that says "this crate has no maintainer" is worth
+# knowing about, but it is not a reason to fail a build at 3am.
+yanked = "deny"
+ignore = []
+
+[licenses]
+# The project is MIT OR Apache-2.0, so a dependency has to be usable under
+# those terms. This is the permissive set that satisfies that; anything else
+# needs a deliberate exception with a reason, not a silent addition.
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+    # `webpki-roots` ships Mozilla's CA bundle under the Community Data Licence
+    # Agreement. It is a permissive data licence with no copyleft and no
+    # attribution burden beyond the notice, so it is compatible with shipping
+    # under MIT OR Apache-2.0 — but it is a *data* licence rather than a code
+    # one, which is why it is listed separately with this note rather than
+    # waved through with the rest.
+    "CDLA-Permissive-2.0",
+]
+
+[bans]
+# Two copies of one crate at incompatible versions is usually an accident, and
+# for the TLS and HTTP stacks it is a correctness hazard rather than only bloat:
+# two `rustls` versions means two crypto providers and two sets of defaults.
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
