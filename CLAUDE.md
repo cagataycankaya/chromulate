@@ -149,3 +149,11 @@ the path most callers take.
   `crates/chromulate-fingerprint/tests/data/`.
 - Integration tests that require the network are behind the `network-tests` feature so
   the default `cargo test` run stays hermetic and offline.
+- Tests that assert on captured `tracing` output must follow the
+  `capture_logs`/`callsite_guard` pattern in `crates/chromulate-proxy/src/proxy.rs`:
+  `with_default` installs a thread-local dispatcher without rebuilding tracing's global
+  callsite-interest cache, so a callsite first evaluated while no subscriber was
+  installed stays cached as uninteresting and the capture sees nothing. Call
+  `tracing::callsite::rebuild_interest_cache()` under a shared lock before installing
+  the capture subscriber. The race is a parallel-harness scheduling accident that
+  reproduced only on Linux CI — a local green run does not prove it fixed.

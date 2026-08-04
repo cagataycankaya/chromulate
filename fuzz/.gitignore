@@ -5,6 +5,18 @@
 # rather than leaving it here.
 /artifacts
 /coverage
+
+# libFuzzer's *generated* corpus. A run leaves thousands of these — one local
+# run produced 4,800 files and 16 MB — and every one is named by the SHA1 of
+# its contents, so this pattern is exactly 40 characters wide and matches
+# nothing a person would type. Curated seeds keep their readable names
+# (`gzip`, `over-the-coding-limit`) and are committed normally.
+#
+# Without this rule the seeds and the machine's output share one directory
+# with nothing separating them, and a single `git add -A` puts 16 MB of
+# run-specific data into the history, where removing it is expensive. Already
+# tracked seeds are unaffected: .gitignore does not untrack anything.
+corpus/*/????????????????????????????????????????
 # The lock file is not committed: `fuzz` is excluded from the workspace, so this
 # would be a second lock file describing the same dependency graph, drifting
 # from `Cargo.lock` without anything checking that it had.
