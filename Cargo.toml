@@ -12,6 +12,7 @@ members = [
     "crates/chromulate-proxy",
     "crates/chromulate-tls",
     "crates/chromulate-http",
+    "crates/chromulate-h3",
     "crates/chromulate-cli",
     "crates/chromulate-bench",
 ]

@@ -1,0 +1,65 @@
+[package]
+name = "chromulate-h3"
+description = "Alt-Svc parsing and the HTTP/3 alternative-service cache, plus a gated QUIC handshake spike"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[features]
+default = []
+# The QUIC spike. Off by default and deliberately so: it pulls a UDP datapath
+# with a large `unsafe` surface (`quinn-udp`) into a workspace whose selling
+# point is that it has none, and `docs/architecture/04-http3-assessment.md`
+# recommends against shipping it. It exists to be measured, not to be used.
+quic-spike = [
+    "dep:quinn",
+    "dep:quinn-proto",
+    "dep:h3",
+    "dep:h3-quinn",
+    "dep:rustls",
+    "dep:webpki-roots",
+    "dep:tokio",
+    "dep:bytes",
+    "dep:http",
+    "dep:chromulate-fingerprint",
+]
+# Tests that reach the public internet. Hermetic runs stay offline without it.
+network-tests = ["quic-spike"]
+
+[dependencies]
+chromulate-core = { workspace = true }
+percent-encoding = { workspace = true }
+thiserror = { workspace = true }
+
+# Spike-only. See the `quic-spike` feature note above.
+quinn = { version = "0.11.11", default-features = false, features = [
+    "runtime-tokio",
+    "rustls-ring",
+], optional = true }
+# `quinn` does not re-export `TransportParameters` or `TransportError`, and the
+# `crypto::Session` trait needs both. The version is the one `quinn` itself depends on,
+# so Cargo unifies them into a single copy rather than linking two QUIC state machines.
+quinn-proto = { version = "0.11.16", default-features = false, features = [
+    "rustls-ring",
+], optional = true }
+h3 = { version = "0.0.8", optional = true }
+h3-quinn = { version = "0.0.10", optional = true }
+rustls = { workspace = true, optional = true }
+webpki-roots = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+chromulate-fingerprint = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
+# The spike's observations are compared against the shipped Chrome capture. This is a
+# dev-dependency rather than a dependency because nothing in `src/` ships a profile.
+chromulate-profile = { workspace = true }
+
+[lints]
+workspace = true
