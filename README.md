@@ -209,7 +209,9 @@ repository; the measured claims behind the fidelity rows are in
 | CLI | `get`, `fingerprint`, `profiles`, `verify` |
 | Benchmarks | Throughput against `reqwest`, allocations per request, memory, multi-origin, concurrent TLS, a live-origin harness, and a soak test |
 | Fidelity checks | Emitted ClientHello and HTTP/2 preface parsed back off the wire and compared with the profile |
-| Supply chain | `cargo deny` in CI: advisories, licences, duplicate versions, source registries |
+| Supply chain | `cargo deny` in CI: advisories, licences, duplicate versions, source registries; `cargo machete` for dependencies nothing uses |
+| Fuzzing | Six libFuzzer targets over the parsers that read untrusted input — `Set-Cookie`, the cookie date grammar, both decompression paths, proxy URLs, capture JSON. Built on every push, run on the nightly schedule |
+| Memory checking | Miri over `chromulate-core`, the one crate with no I/O and therefore the one Miri can see |
 
 ## Workspace layout
 
