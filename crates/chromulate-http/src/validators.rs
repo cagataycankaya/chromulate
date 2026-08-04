@@ -62,6 +62,7 @@
 //! date arithmetic in this module to get wrong.
 
 use std::collections::{BinaryHeap, HashMap};
+use std::fmt;
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
@@ -292,7 +293,6 @@ impl Inner {
 ///     Some(&HeaderValue::from_static("Tue, 04 Aug 2026 16:32:20 GMT")),
 /// );
 /// ```
-#[derive(Debug)]
 pub struct ValidatorStore {
     inner: RwLock<Inner>,
     /// How many entries the store holds, readable without taking the lock.
@@ -323,6 +323,26 @@ pub struct ValidatorStore {
 impl Default for ValidatorStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl fmt::Debug for ValidatorStore {
+    /// Without the URLs it remembers.
+    ///
+    /// A store holds a whole crawl's worth of them, a query string routinely
+    /// carries tokens, and `Debug` output ends up in logs — the same reason
+    /// `chromulate::Response` prints its host and not its path and query. The
+    /// userinfo is part of the key too, so a derived `Debug` printed passwords.
+    ///
+    /// The count is the lock-free hint rather than [`ValidatorStore::len`], so
+    /// printing a store never blocks on a writer and cannot deadlock against
+    /// one — a `Debug` that takes a lock is a trap in exactly the place it gets
+    /// used, which is inside a panic or an error path.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ValidatorStore")
+            .field("stored", &self.stored.load(Ordering::Relaxed))
+            .field("capacity", &self.capacity)
+            .finish_non_exhaustive()
     }
 }
 
@@ -519,6 +539,18 @@ impl ValidatorStore {
 
     /// Forgets `url`, returning what was stored for it.
     pub fn remove(&self, url: &Url) -> Option<Validators> {
+        // The same hint `condition` and `get` read, and for a sharper reason: a
+        // `200` carrying no validator calls this, and most responses are that.
+        // A store that has never held anything would otherwise take an
+        // *exclusive* lock on every response in the process — worse than the
+        // read lock the type documentation measures, and on a path that can
+        // never have anything to do.
+        //
+        // A stale zero forgets nothing, which is what a `remove` racing an
+        // `insert` from another thread may do in either order anyway.
+        if self.stored.load(Ordering::Acquire) == 0 {
+            return None;
+        }
         let (removed, len) = {
             let mut guard = self.write();
             let removed = guard.entries.remove(borrowed_key(url));
@@ -773,6 +805,61 @@ mod tests {
             "one insert past the bound purges a batch, so the scan is paid once \
              per batch rather than once per insert"
         );
+    }
+
+    /// The bound at the capacity a caller actually gets, rather than at the
+    /// small one the tests above pick to stay quick.
+    #[test]
+    fn the_default_capacity_holds_when_it_is_filled_well_past() {
+        let store = ValidatorStore::new();
+        for index in 0..(DEFAULT_URL_CAPACITY as u32 * 2) {
+            store.insert(&url(&format!("https://example.com/{index}")), etag("\"v\""));
+        }
+
+        assert!(
+            store.len() <= DEFAULT_URL_CAPACITY,
+            "the store held {} entries against a capacity of {DEFAULT_URL_CAPACITY}",
+            store.len()
+        );
+        assert!(
+            store.len() > DEFAULT_URL_CAPACITY - store.purge_batch() - 1,
+            "a purge must take a batch and stop, not keep going: {} left",
+            store.len()
+        );
+    }
+
+    /// A purge may never empty the store, and may never throw away the insert
+    /// that triggered it — which at a capacity of one is the only entry there
+    /// is.
+    #[test]
+    fn a_purge_never_empties_the_store_or_evicts_what_triggered_it() {
+        for capacity in [1usize, 2, 3, 9, 10, 11, 100, DEFAULT_URL_CAPACITY] {
+            let store = ValidatorStore::with_capacity(capacity);
+            assert!(
+                store.purge_target() >= 1,
+                "capacity {capacity} purges to {}",
+                store.purge_target()
+            );
+            assert!(store.purge_target() <= capacity);
+
+            let overflow = u32::try_from(capacity).expect("test capacity fits") + 3;
+            for index in 0..overflow {
+                store.insert(&url(&format!("https://example.com/{index}")), etag("\"v\""));
+            }
+
+            assert!(
+                !store.is_empty(),
+                "capacity {capacity} purged itself to nothing"
+            );
+            assert!(store.len() <= capacity, "capacity {capacity} overflowed");
+            assert!(
+                store
+                    .get(&url(&format!("https://example.com/{}", overflow - 1)))
+                    .is_some(),
+                "capacity {capacity}: the entry whose insert triggered the purge \
+                 must not be its victim"
+            );
+        }
     }
 
     #[test]
@@ -1125,6 +1212,172 @@ mod tests {
                 "{text} must go back exactly as it arrived"
             );
         }
+    }
+
+    // --------------------------------------------------- what it costs
+
+    /// The empty-store path takes no lock — and `observe` is on that path too.
+    ///
+    /// Five origins in six send no validator at all, so the ordinary response
+    /// is a `200` carrying nothing to store. That reaches `remove`, and a write
+    /// lock there puts every response in the process behind every other,
+    /// exclusively, on a store that has never held anything.
+    ///
+    /// Observed rather than reasoned: another thread holds the lock, and this
+    /// asserts the call comes back anyway.
+    #[test]
+    fn a_response_with_no_validator_takes_no_lock_on_an_empty_store() {
+        use std::sync::Arc;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let store = Arc::new(ValidatorStore::new());
+        let held = store.write();
+
+        let (finished, waited) = mpsc::channel();
+        let worker = {
+            let store = Arc::clone(&store);
+            std::thread::spawn(move || {
+                store.observe(
+                    &url("https://example.com/p"),
+                    &Method::GET,
+                    &response(200, &[]),
+                );
+                let _ = finished.send(());
+            })
+        };
+
+        let outcome = waited.recv_timeout(Duration::from_secs(5));
+        drop(held);
+        worker.join().expect("the worker must not panic");
+
+        assert!(
+            outcome.is_ok(),
+            "observing a 200 with no validator blocked on the write lock, so \
+             the empty-store path is not lock-free after all"
+        );
+    }
+
+    /// The same for a direct `remove`, which is the call underneath it.
+    #[test]
+    fn removing_from_an_empty_store_takes_no_lock() {
+        use std::sync::Arc;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let store = Arc::new(ValidatorStore::new());
+        let held = store.write();
+
+        let (finished, waited) = mpsc::channel();
+        let worker = {
+            let store = Arc::clone(&store);
+            std::thread::spawn(move || {
+                let removed = store.remove(&url("https://example.com/p"));
+                let _ = finished.send(removed);
+            })
+        };
+
+        let outcome = waited.recv_timeout(Duration::from_secs(5));
+        drop(held);
+        worker.join().expect("the worker must not panic");
+
+        assert_eq!(
+            outcome.ok(),
+            Some(None),
+            "removing from a store that holds nothing must neither block nor \
+             claim to have forgotten something"
+        );
+    }
+
+    /// A store's `Debug` must not print the URLs it remembers.
+    ///
+    /// `Response`'s own `Debug` omits the path and query for exactly this
+    /// reason — a query string routinely carries tokens and `Debug` output ends
+    /// up in logs — and this type holds a whole crawl's worth of them.
+    #[test]
+    fn the_debug_rendering_carries_no_stored_url() {
+        let store = ValidatorStore::with_capacity(64);
+        store.insert(
+            &url("https://user:hunter2@example.com/p?session=SUPERSECRET"),
+            etag("\"v\""),
+        );
+
+        let rendered = format!("{store:?}");
+        assert!(
+            !rendered.contains("SUPERSECRET"),
+            "a stored query string reached Debug output: {rendered}"
+        );
+        assert!(
+            !rendered.contains("hunter2"),
+            "stored credentials reached Debug output: {rendered}"
+        );
+        assert!(
+            rendered.contains("64"),
+            "the shape of the store is still worth printing: {rendered}"
+        );
+    }
+
+    /// A validator is server-controlled text, and the one thing it must never
+    /// become is a second header. It cannot: the store holds `HeaderValue`s,
+    /// and a `HeaderValue` cannot contain CR, LF or NUL — so a hostile
+    /// `Last-Modified` is refused at the door rather than sanitised on the way
+    /// out.
+    #[test]
+    fn a_delimiter_cannot_reach_the_store_let_alone_be_replayed() {
+        for hostile in [
+            &b"Tue, 04 Aug 2026 16:32:20 GMT\r\nX-Injected: yes"[..],
+            b"line\rone",
+            b"line\none",
+            b"nul\0byte",
+        ] {
+            assert!(
+                HeaderValue::from_bytes(hostile).is_err(),
+                "a header value must refuse {hostile:?}"
+            );
+
+            let built = http::Response::builder()
+                .status(200)
+                .header(LAST_MODIFIED, hostile)
+                .body(());
+            assert!(
+                built.is_err(),
+                "a response carrying {hostile:?} cannot even be constructed, so \
+                 nothing can observe one"
+            );
+        }
+    }
+
+    /// An absurdly long validator is replayed whole rather than truncated: a
+    /// value cut in half would be a different validator, and the origin would
+    /// answer `200` to a question nobody asked.
+    ///
+    /// What this costs is the honest caveat on the capacity constant's 1.3 MB
+    /// figure — that number is for the 100-byte URLs and 32-byte `ETag`s it
+    /// names, and an entry's size is the origin's choice, not this store's.
+    #[test]
+    fn an_absurdly_long_validator_survives_intact() {
+        let long = "x".repeat(64 * 1024);
+        let store = ValidatorStore::new();
+        let target = url("https://example.com/p");
+
+        store.observe(
+            &target,
+            &Method::GET,
+            &response(200, &[("last-modified", &long)]),
+        );
+
+        let headers = conditioned(&store, &target);
+        assert_eq!(
+            headers
+                .get(IF_MODIFIED_SINCE)
+                .map(|value| value.as_bytes().len()),
+            Some(long.len()),
+            "a truncated validator is a different validator"
+        );
+        assert_eq!(
+            headers.get(IF_MODIFIED_SINCE).map(HeaderValue::as_bytes),
+            Some(long.as_bytes())
+        );
     }
 
     // ---------------------------------------------------------- management

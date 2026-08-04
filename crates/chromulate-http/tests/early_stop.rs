@@ -132,6 +132,168 @@ async fn an_abandoned_http1_body_does_not_return_its_connection_to_the_pool() {
     );
 }
 
+/// Frames `payload` as an HTTP/1.1 chunked body, in chunks small enough that
+/// abandoning lands inside one rather than between two.
+fn chunked_framing(payload: &[u8]) -> Vec<u8> {
+    let mut framed = Vec::with_capacity(payload.len() + 1024);
+    for piece in payload.chunks(8 * 1024) {
+        framed.extend_from_slice(format!("{:x}\r\n", piece.len()).as_bytes());
+        framed.extend_from_slice(piece);
+        framed.extend_from_slice(b"\r\n");
+    }
+    framed.extend_from_slice(b"0\r\n\r\n");
+    framed
+}
+
+/// The correctness claim, at every place a read can be abandoned and on both
+/// HTTP/1.1 framings.
+///
+/// What each assertion is worth was checked by mutation: releasing the slot
+/// from a `Drop` on `ReleasingStream`, so an abandoned body hands its socket
+/// back, turns the pool assertion below red at byte 0 and the `accepts`
+/// assertion red one byte short of the end.
+///
+/// The body-equality assertion did **not** go red under that mutation, and the
+/// reason is worth recording rather than leaving as a mystery for whoever
+/// mutates this next: `Pool::checkout` asks `is_usable()`, which is hyper's own
+/// view of a connection whose response body was dropped, so a wrongly pooled
+/// socket is refused at checkout instead of serving the next request a tail.
+/// It stays as the property that must hold — the pool is this crate's guard and
+/// hyper's is not a contract — but no mutation here has shown it failing.
+#[tokio::test]
+async fn an_abandoned_http1_body_never_leaves_a_socket_the_next_request_can_use() {
+    let page = page_with_marker();
+    let marker_end = MARKER.len() + "<html><head>".len();
+
+    let framings: [(&str, Reply); 2] = [
+        ("content-length", Reply::ok().with_body(page.clone())),
+        (
+            "chunked",
+            Reply::ok()
+                .with_header("transfer-encoding", "chunked")
+                .with_body(chunked_framing(&page)),
+        ),
+    ];
+
+    for (framing, reply) in framings {
+        // Byte 0, one byte in, mid-marker, mid-chunk, one short of the end, and
+        // exactly the last byte.
+        for stop_at in [
+            0,
+            1,
+            marker_end as u64,
+            9 * 1024,
+            page.len() as u64 - 1,
+            page.len() as u64,
+        ] {
+            let server = TestServer::always(reply.clone()).await;
+            let engine = h1_engine(&server, "example.test");
+            let url = server.url_for("example.test", "/product");
+
+            let response = engine
+                .send(get(&url))
+                .await
+                .expect("the request must succeed");
+            let prefix = Stop::after(stop_at)
+                .read(response.into_body())
+                .await
+                .expect("the prefix must read");
+
+            assert_eq!(
+                prefix.bytes().len() as u64,
+                stop_at,
+                "{framing}: a budget of {stop_at} must return exactly that many bytes"
+            );
+            assert!(
+                !prefix.is_complete(),
+                "{framing}: stopping at {stop_at} left the stream unfinished, \
+                 however few bytes were outstanding"
+            );
+
+            settle().await;
+            assert_eq!(
+                engine.pool().len(),
+                0,
+                "{framing}: a socket abandoned at byte {stop_at} must not be pooled"
+            );
+
+            let second = engine
+                .send(get(&url))
+                .await
+                .expect("the second request must succeed");
+            let body = second
+                .into_body()
+                .collect(1024 * 1024)
+                .await
+                .expect("the second body must arrive whole");
+
+            assert_eq!(
+                body.len(),
+                page.len(),
+                "{framing}: the second response after abandoning at {stop_at} \
+                 was the wrong length"
+            );
+            assert_eq!(
+                &body[..],
+                &page[..],
+                "{framing}: the second response after abandoning at {stop_at} \
+                 was not the page — a half-read socket was reused"
+            );
+            assert_eq!(
+                server.accepts(),
+                2,
+                "{framing}: abandoning at {stop_at} costs the connection"
+            );
+        }
+    }
+}
+
+/// The other half: a body read to its end on a chunked response returns its
+/// connection, so the discard above is a consequence of abandoning rather than
+/// of the framing.
+#[tokio::test]
+async fn a_chunked_http1_body_read_to_its_end_still_returns_its_connection() {
+    let page = page_with_marker();
+    let server = TestServer::always(
+        Reply::ok()
+            .with_header("transfer-encoding", "chunked")
+            .with_body(chunked_framing(&page)),
+    )
+    .await;
+    let engine = h1_engine(&server, "example.test");
+    let url = server.url_for("example.test", "/product");
+
+    let response = engine
+        .send(get(&url))
+        .await
+        .expect("the request must succeed");
+    let prefix = Stop::marker("not-on-this-page")
+        .read(response.into_body())
+        .await
+        .expect("the prefix must read");
+
+    assert_eq!(prefix.reason(), StopReason::EndOfBody);
+    assert!(prefix.is_complete());
+    assert_eq!(prefix.bytes().len(), page.len());
+    assert_eq!(engine.pool().len(), 1);
+
+    let second = engine
+        .send(get(&url))
+        .await
+        .expect("the second request must succeed");
+    let body = second
+        .into_body()
+        .collect(1024 * 1024)
+        .await
+        .expect("the second body must arrive whole");
+    assert_eq!(&body[..], &page[..]);
+    assert_eq!(
+        server.accepts(),
+        1,
+        "the second request must have reused it"
+    );
+}
+
 #[tokio::test]
 async fn an_http1_body_read_to_its_end_still_returns_its_connection() {
     let server = TestServer::always(Reply::ok().with_body(page_with_marker())).await;

@@ -1,10 +1,13 @@
 //! The validator store against a real socket.
 //!
 //! Every test here drives the real `Engine` over a real TCP connection to a
-//! local server and asserts on what that server received. The store is not
-//! wired into the engine yet — it is called from the test exactly as the
-//! two-line engine wiring would call it, so what these tests prove about the
-//! round trip is what the engine would get.
+//! local server and asserts on what that server received.
+//!
+//! Most of them call `condition` and `observe` from the test, which is what the
+//! engine's own two lines do — see `visit` below. The ones named for the engine
+//! wiring instead hand the store to `EngineBuilder::validators` and let the
+//! engine make both calls itself, because the engine makes them *per hop* with
+//! the hop's own URL, and a redirect is where that stops being the same thing.
 //!
 //! Nothing below reaches the network: the resolver only knows the host each
 //! test pins to the loopback listener.
@@ -94,6 +97,182 @@ fn conditional_origin(recorded: &Recorded) -> Reply {
             )
             .with_body(vec![b'x'; FULL_BODY_LEN])
     }
+}
+
+/// An engine that makes the two calls itself, per hop, as it does in `hop`.
+fn engine_with_store(server: &TestServer, host: &str, store: &Arc<ValidatorStore>) -> Engine {
+    let resolver = StaticResolver::empty().with_host(host.to_owned(), vec![server.addr()]);
+    let mut config = EngineConfig::new(Arc::new(Profile::chrome_stable()));
+    config.connect_timeout = Some(Duration::from_secs(5));
+    Engine::builder(config)
+        .resolver(Arc::new(resolver))
+        .validators(Arc::clone(store))
+        .build()
+        .expect("the engine must build")
+}
+
+/// The silent-corruption case, through the engine's own wiring.
+///
+/// A redirect means one logical request touches two URLs with two different
+/// representations. A validator learned from the second, remembered against the
+/// first, would let the origin answer `304` for a representation the caller
+/// never saw — and the caller would skip parsing a page it does not have.
+#[tokio::test]
+async fn a_validator_learned_across_a_redirect_belongs_to_the_url_that_answered() {
+    let server = TestServer::start(|recorded: &Recorded| {
+        if recorded.target == "/old" {
+            return Reply::redirect(302, "/new");
+        }
+        if recorded.header("if-none-match").is_some() {
+            Reply::new(304)
+        } else {
+            Reply::ok()
+                .with_header("etag", "\"the-new-representation\"")
+                .with_body(vec![b'x'; FULL_BODY_LEN])
+        }
+    })
+    .await;
+    let store = Arc::new(ValidatorStore::new());
+    let engine = engine_with_store(&server, "hop.test", &store);
+    let old = Url::parse(&server.url_for("hop.test", "/old")).expect("url");
+    let new = Url::parse(&server.url_for("hop.test", "/new")).expect("url");
+
+    engine
+        .send(get(&old))
+        .await
+        .expect("the request must complete");
+
+    assert!(
+        store.get(&old).is_none(),
+        "a 302 describes no representation, so the URL that redirected must \
+         remember nothing"
+    );
+    assert_eq!(
+        store.get(&new).and_then(|stored| stored.etag),
+        Some(HeaderValue::from_static("\"the-new-representation\"")),
+        "the validator belongs to the URL that answered"
+    );
+
+    engine
+        .send(get(&old))
+        .await
+        .expect("the second request must complete");
+
+    let received = server.received();
+    assert_eq!(received.len(), 4, "two hops, twice");
+    assert!(
+        received[2].header("if-none-match").is_none(),
+        "the second visit's first hop is /old, which has no representation of \
+         its own to be conditional about"
+    );
+    assert_eq!(
+        received[3].header("if-none-match"),
+        Some("\"the-new-representation\""),
+        "and the hop that does have one sends it"
+    );
+}
+
+/// The store is keyed by URL, and a query is part of a URL. Two products that
+/// differ only in a query parameter are two representations.
+#[tokio::test]
+async fn a_validator_is_never_replayed_on_a_url_that_differs_by_query_or_path() {
+    let server = TestServer::start(|recorded: &Recorded| {
+        if recorded.header("if-none-match").is_some() {
+            Reply::new(304)
+        } else {
+            Reply::ok()
+                .with_header("etag", "\"one\"")
+                .with_body(vec![b'x'; 32])
+        }
+    })
+    .await;
+    let store = Arc::new(ValidatorStore::new());
+    let engine = engine_with_store(&server, "query.test", &store);
+
+    let first = Url::parse(&server.url_for("query.test", "/p?id=1")).expect("url");
+    engine
+        .send(get(&first))
+        .await
+        .expect("the request must complete");
+
+    for other in ["/p?id=2", "/p", "/p?id=1&x=2", "/q?id=1"] {
+        let target = Url::parse(&server.url_for("query.test", other)).expect("url");
+        engine
+            .send(get(&target))
+            .await
+            .expect("the request must complete");
+        let received = server.received();
+        let last = received.last().expect("a request was recorded");
+        assert_eq!(last.target, other);
+        assert!(
+            last.header("if-none-match").is_none(),
+            "{other} is a different resource from /p?id=1 and must not carry \
+             its validator"
+        );
+    }
+
+    // The fragment is the exception, because it is never sent: the origin is
+    // asked the same question and must get the same conditional header.
+    let fragment = Url::parse(&server.url_for("query.test", "/p?id=1#section")).expect("url");
+    engine
+        .send(get(&fragment))
+        .await
+        .expect("the request must complete");
+    let received = server.received();
+    assert_eq!(
+        received
+            .last()
+            .expect("a request was recorded")
+            .header("if-none-match"),
+        Some("\"one\""),
+        "a fragment cannot distinguish two requests, so it must not split the entry"
+    );
+}
+
+/// `HEAD` and `GET` share an entry, which RFC 9110 §9.3.2 licenses: a `HEAD`
+/// response's fields are the ones the equivalent `GET` would have sent.
+///
+/// The consequence is worth stating rather than discovering: a caller that only
+/// ever sent `HEAD` and then sends a `GET` can be answered `304`, having never
+/// held the body. That is visible — the status is `304`, not a `200` with an
+/// empty body — but it is not nothing, and a caller that treats `304` as
+/// "unchanged since I parsed it" has not parsed it.
+#[tokio::test]
+async fn a_validator_learned_from_a_head_is_replayed_on_a_later_get() {
+    let server = TestServer::start(|recorded: &Recorded| {
+        if recorded.header("if-none-match").is_some() {
+            Reply::new(304)
+        } else {
+            Reply::ok()
+                .with_header("etag", "\"same-representation\"")
+                .with_body(vec![b'x'; FULL_BODY_LEN])
+        }
+    })
+    .await;
+    let store = Arc::new(ValidatorStore::new());
+    let engine = engine_with_store(&server, "head.test", &store);
+    let url = Url::parse(&server.url_for("head.test", "/p")).expect("url");
+
+    let head = http::Request::builder()
+        .method(Method::HEAD)
+        .uri(url.as_str())
+        .body(Body::empty())
+        .expect("the test request must build");
+    engine.send(head).await.expect("the HEAD must complete");
+
+    let response = engine.send(get(&url)).await.expect("the GET must complete");
+
+    assert_eq!(
+        server.received()[1].header("if-none-match"),
+        Some("\"same-representation\""),
+        "RFC 9110 9.3.2: a HEAD's fields describe the representation a GET \
+         would have returned"
+    );
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_MODIFIED,
+        "so the GET is answered 304 — with no body the caller ever had"
+    );
 }
 
 #[tokio::test]
@@ -475,6 +654,60 @@ async fn the_conditional_headers_are_appended_and_leave_the_profile_order_untouc
         &conditioned[plain.len()..],
         ["if-none-match", "if-modified-since"],
         "appended at the end, which is not a captured browser placement"
+    );
+}
+
+/// The header-order claim again, through the engine's own call site rather
+/// than the test's.
+///
+/// The engine calls `condition` inside `hop`, before `apply_headers` and after
+/// the version is settled, which is a different place from where `visit` calls
+/// it. If that placement ever moved, the profile's captured order — which is
+/// the fingerprint — would move with it, and no test above would notice.
+#[tokio::test]
+async fn the_engines_own_wiring_leaves_the_profile_header_order_untouched() {
+    let with_store = TestServer::always(Reply::ok()).await;
+    let store = Arc::new(ValidatorStore::new());
+    let engine = engine_with_store(&with_store, "wired.test", &store);
+    let url = Url::parse(&with_store.url_for("wired.test", "/p")).expect("url");
+    store.insert(
+        &url,
+        Validators {
+            etag: Some(HeaderValue::from_static("\"e\"")),
+            last_modified: Some(HeaderValue::from_static(OBSERVED_LAST_MODIFIED)),
+        },
+    );
+    engine
+        .send(get(&url))
+        .await
+        .expect("the request must complete");
+    let conditioned = with_store.received()[0].header_order.clone();
+
+    // The same engine with no store at all: the feature off.
+    let without_store = TestServer::always(Reply::ok()).await;
+    let plain_engine = engine_for(&without_store, "wired.test");
+    let plain_url = Url::parse(&without_store.url_for("wired.test", "/p")).expect("url");
+    plain_engine
+        .send(get(&plain_url))
+        .await
+        .expect("the request must complete");
+    let plain = without_store.received()[0].header_order.clone();
+
+    assert_eq!(
+        plain.len(),
+        12,
+        "the profile's captured order is twelve headers: {plain:?}"
+    );
+    assert_eq!(
+        &conditioned[..plain.len()],
+        &plain[..],
+        "every header the profile names must keep its captured position"
+    );
+    assert_eq!(
+        &conditioned[plain.len()..],
+        ["if-none-match", "if-modified-since"],
+        "appended at the end, which is a guess by omission rather than a \
+         captured browser placement"
     );
 }
 

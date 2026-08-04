@@ -247,6 +247,69 @@ async fn the_clients_maximum_response_size_caps_the_budget_without_failing() {
     );
 }
 
+/// The same ceiling, on the path the test above structurally cannot reach.
+///
+/// Its marker is never present, so nothing ever sets a stopping point — and it
+/// is the stopping point a match sets that used to be applied without checking
+/// it against the ceiling, returning as much as a whole chunk more than
+/// `max_response_size`.
+#[tokio::test]
+async fn the_clients_maximum_response_size_holds_when_the_marker_is_found() {
+    let mut page = vec![b'x'; 8 * 1024];
+    page.extend_from_slice(b"application/ld+json");
+    page.resize(64 * 1024, b'y');
+
+    let server = TestServer::always(Reply::ok().with_body(page)).await;
+    let client = build(&server, &["example.test"], |builder| {
+        builder.max_response_size(4096)
+    });
+
+    // The marker sits past the ceiling, so it is not in what may be read.
+    let prefix = client
+        .get(server.url_for("example.test", "/product"))
+        .send()
+        .await
+        .expect("the request must succeed")
+        .bytes_until(Stop::marker("application/ld+json").plus(32 * 1024))
+        .await
+        .expect("the prefix must read");
+
+    assert_eq!(prefix.bytes().len(), 4096);
+    assert_eq!(prefix.reason(), StopReason::Budget);
+    assert!(
+        !prefix.matched(),
+        "the marker is past the client's ceiling, so it is not in what was read"
+    );
+}
+
+/// The marker is inside the ceiling and the trailing window runs past it. The
+/// match is real and must be reported, but the ceiling is still what bounds
+/// the bytes.
+#[tokio::test]
+async fn a_window_that_runs_past_the_clients_ceiling_is_cut_at_the_ceiling() {
+    let mut page = vec![b'x'; 100];
+    page.extend_from_slice(b"application/ld+json");
+    page.resize(64 * 1024, b'y');
+
+    let server = TestServer::always(Reply::ok().with_body(page)).await;
+    let client = build(&server, &["example.test"], |builder| {
+        builder.max_response_size(4096)
+    });
+
+    let prefix = client
+        .get(server.url_for("example.test", "/product"))
+        .send()
+        .await
+        .expect("the request must succeed")
+        .bytes_until(Stop::marker("application/ld+json").plus(32 * 1024))
+        .await
+        .expect("the prefix must read");
+
+    assert_eq!(prefix.bytes().len(), 4096);
+    assert_eq!(prefix.reason(), StopReason::Matched);
+    assert!(prefix.matched());
+}
+
 #[tokio::test]
 async fn a_smaller_budget_than_the_clients_ceiling_is_the_one_that_applies() {
     let server = TestServer::always(Reply::ok().with_body(vec![b'x'; 64 * 1024])).await;
