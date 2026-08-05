@@ -73,7 +73,7 @@ that breaking changes may land in a minor release.
   response whose `Vary` names a header the engine writes after the cache has seen the
   request. The sharded lock costs 70 ns uncontended, 174 ns/op across eight threads against
   247 ns/op with a single shard.
-- **`Response::bytes_until`**, which reads only the front of a body — stopping on a byte
+- **`Response::bytes_until`**, behind the off-by-default `early-stop` feature, which reads only the front of a body — stopping on a byte
   marker (found even when split across chunks), a predicate over the decoded prefix, or a
   byte budget — and reports which. On HTTP/2 stopping early resets the stream and keeps the
   pooled connection, observed as `RST_STREAM(CANCEL)` at a real h2 origin; on HTTP/1.1 it
@@ -89,6 +89,11 @@ that breaking changes may land in a minor release.
   second run the floor was about 110 ms of think time and the full-body read was already
   near it. Treat the byte figure as the claim and the time figure as conditional on the
   network.
+
+  It is off by default and the default read is unaffected either way: `bytes()` has always
+  returned the whole body and still does, so nothing truncates unless a caller asks for it.
+  What the feature gates is whether the API exists at all, which keeps `Stop`, `Prefix` and
+  `StopReason` out of the surface of a build that does not want a truncating read.
 
   For the same reason this is **not a competitive advantage**. Measured against `reqwest`
   and `wreq` hand-rolling the same early stop over their own byte streams, all three read

@@ -111,7 +111,9 @@ mod response;
 
 pub use client::{Client, ClientBuilder, DEFAULT_MAX_RESPONSE_SIZE};
 pub use request::RequestBuilder;
-pub use response::{BodyStream, Prefix, Response, Stop, StopReason};
+pub use response::{BodyStream, Response};
+#[cfg(feature = "early-stop")]
+pub use response::{Prefix, Stop, StopReason};
 
 pub use chromulate_core::{
     Body, BoxError, BoxFuture, Error, Exchange, FetchDest, FetchMode, Middleware, Next, Origin,

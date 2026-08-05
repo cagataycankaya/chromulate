@@ -2,11 +2,14 @@
 //! deadline, returning the connection to the pool at the right moment, and
 //! stopping a read once the caller has seen what it came for.
 
+#[cfg(feature = "early-stop")]
 use std::fmt;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
+#[cfg(feature = "early-stop")]
+use bytes::BytesMut;
 use chromulate_core::{Body, Error, Phase, Result, body_error};
 use futures_core::Stream;
 use futures_util::StreamExt as _;
@@ -172,6 +175,7 @@ impl Stream for BoundedStream {
 
 // ------------------------------------------------- stopping a read early
 
+#[cfg(feature = "early-stop")]
 /// Why an early-stopping body read ended.
 ///
 /// A caller that cannot tell "the marker is not on this page" from "found it"
@@ -190,6 +194,7 @@ pub enum StopReason {
     Budget,
 }
 
+#[cfg(feature = "early-stop")]
 /// The front of a body, and why the read stopped there.
 #[derive(Debug, Clone)]
 pub struct Prefix {
@@ -198,6 +203,7 @@ pub struct Prefix {
     complete: bool,
 }
 
+#[cfg(feature = "early-stop")]
 impl Prefix {
     /// The bytes that were read.
     #[must_use]
@@ -239,6 +245,7 @@ impl Prefix {
     }
 }
 
+#[cfg(feature = "early-stop")]
 /// What a read is looking for, and how far it will go to find it.
 ///
 /// Structured product data sits at the front of a page: across six Turkish
@@ -305,13 +312,16 @@ pub struct Stop {
 
 /// A caller's condition, boxed because it is one per read and the read is
 /// already awaiting a socket.
+#[cfg(feature = "early-stop")]
 type Predicate = Box<dyn FnMut(&[u8]) -> bool + Send>;
 
+#[cfg(feature = "early-stop")]
 enum Condition {
     Marker(Bytes),
     Predicate(Predicate),
 }
 
+#[cfg(feature = "early-stop")]
 impl fmt::Debug for Stop {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let condition = match &self.condition {
@@ -327,6 +337,7 @@ impl fmt::Debug for Stop {
     }
 }
 
+#[cfg(feature = "early-stop")]
 impl Stop {
     /// Stops when `marker` appears in the decoded body.
     ///
@@ -502,6 +513,7 @@ impl Stop {
     }
 }
 
+#[cfg(feature = "early-stop")]
 /// Freezes `buf` and keeps its first `length` bytes, sharing the allocation
 /// rather than copying.
 fn cut(buf: BytesMut, length: u64) -> Bytes {
@@ -512,6 +524,7 @@ fn cut(buf: BytesMut, length: u64) -> Bytes {
     bytes.slice(..keep)
 }
 
+#[cfg(feature = "early-stop")]
 /// The first position of `needle` in `haystack`.
 ///
 /// Scans for the first byte and only then compares, which keeps the common
@@ -571,6 +584,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "early-stop")]
     #[tokio::test]
     async fn an_unbounded_deadline_leaves_the_body_alone() {
         let bounded = bounded_by(Body::fixed("x"), Deadline::starting_now(None));
@@ -579,6 +593,7 @@ mod tests {
 
     // ------------------------------------------------------- stopping early
 
+    #[cfg(feature = "early-stop")]
     /// A body whose chunk boundaries the test chooses, rather than whichever
     /// ones a socket happened to produce.
     fn chunked(chunks: &[&'static str]) -> Body {
@@ -589,6 +604,7 @@ mod tests {
         Body::stream(stream::iter(chunks), None)
     }
 
+    #[cfg(feature = "early-stop")]
     /// The bug every hand-rolled early stop has. The marker is cut in half by
     /// the chunk boundary on purpose: scanning each chunk on its own, or
     /// scanning the accumulated buffer only from where the new bytes begin,
@@ -607,6 +623,7 @@ mod tests {
         assert!(!prefix.is_complete());
     }
 
+    #[cfg(feature = "early-stop")]
     /// The same split, one byte at a time, so the boundary lands at every
     /// possible offset inside the marker instead of only the one a single
     /// fixture picks.
@@ -633,6 +650,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "early-stop")]
     /// Two chunks is the case the overlap rescan was written for; three is the
     /// case that catches an overlap measured against the last chunk rather than
     /// against everything already buffered.
@@ -647,6 +665,7 @@ mod tests {
         assert_eq!(prefix.bytes(), "<head>application/ld+json");
     }
 
+    #[cfg(feature = "early-stop")]
     /// A marker whose first byte repeats inside itself, split at every
     /// boundary. The naive scan restarts past the whole failed candidate and
     /// misses the match that begins inside it.
@@ -673,6 +692,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "early-stop")]
     /// The first chunk is shorter than the marker, so a scan that gives up when
     /// the buffer is too short to hold the needle must not give up for good.
     #[tokio::test]
@@ -686,6 +706,7 @@ mod tests {
         assert_eq!(prefix.bytes(), "<head>application/ld+json");
     }
 
+    #[cfg(feature = "early-stop")]
     #[tokio::test]
     async fn a_marker_at_the_very_first_byte_is_found() {
         let prefix = Stop::marker("ld+json")
@@ -697,6 +718,7 @@ mod tests {
         assert_eq!(prefix.bytes(), "ld+json");
     }
 
+    #[cfg(feature = "early-stop")]
     /// The marker ends on the body's last byte, so the window is empty and the
     /// stream is never polled again.
     #[tokio::test]
@@ -715,6 +737,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "early-stop")]
     /// An empty marker matches at the front of the first chunk, so the read
     /// stops having consumed nothing.
     ///
@@ -748,6 +771,7 @@ mod tests {
         assert!(prefix.is_complete());
     }
 
+    #[cfg(feature = "early-stop")]
     #[tokio::test]
     async fn a_trailing_window_is_taken_after_the_marker_and_cut_to_length() {
         let body = chunked(&["aaa", "MARKER", "0123456789", "never read"]);
@@ -762,6 +786,7 @@ mod tests {
         assert_eq!(prefix.reason(), StopReason::Matched);
     }
 
+    #[cfg(feature = "early-stop")]
     #[tokio::test]
     async fn a_window_the_body_is_too_short_for_still_reports_a_match() {
         let prefix = Stop::marker("MARKER")
@@ -778,6 +803,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "early-stop")]
     #[tokio::test]
     async fn a_body_without_the_marker_reports_that_rather_than_a_short_read() {
         let prefix = Stop::marker("application/ld+json")
@@ -794,6 +820,7 @@ mod tests {
         assert_eq!(prefix.bytes(), "a page with no structured data");
     }
 
+    #[cfg(feature = "early-stop")]
     #[tokio::test]
     async fn a_budget_stops_the_read_and_says_the_marker_was_not_found() {
         let prefix = Stop::marker("MARKER")
@@ -807,6 +834,7 @@ mod tests {
         assert!(!prefix.is_complete());
     }
 
+    #[cfg(feature = "early-stop")]
     #[tokio::test]
     async fn a_budget_that_cuts_the_window_short_still_reports_the_match() {
         let prefix = Stop::marker("MARKER")
@@ -824,6 +852,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "early-stop")]
     /// The budget is a ceiling on what comes back, and where the socket
     /// happened to split the body may not change the answer.
     ///
@@ -857,6 +886,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "early-stop")]
     /// `matched()` is the question a scraper asks, so it may never be true of
     /// bytes the marker is not in.
     #[tokio::test]
@@ -877,6 +907,7 @@ mod tests {
         assert_eq!(prefix.reason(), StopReason::Budget);
     }
 
+    #[cfg(feature = "early-stop")]
     /// The trailing window is bounded by the budget, whether or not it all
     /// arrived in one chunk. `within` is what a caller compares against its own
     /// ceiling — `Response::bytes_until` passes `max_response_size` through it —
@@ -898,6 +929,7 @@ mod tests {
         assert_eq!(prefix.reason(), StopReason::Matched);
     }
 
+    #[cfg(feature = "early-stop")]
     /// The property both of the above are instances of, over every budget and
     /// every chunk boundary this fixture can produce.
     #[tokio::test]
@@ -929,6 +961,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "early-stop")]
     /// The same body, budget and marker must give the same answer whoever split
     /// the chunks — the reason as well as the bytes.
     #[tokio::test]
@@ -963,6 +996,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "early-stop")]
     #[tokio::test]
     async fn a_bare_budget_reads_a_fixed_prefix_and_nothing_else() {
         let prefix = Stop::after(5)
@@ -975,6 +1009,7 @@ mod tests {
         assert!(!prefix.is_complete());
     }
 
+    #[cfg(feature = "early-stop")]
     #[tokio::test]
     async fn a_budget_larger_than_the_body_reads_all_of_it() {
         let prefix = Stop::after(4096)
@@ -987,6 +1022,7 @@ mod tests {
         assert!(prefix.is_complete());
     }
 
+    #[cfg(feature = "early-stop")]
     /// The predicate is handed every byte read so far, which is what removes
     /// the boundary problem for a caller who needs more than a byte marker.
     #[tokio::test]
@@ -1011,6 +1047,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "early-stop")]
     #[tokio::test]
     async fn a_predicate_that_never_fires_reads_to_the_end() {
         let prefix = Stop::when(|_| false)
@@ -1022,6 +1059,7 @@ mod tests {
         assert_eq!(prefix.reason(), StopReason::EndOfBody);
     }
 
+    #[cfg(feature = "early-stop")]
     #[tokio::test]
     async fn a_failing_body_reports_its_error_rather_than_a_short_prefix() {
         let chunks: Vec<Result<Bytes>> = vec![
@@ -1039,6 +1077,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "early-stop")]
     #[tokio::test]
     async fn an_empty_body_is_a_complete_read_of_nothing() {
         let prefix = Stop::marker("anything")
@@ -1051,6 +1090,7 @@ mod tests {
         assert!(prefix.is_complete());
     }
 
+    #[cfg(feature = "early-stop")]
     #[test]
     fn a_stop_reports_the_budget_a_caller_has_to_compare_against_its_own() {
         assert_eq!(Stop::marker("x").budget(), None);
@@ -1058,6 +1098,7 @@ mod tests {
         assert_eq!(Stop::after(64).budget(), Some(64));
     }
 
+    #[cfg(feature = "early-stop")]
     #[test]
     fn find_locates_a_needle_that_repeats_its_own_first_byte() {
         // The naive "first byte then compare, and restart past the whole

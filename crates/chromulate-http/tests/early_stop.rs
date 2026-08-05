@@ -19,6 +19,8 @@
 //!   sends is *observed at the peer* rather than inferred from the client
 //!   carrying on.
 
+#![cfg(feature = "early-stop")]
+
 mod common;
 
 use std::io;

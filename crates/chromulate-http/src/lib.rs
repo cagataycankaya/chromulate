@@ -77,6 +77,7 @@ pub mod validators;
 pub use adaptive::{
     AdaptiveConcurrency, Ceiling, ConcurrencyConfig, DEFAULT_ORIGIN_CAPACITY, Permit, Signal,
 };
+#[cfg(feature = "early-stop")]
 pub use body::{Prefix, Stop, StopReason};
 pub use engine::{Engine, EngineBuilder, EngineConfig, RequestUrl, ResponseInfo};
 pub use hsts::{DEFAULT_HOST_CAPACITY, HstsStore};

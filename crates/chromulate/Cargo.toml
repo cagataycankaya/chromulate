@@ -71,6 +71,8 @@ cache = ["chromulate-http/cache"]
 # Conditional revalidation independent of storability. Deliberately not browser
 # behaviour — read `ValidatorStore`'s documentation before enabling it.
 validator-store = ["chromulate-http/validator-store"]
+# `Response::bytes_until`. The default read is the whole body either way.
+early-stop = ["chromulate-http/early-stop"]
 # Tests that reach the public internet. Off by default so `cargo test
 # --workspace` stays hermetic.
 network-tests = []

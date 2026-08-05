@@ -11,7 +11,9 @@ use std::time::{Duration, SystemTime};
 
 use chromulate::cookie::Jar;
 use chromulate::dns::StaticResolver;
-use chromulate::{Client, Error, Profile, RedirectPolicy, Stop, StopReason};
+use chromulate::{Client, Error, Profile, RedirectPolicy};
+#[cfg(feature = "early-stop")]
+use chromulate::{Stop, StopReason};
 use common::{Reply, TestServer};
 use futures_util::StreamExt as _;
 
@@ -161,6 +163,7 @@ async fn bytes_still_reads_the_whole_body_and_returns_the_connection() {
     );
 }
 
+#[cfg(feature = "early-stop")]
 #[tokio::test]
 async fn bytes_until_a_marker_reads_the_front_of_the_body_and_says_it_matched() {
     let mut page = b"<head>application/ld+json{\"price\":42}".to_vec();
@@ -187,6 +190,7 @@ async fn bytes_until_a_marker_reads_the_front_of_the_body_and_says_it_matched() 
     );
 }
 
+#[cfg(feature = "early-stop")]
 /// The distinction a scraper mis-parses without: this page has no marker, and
 /// the answer has to say so rather than hand back a short read.
 #[tokio::test]
@@ -209,6 +213,7 @@ async fn bytes_until_reports_a_page_that_never_contained_the_marker() {
     assert_eq!(prefix.bytes(), "a page with no structured data");
 }
 
+#[cfg(feature = "early-stop")]
 /// The client's ceiling still bounds the read, but a truncating read that
 /// failed on truncation would have nothing to report, so it stops instead.
 #[tokio::test]
@@ -247,6 +252,7 @@ async fn the_clients_maximum_response_size_caps_the_budget_without_failing() {
     );
 }
 
+#[cfg(feature = "early-stop")]
 /// The same ceiling, on the path the test above structurally cannot reach.
 ///
 /// Its marker is never present, so nothing ever sets a stopping point — and it
@@ -282,6 +288,7 @@ async fn the_clients_maximum_response_size_holds_when_the_marker_is_found() {
     );
 }
 
+#[cfg(feature = "early-stop")]
 /// The marker is inside the ceiling and the trailing window runs past it. The
 /// match is real and must be reported, but the ceiling is still what bounds
 /// the bytes.
@@ -310,6 +317,7 @@ async fn a_window_that_runs_past_the_clients_ceiling_is_cut_at_the_ceiling() {
     assert!(prefix.matched());
 }
 
+#[cfg(feature = "early-stop")]
 #[tokio::test]
 async fn a_smaller_budget_than_the_clients_ceiling_is_the_one_that_applies() {
     let server = TestServer::always(Reply::ok().with_body(vec![b'x'; 64 * 1024])).await;

@@ -52,6 +52,18 @@ tokio-rustls.workspace = true
 
 [features]
 default = []
+# `Response::bytes_until`: read only the front of a body and stop at a marker, a
+# predicate or a byte budget.
+#
+# Off by default, and the default read is unaffected either way — `bytes()` has
+# always returned the whole body and still does. What the feature gates is the
+# API's existence, so a build that never wants a truncating read does not carry
+# `Stop`, `Prefix` and `StopReason` in its surface. Measured on six marketplace
+# pages, the saving is real but conditional: 82% fewer bytes against a marker
+# near the front, and nothing at all where the wanted data sits at the end of the
+# page. Read `Stop`'s documentation before turning it on — stopping in the wrong
+# place produces a short read, not an error.
+early-stop = []
 # Tests that reach the public internet. Off by default so `cargo test --workspace`
 # stays hermetic.
 network-tests = []

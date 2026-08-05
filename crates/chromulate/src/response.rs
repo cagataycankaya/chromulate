@@ -12,6 +12,7 @@ use chromulate_core::{
 use chromulate_http::ResponseInfo;
 use futures_core::Stream;
 
+#[cfg(feature = "early-stop")]
 pub use chromulate_http::{Prefix, Stop, StopReason};
 
 /// A response, with the URL that produced it and what it cost.
@@ -204,6 +205,7 @@ impl Response {
     /// # Ok(())
     /// # }
     /// ```
+    #[cfg(feature = "early-stop")]
     pub async fn bytes_until(self, stop: Stop) -> Result<Prefix> {
         let limit = self.max_size;
         // The client's ceiling still applies, but as a stopping point rather
