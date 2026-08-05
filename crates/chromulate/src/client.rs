@@ -9,7 +9,9 @@ use chromulate_cookie::Jar;
 use chromulate_core::{
     CookieStore, Error, Middleware, RedirectPolicy, Resolve, Result, reexport::HeaderValue,
 };
-use chromulate_http::{Engine, EngineConfig, PoolConfig, Retry, RetryPolicy};
+use chromulate_http::{
+    Engine, EngineConfig, PoolConfig, ProxyIsolation, Retry, RetryPolicy, SessionFactory,
+};
 use chromulate_profile::Profile;
 use chromulate_proxy::{Proxy, ProxyProvider, ProxyUrl, RoundRobin, Single};
 use chromulate_tls::TlsEngine;
@@ -85,9 +87,26 @@ impl Client {
     }
 
     /// The cookie jar, when this client keeps one.
+    ///
+    /// Under [`ProxyIsolation::Shared`] — which is what a client with no proxy,
+    /// one proxy, or a one-member pool gets — this is the jar every request
+    /// uses. Under [`ProxyIsolation::PerProxy`] each exit keeps its own jar and
+    /// this is the one used for requests that go through no proxy at all, which
+    /// on a fully proxied client is none of them. Ask
+    /// [`Client::proxy_isolation`] which of the two you have.
     #[must_use]
     pub fn cookies(&self) -> Option<&Arc<Jar>> {
         self.inner.cookies.as_ref()
+    }
+
+    /// Whether each proxy keeps its own session, or whether every route shares
+    /// one.
+    ///
+    /// See [`ClientBuilder::proxy_isolation`] for how this is chosen when
+    /// nothing states it.
+    #[must_use]
+    pub fn proxy_isolation(&self) -> ProxyIsolation {
+        self.inner.engine.proxy_isolation()
     }
 
     /// Runs `edit` against the HSTS store this client consults before every
@@ -155,6 +174,50 @@ impl Client {
     }
 }
 
+/// How many exit addresses a builder's proxy configuration can produce.
+///
+/// This is what decides the isolation default, and it is a property of the call
+/// site rather than of anything observed at run time: [`ClientBuilder::proxy`]
+/// names one exit, [`ClientBuilder::proxy_pool`] names as many as its list has,
+/// and [`ClientBuilder::proxy_provider`] names a trait object that could return
+/// anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProxyRoutes {
+    /// No proxy: one route, and it is the direct one.
+    Direct,
+    /// Exactly one exit, so isolating it from itself changes nothing.
+    One,
+    /// Several exits named up front.
+    Several,
+    /// A caller's own provider. Assumed to rotate, because a provider that does
+    /// not is `Single` and would have been reached through `proxy`.
+    Unknown,
+}
+
+impl ProxyRoutes {
+    /// Whether this configuration can put requests on more than one exit.
+    const fn may_rotate(self) -> bool {
+        matches!(self, Self::Several | Self::Unknown)
+    }
+}
+
+/// Mints one jar per exit for an isolated client.
+///
+/// A struct rather than a closure so the `cookie_store(false)` case is carried
+/// explicitly: an engine that keeps no cookies still isolates client-hint
+/// grants, and a factory that quietly handed it a jar anyway would turn the
+/// switch off.
+struct JarPerRoute {
+    enabled: bool,
+}
+
+impl SessionFactory for JarPerRoute {
+    fn cookies(&self) -> Option<Arc<dyn CookieStore>> {
+        self.enabled
+            .then(|| Arc::new(Jar::new()) as Arc<dyn CookieStore>)
+    }
+}
+
 /// Assembles a [`Client`].
 pub struct ClientBuilder {
     profile: Arc<Profile>,
@@ -165,6 +228,8 @@ pub struct ClientBuilder {
     redirect: RedirectPolicy,
     resolver: Option<Arc<dyn Resolve>>,
     proxies: Option<Arc<dyn ProxyProvider>>,
+    routes: ProxyRoutes,
+    isolation: Option<ProxyIsolation>,
     middleware: Vec<Arc<dyn Middleware>>,
     retry: Option<Retry>,
     default_headers: HeaderMap,
@@ -182,6 +247,8 @@ impl fmt::Debug for ClientBuilder {
             .field("cookie_store", &self.cookie_store)
             .field("timeout", &self.timeout)
             .field("redirect", &self.redirect)
+            .field("routes", &self.routes)
+            .field("isolation", &self.isolation)
             .field("middleware", &self.middleware.len())
             .finish_non_exhaustive()
     }
@@ -222,6 +289,8 @@ impl ClientBuilder {
             redirect: RedirectPolicy::default(),
             resolver: None,
             proxies: None,
+            routes: ProxyRoutes::Direct,
+            isolation: None,
             middleware: Vec::new(),
             retry: None,
             default_headers: HeaderMap::new(),
@@ -255,6 +324,17 @@ impl ClientBuilder {
     }
 
     /// Uses a specific cookie jar, so several clients can share a session.
+    ///
+    /// Naming one jar is also how a caller says "one session" when several
+    /// proxies are configured: unless [`proxy_isolation`] states otherwise, a
+    /// builder handed a jar keeps that jar for every exit rather than giving
+    /// each its own. Saying both — this and
+    /// [`ProxyIsolation::PerProxy`] — is a contradiction and [`build`] refuses
+    /// it, because the jar could then only serve unproxied requests and
+    /// ignoring it silently is the failure mode isolation exists to remove.
+    ///
+    /// [`build`]: ClientBuilder::build
+    /// [`proxy_isolation`]: ClientBuilder::proxy_isolation
     #[must_use]
     pub fn cookie_jar(mut self, jar: Arc<Jar>) -> Self {
         self.cookie_store = true;
@@ -320,10 +400,16 @@ impl ClientBuilder {
     pub fn proxy(mut self, proxy: impl AsRef<str>) -> Result<Self> {
         let url = ProxyUrl::parse(proxy.as_ref())?;
         self.proxies = Some(Arc::new(Single::new(Proxy::new(url))));
+        self.routes = ProxyRoutes::One;
         Ok(self)
     }
 
     /// Rotates over a pool of proxies.
+    ///
+    /// **Each proxy gets its own cookies** — see
+    /// [`proxy_isolation`](ClientBuilder::proxy_isolation), which is where that
+    /// is decided and how it is turned off. A pool of one is one exit and so is
+    /// left sharing.
     ///
     /// # Errors
     ///
@@ -341,15 +427,86 @@ impl ClientBuilder {
         if parsed.is_empty() {
             return Err(Error::config("a proxy pool needs at least one proxy"));
         }
+        self.routes = if parsed.len() == 1 {
+            ProxyRoutes::One
+        } else {
+            ProxyRoutes::Several
+        };
         self.proxies = Some(Arc::new(RoundRobin::new(parsed)));
         Ok(self)
     }
 
     /// Uses a proxy provider directly, for a rotation policy this crate does
     /// not ship.
+    ///
+    /// A provider is assumed to rotate, so each exit it returns gets its own
+    /// session. State [`ProxyIsolation::Shared`] through
+    /// [`proxy_isolation`](ClientBuilder::proxy_isolation) for a provider that
+    /// always answers with the same proxy.
     #[must_use]
     pub fn proxy_provider(mut self, provider: Arc<dyn ProxyProvider>) -> Self {
         self.proxies = Some(provider);
+        self.routes = ProxyRoutes::Unknown;
+        self
+    }
+
+    /// Chooses whether each proxy keeps its own session, or whether every exit
+    /// shares one.
+    ///
+    /// # What is chosen when nothing says
+    ///
+    /// - No proxy, one proxy, or a pool of one — [`ProxyIsolation::Shared`].
+    ///   There is one exit, so there is nothing to isolate it from, and this is
+    ///   byte for byte what the client did before isolation existed.
+    /// - A jar named through [`cookie_jar`](ClientBuilder::cookie_jar) —
+    ///   [`ProxyIsolation::Shared`]. Handing the builder one jar is a caller
+    ///   saying "one session", at the call site, which is the shape this API
+    ///   would rather have than a doc comment.
+    /// - A pool of two or more, or a [`proxy_provider`] —
+    ///   [`ProxyIsolation::per_proxy`].
+    ///
+    /// # Why per-proxy is the default for a pool
+    ///
+    /// The two mistakes are not symmetric. Sharing a session the caller wanted
+    /// split is **silent**: nothing fails, and the origin quietly learns that
+    /// three exit addresses are one client — which is a stronger signal than
+    /// using one address would have been. Splitting a session the caller wanted
+    /// shared is **loud**: they are logged out, on the first run, and the fix is
+    /// one line. Between a silent wrong answer and a loud one, the default
+    /// belongs on the loud one.
+    ///
+    /// The opposite case is real and is why this switch exists: a caller
+    /// rotating exits purely to spread load on a site they are logged in to
+    /// wants one session, and says so.
+    ///
+    /// ```
+    /// use chromulate::{Client, ProxyIsolation};
+    ///
+    /// // Three exits, three sessions — the default.
+    /// let spread = Client::builder()
+    ///     .proxy_pool(["http://a.proxy:8080", "http://b.proxy:8080"])?
+    ///     .build()?;
+    /// assert_eq!(spread.proxy_isolation(), ProxyIsolation::per_proxy());
+    ///
+    /// // Two exits, one logged-in session.
+    /// let logged_in = Client::builder()
+    ///     .proxy_pool(["http://a.proxy:8080", "http://b.proxy:8080"])?
+    ///     .proxy_isolation(ProxyIsolation::Shared)
+    ///     .build()?;
+    /// assert_eq!(logged_in.proxy_isolation(), ProxyIsolation::Shared);
+    /// # Ok::<(), chromulate::Error>(())
+    /// ```
+    ///
+    /// # What isolation does not cover
+    ///
+    /// TLS session tickets are not split per exit; read
+    /// [`ProxyIsolation`]'s documentation before treating isolated routes as
+    /// unlinkable.
+    ///
+    /// [`proxy_provider`]: ClientBuilder::proxy_provider
+    #[must_use]
+    pub fn proxy_isolation(mut self, isolation: ProxyIsolation) -> Self {
+        self.isolation = Some(isolation);
         self
     }
 
@@ -464,8 +621,28 @@ impl ClientBuilder {
     ///
     /// Returns [`Error::Config`] when the profile cannot produce a TLS
     /// configuration, which usually means the platform trust store could not be
-    /// read.
+    /// read, or when [`cookie_jar`](ClientBuilder::cookie_jar) and
+    /// [`ProxyIsolation::PerProxy`] are asked for together.
     pub fn build(self) -> Result<Client> {
+        let isolation = match self.isolation {
+            Some(isolation) => isolation,
+            // A caller who named one jar named one session; a caller with one
+            // exit has nothing to isolate it from. Everything else is a
+            // rotation, and a rotation defaults to a session per exit.
+            None if self.shared_jar.is_some() || !self.routes.may_rotate() => {
+                ProxyIsolation::Shared
+            }
+            None => ProxyIsolation::per_proxy(),
+        };
+
+        if isolation.is_per_proxy() && self.shared_jar.is_some() {
+            return Err(Error::config(
+                "`cookie_jar` and `proxy_isolation(ProxyIsolation::PerProxy { .. })` contradict \
+                 each other: the named jar would serve only requests that go through no proxy, \
+                 and every exit would get one of its own. Drop one of the two.",
+            ));
+        }
+
         let mut config = EngineConfig::new(Arc::clone(&self.profile));
         config.timeout = self.timeout;
         config.head_timeout = self.head_timeout;
@@ -494,6 +671,14 @@ impl ClientBuilder {
         }
         if let Some(jar) = &jar {
             builder = builder.cookies(Arc::clone(jar) as Arc<dyn CookieStore>);
+        }
+        if let ProxyIsolation::PerProxy { max_routes } = isolation {
+            builder = builder.isolate_by_proxy(
+                max_routes,
+                Arc::new(JarPerRoute {
+                    enabled: self.cookie_store,
+                }),
+            );
         }
         for middleware in self.middleware {
             builder = builder.middleware(middleware);

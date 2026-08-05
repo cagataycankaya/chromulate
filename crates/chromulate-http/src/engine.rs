@@ -27,6 +27,7 @@ use crate::http2::Http2Fidelity;
 use crate::middleware::Retry;
 use crate::pool::{Connection, ConnectionIdentity, Pool, PoolConfig, PoolKey, Protocol};
 use crate::redirect::{self, Decision, Hop};
+use crate::session::{ProxyIsolation, Session, SessionFactory, Sessions};
 
 /// How much of a redirect response body is read before its connection is
 /// reused.
@@ -177,6 +178,7 @@ pub struct EngineBuilder {
     decompression: Option<ExpansionGuard>,
     pool: Option<Pool>,
     retry: Option<Retry>,
+    isolation: Option<(usize, Arc<dyn SessionFactory>)>,
     #[cfg(feature = "cache")]
     cache: Option<Arc<chromulate_cache::HttpCache>>,
     #[cfg(feature = "validator-store")]
@@ -208,6 +210,7 @@ impl EngineBuilder {
             decompression: None,
             pool: None,
             retry: None,
+            isolation: None,
             #[cfg(feature = "cache")]
             cache: None,
             #[cfg(feature = "validator-store")]
@@ -283,6 +286,43 @@ impl EngineBuilder {
         self
     }
 
+    /// Gives every proxy its own cookies, client-hint grants and — with the
+    /// `validator-store` feature — its own validators, up to `max_routes` exits
+    /// at a time.
+    ///
+    /// **An engine that never calls this shares one session across every
+    /// route**, which is what it did before this existed and what a caller
+    /// rotating exits purely to spread load on one logged-in site wants. What
+    /// isolation buys is the other case: a caller who configured several exits
+    /// to spread traffic across several addresses, and whose one session
+    /// otherwise couples those addresses together for the origin.
+    ///
+    /// The base session — whatever [`EngineBuilder::cookies`] and
+    /// [`EngineBuilder::validators`] were handed — keeps serving requests that
+    /// go through no proxy at all. Every proxy gets state minted by `sessions`;
+    /// see [`SessionFactory`] for why this crate cannot mint a cookie store
+    /// itself.
+    ///
+    /// Read [`ProxyIsolation`]'s documentation for what isolation does *not*
+    /// cover: TLS session tickets are not split per route.
+    ///
+    /// # Bound
+    ///
+    /// `max_routes` is what stops one bounded store becoming an unbounded
+    /// family of them. Past it the least recently used exit's state is dropped
+    /// and its next request starts a fresh session — loud and recoverable,
+    /// rather than silently borrowing another exit's. A `max_routes` of zero is
+    /// raised to one.
+    #[must_use]
+    pub fn isolate_by_proxy(
+        mut self,
+        max_routes: usize,
+        sessions: Arc<dyn SessionFactory>,
+    ) -> Self {
+        self.isolation = Some((max_routes, sessions));
+        self
+    }
+
     /// Serves and stores responses through an RFC 9111 cache.
     ///
     /// Requires the off-by-default `cache` feature, and a direct dependency on
@@ -337,8 +377,28 @@ impl EngineBuilder {
     /// # Errors
     ///
     /// Returns [`Error::Config`] when the profile cannot produce a TLS
-    /// configuration.
+    /// configuration, or when [`EngineBuilder::isolate_by_proxy`] is combined
+    /// with a response cache — see the message for why one cache cannot serve
+    /// isolated routes.
     pub fn build(self) -> Result<Engine> {
+        #[cfg(feature = "cache")]
+        if self.isolation.is_some() && self.cache.is_some() {
+            // Not a limitation of the wiring: one cache genuinely cannot serve
+            // isolated routes. A stale entry revalidates with the validator the
+            // origin issued to whichever exit stored it, which is the same
+            // linking signal `ValidatorStore` is split to remove, and a private
+            // cache stores authenticated responses, so an exit would be served
+            // a body fetched with another exit's session. Refusing is louder
+            // than sharing one silently, which is the failure this whole change
+            // is about.
+            return Err(Error::config(
+                "a response cache cannot be shared between isolated proxy routes: a stale entry \
+                 would revalidate with a validator the origin issued to another exit, and a \
+                 stored private response would be served to an exit that never fetched it. Build \
+                 one engine per proxy, or drop `isolate_by_proxy`.",
+            ));
+        }
+
         let profile = Arc::clone(&self.config.profile);
         let tls = match self.tls {
             Some(tls) => tls,
@@ -358,20 +418,32 @@ impl EngineBuilder {
             self.config.pool.http1_max_buf_size,
         );
 
+        let sessions = match self.isolation {
+            Some((max_routes, factory)) => Sessions::per_proxy(
+                self.cookies,
+                #[cfg(feature = "validator-store")]
+                self.validators,
+                max_routes,
+                factory,
+            ),
+            None => Sessions::shared(
+                self.cookies,
+                #[cfg(feature = "validator-store")]
+                self.validators,
+            ),
+        };
+
         Ok(Engine {
             inner: Arc::new(EngineInner {
                 headers: HeaderEngine::new(Arc::clone(&profile)),
-                accept_ch: RwLock::new(AcceptChStore::new()),
                 hsts: RwLock::new(crate::hsts::HstsStore::new()),
                 accept_ch_used: std::sync::atomic::AtomicBool::new(false),
                 decompression: self.decompression.unwrap_or_default(),
-                cookies: self.cookies,
+                sessions,
                 middleware: self.middleware,
                 retry: self.retry,
                 #[cfg(feature = "cache")]
                 cache: self.cache,
-                #[cfg(feature = "validator-store")]
-                validators: self.validators,
                 #[cfg(feature = "adaptive-concurrency")]
                 concurrency: self.concurrency,
                 config: self.config,
@@ -398,10 +470,17 @@ struct EngineInner {
     connector: Connector,
     pool: Pool,
     headers: HeaderEngine,
-    accept_ch: RwLock<AcceptChStore>,
     /// Origins that have demanded HTTPS; see [`crate::hsts`].
+    ///
+    /// Deliberately **not** per route. It is a policy about an origin rather
+    /// than about this client, and it is consulted before a route exists at
+    /// all: the upgrade rewrites the scheme, which changes the port, which
+    /// changes the origin the proxy is chosen for. Splitting it would also send
+    /// the first request through each new exit in plaintext, which is a
+    /// downgrade rather than an isolation win. See [`crate::session`].
     hsts: RwLock<crate::hsts::HstsStore>,
-    /// Whether any response has ever recorded an `Accept-CH` grant.
+    /// Whether any response, on any route, has ever recorded an `Accept-CH`
+    /// grant.
     ///
     /// Most deployments never see one, and `RwLock::read` is still an atomic
     /// read-modify-write on a shared cache line — coherence traffic on every
@@ -409,15 +488,20 @@ struct EngineInner {
     /// lock is only touched once a grant exists. It never goes back to false:
     /// a revoked grant leaves an empty store behind the lock, which reads
     /// correctly, just no longer lock-free.
+    ///
+    /// It stays engine-wide while the stores it gates are per route, because it
+    /// is only a hint about whether looking is worth it. A route that has been
+    /// granted nothing takes its own empty lock and finds nothing, which costs
+    /// a little and cannot answer wrongly.
     accept_ch_used: std::sync::atomic::AtomicBool,
-    cookies: Option<Arc<dyn CookieStore>>,
+    /// The cookies, client-hint grants and validators of every route this
+    /// engine serves; see [`crate::session`].
+    sessions: Sessions,
     decompression: ExpansionGuard,
     middleware: Vec<Arc<dyn Middleware>>,
     retry: Option<Retry>,
     #[cfg(feature = "cache")]
     cache: Option<Arc<chromulate_cache::HttpCache>>,
-    #[cfg(feature = "validator-store")]
-    validators: Option<Arc<crate::validators::ValidatorStore>>,
     #[cfg(feature = "adaptive-concurrency")]
     concurrency: Option<Arc<crate::adaptive::AdaptiveConcurrency>>,
 }
@@ -428,6 +512,7 @@ impl fmt::Debug for Engine {
             .field("profile", &self.inner.profile.name)
             .field("identity", self.inner.connector.identity())
             .field("pool", &self.inner.pool)
+            .field("sessions", &self.inner.sessions)
             .field("middleware", &self.inner.middleware.len())
             .finish_non_exhaustive()
     }
@@ -467,6 +552,22 @@ impl Engine {
     #[must_use]
     pub fn identity(&self) -> &ConnectionIdentity {
         self.inner.connector.identity()
+    }
+
+    /// Whether each proxy keeps its own cookies, client-hint grants and
+    /// validators, or whether every route shares one session.
+    #[must_use]
+    pub fn proxy_isolation(&self) -> ProxyIsolation {
+        self.inner.sessions.isolation()
+    }
+
+    /// How many proxies currently hold state of their own.
+    ///
+    /// Always zero under [`ProxyIsolation::Shared`], and never more than the
+    /// `max_routes` this engine was built with.
+    #[must_use]
+    pub fn isolated_routes(&self) -> usize {
+        self.inner.sessions.isolated_routes()
     }
 
     /// The TLS engine, whose `fidelity()` reports the handshake gap.
@@ -640,6 +741,12 @@ impl Engine {
         let head_timeout = options.head_timeout.or(self.inner.config.head_timeout);
         let origin = Origin::of(url)?;
         let route = self.inner.connector.route(origin).await;
+        // Once per hop, keyed by the same redacted proxy label the pool key
+        // carries, and resolved to an owned handle here rather than re-read at
+        // each use: everything below awaits the network, and a lock guard held
+        // across an `.await` is what `Engine::with_hsts` was reshaped to make
+        // unwritable.
+        let session = self.inner.sessions.for_route(route.proxy_label());
 
         let (key, connection) = self.acquire(&route, deadline, timings).await?;
         let protocol = connection.protocol();
@@ -652,11 +759,11 @@ impl Engine {
         // caller's own header would, rather than being appended afterwards by a
         // different route.
         #[cfg(feature = "validator-store")]
-        if let Some(validators) = &self.inner.validators {
+        if let Some(validators) = session.validators() {
             validators.condition(url, request);
         }
 
-        let ordered = self.apply_headers(request, url, options)?;
+        let ordered = self.apply_headers(request, url, options, &session)?;
 
         let outgoing = outgoing_request(request, url, protocol, body, ordered)?;
 
@@ -671,10 +778,10 @@ impl Engine {
         // from the headers is not billed as time the origin took.
         timings.record_head();
 
-        self.record_response(url, &response);
+        self.record_response(url, &response, &session);
 
         #[cfg(feature = "validator-store")]
-        if let Some(validators) = &self.inner.validators {
+        if let Some(validators) = session.validators() {
             validators.observe(url, request.method(), &response);
         }
         Ok(response)
@@ -770,13 +877,14 @@ impl Engine {
         request: &mut Request,
         url: &Url,
         options: &RequestOptions,
+        session: &Session,
     ) -> Result<Vec<(HeaderName, HeaderValue)>> {
         // A `Cookie` header already on the request is the caller's own, and
         // theirs wins: the jar is not consulted and the header is left where it
         // is, so it survives into the next hop the way any other header the
         // caller set does.
         let mut from_jar = false;
-        if let Some(cookies) = &self.inner.cookies
+        if let Some(cookies) = session.cookies()
             && !request.headers().contains_key(http::header::COOKIE)
             && let Some(value) = cookies.cookies_for(url, &options.cookie_context())
         {
@@ -789,12 +897,7 @@ impl Engine {
             .accept_ch_used
             .load(std::sync::atomic::Ordering::Acquire)
         {
-            let store = self
-                .inner
-                .accept_ch
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            self.inner.headers.apply(request, url, options, &store)
+            session.with_accept_ch(|store| self.inner.headers.apply(request, url, options, store))
         } else {
             // No grant was ever recorded, so an empty store answers every
             // origin identically to the locked one — without the lock.
@@ -884,8 +987,12 @@ impl Engine {
     }
 
     /// Records everything a response teaches the client about the origin.
-    fn record_response(&self, url: &Url, response: &Response) {
-        if let Some(cookies) = &self.inner.cookies {
+    ///
+    /// What the *origin* taught goes to `session`, so it is remembered against
+    /// the exit it arrived through. What is true of the origin whatever route
+    /// reached it — its HSTS policy — goes to the engine.
+    fn record_response(&self, url: &Url, response: &Response, session: &Session) {
+        if let Some(cookies) = session.cookies() {
             let mut set_cookie = response.headers().get_all(SET_COOKIE).iter();
             cookies.store(url, &mut set_cookie);
         }
@@ -907,11 +1014,7 @@ impl Engine {
             && let Ok(value) = accept_ch.to_str()
             && let Ok(origin) = Origin::of(url)
         {
-            self.inner
-                .accept_ch
-                .write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .record(origin, value);
+            session.record_accept_ch(origin, value);
             // After the write, so a reader that sees the flag finds the grant.
             self.inner
                 .accept_ch_used

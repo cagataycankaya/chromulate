@@ -91,6 +91,18 @@ pub(crate) struct Route {
     label: Option<Arc<str>>,
 }
 
+impl Route {
+    /// The proxy this route goes through, credentials redacted, or `None` for a
+    /// direct connection.
+    ///
+    /// The same value [`PoolKey::proxy`] carries, so a route's session state is
+    /// keyed by exactly what its connections are keyed by — see
+    /// [`crate::session`].
+    pub(crate) fn proxy_label(&self) -> Option<&Arc<str>> {
+        self.label.as_ref()
+    }
+}
+
 /// Everything needed to open connections on a profile's behalf.
 pub(crate) struct Connector {
     resolver: Arc<dyn Resolve>,
