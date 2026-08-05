@@ -230,6 +230,8 @@ pub struct ClientBuilder {
     proxies: Option<Arc<dyn ProxyProvider>>,
     routes: ProxyRoutes,
     isolation: Option<ProxyIsolation>,
+    #[cfg(feature = "adaptive-concurrency")]
+    concurrency: Option<Arc<dyn chromulate_http::concurrency::ConcurrencyController>>,
     middleware: Vec<Arc<dyn Middleware>>,
     retry: Option<Retry>,
     default_headers: HeaderMap,
@@ -291,6 +293,8 @@ impl ClientBuilder {
             proxies: None,
             routes: ProxyRoutes::Direct,
             isolation: None,
+            #[cfg(feature = "adaptive-concurrency")]
+            concurrency: None,
             middleware: Vec::new(),
             retry: None,
             default_headers: HeaderMap::new(),
@@ -510,6 +514,34 @@ impl ClientBuilder {
         self
     }
 
+    /// Installs a per-origin concurrency controller.
+    ///
+    /// Nothing adapts without one: enabling the feature adds the machinery, and
+    /// this is what puts a policy behind it. Two are shipped —
+    /// [`AdaptiveConcurrency`] learns what an origin tolerates, and
+    /// [`FixedConcurrency`] holds a number you chose — and
+    /// [`ConcurrencyController`] is a trait, so a caller whose system has limits
+    /// it already knows can write its own law rather than tune someone else's.
+    ///
+    /// A controller can only ever make a request wait. It runs below the
+    /// middleware chain, so a [`RateLimiter`](chromulate_http::RateLimiter) has
+    /// already spent its token before a controller is asked, and there is no way
+    /// through this seam to send a request the caller's own limit has not
+    /// released.
+    ///
+    /// [`AdaptiveConcurrency`]: chromulate_http::adaptive::AdaptiveConcurrency
+    /// [`FixedConcurrency`]: chromulate_http::concurrency::FixedConcurrency
+    /// [`ConcurrencyController`]: chromulate_http::concurrency::ConcurrencyController
+    #[cfg(feature = "adaptive-concurrency")]
+    #[must_use]
+    pub fn concurrency(
+        mut self,
+        controller: Arc<dyn chromulate_http::concurrency::ConcurrencyController>,
+    ) -> Self {
+        self.concurrency = Some(controller);
+        self
+    }
+
     /// Replaces the DNS resolver.
     #[must_use]
     pub fn resolver(mut self, resolver: impl Resolve) -> Self {
@@ -679,6 +711,10 @@ impl ClientBuilder {
                     enabled: self.cookie_store,
                 }),
             );
+        }
+        #[cfg(feature = "adaptive-concurrency")]
+        if let Some(controller) = self.concurrency {
+            builder = builder.concurrency(controller);
         }
         for middleware in self.middleware {
             builder = builder.middleware(middleware);

@@ -9,6 +9,42 @@ that breaking changes may land in a minor release.
 
 ### Added
 
+- **`ConcurrencyController` and `Lease`**, which turn per-origin concurrency from a control
+  law a caller must accept into a seam they can implement. The engine asks any installed
+  controller for permission per hop and reports an `Outcome` carrying the **raw status and
+  response headers**, not a pre-classified verdict — because a verdict is one law's reading.
+  A `503` is backpressure to the shipped law and an ordinary error to an origin mid-deploy;
+  a `403` is a refusal here and an expired token elsewhere. Handing either across the seam
+  would make every third-party controller inherit opinions it may not share, which is the
+  thing the seam exists to stop. Latency is deliberately absent for the same reason: a
+  controller measures it against its own clock, which is what keeps an injected clock
+  testable.
+- **`FixedConcurrency`**, a second implementation that bounds in-flight requests per origin
+  and never adapts. It ignores `Outcome` entirely, which is what shows the trait is not
+  shaped around the adaptive law's needs. A caller who knows their own limits should not have
+  to configure an adaptive controller into submission to get a fixed one.
+- **`AdaptiveConcurrency::with_ceiling_recovery(interval)`**, making one former certainty a
+  choice. A `429` still lowers an origin's ceiling permanently by default — that was chosen
+  deliberately and is unchanged — but a caller who knows their own limit can now opt into the
+  additive half of AIMD and let the ceiling climb back one slot per quiet interval. The `403`
+  freeze stays policy and is deliberately not configurable: the knob would be "keep ramping
+  against an origin that has refused you", which is the project's scope boundary rather than
+  a tuning decision.
+- **`ClientBuilder::concurrency`**, so the seam is reachable from the facade. The feature was
+  not forwarded at all before this, which meant a caller depending on `chromulate` — which is
+  what the README tells them to do — could not install a controller without adding a second
+  dependency.
+
+  A controller can only ever make a request wait. It runs below the middleware chain, so a
+  `RateLimiter` has already spent its token before a controller is consulted, and the trait
+  exposes no way to obtain a limiter or to signal "send now regardless". Proven rather than
+  asserted: a third-party controller granting 64 instant permits still takes at least 80 ms
+  to send five requests at 50 per second.
+
+  Dynamic dispatch costs two allocations and about 47 ns per hop for a caller who installs a
+  controller; a caller holding an `AdaptiveConcurrency` directly pays neither. Steady-state
+  allocations are unchanged at 48 per request, because the feature is off by default.
+
 - **Per-origin adaptive concurrency**, behind the off-by-default `adaptive-concurrency`
   feature. A controller that learns how many concurrent requests an origin serves
   comfortably and stays there, because there is no single right number: measured on four

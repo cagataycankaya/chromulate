@@ -73,6 +73,10 @@ cache = ["chromulate-http/cache"]
 validator-store = ["chromulate-http/validator-store"]
 # `Response::bytes_until`. The default read is the whole body either way.
 early-stop = ["chromulate-http/early-stop"]
+# Per-origin concurrency: `ConcurrencyController`, the adaptive law that ships
+# with it, and the fixed-limit one. Off by default, and a caller who enables it
+# still has to install a controller — nothing changes on its own.
+adaptive-concurrency = ["chromulate-http/adaptive-concurrency"]
 # Tests that reach the public internet. Off by default so `cargo test
 # --workspace` stays hermetic.
 network-tests = []
