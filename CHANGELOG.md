@@ -5,7 +5,7 @@ All notable changes to this project are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) — with the usual pre-1.0 caveat
 that breaking changes may land in a minor release.
 
-## [Unreleased]
+## [0.2.0] — 2026-08-05
 
 ### Added
 
@@ -216,10 +216,34 @@ that breaking changes may land in a minor release.
     `ignore`d there with the reason recorded. The behaviour is fine; the evidence for it is
     what depends on real TLS.
 
-  Still not established: the mock is not a TLS implementation, so it proves the seam admits a
-  *different* backend, not that it admits a *demanding* one. A BoringSSL backend needs
-  configuration a profile drives — cipher order, GREASE, ALPS — and nothing here exercises
-  that path.
+- **A third backend, `recording::RecordingBackend`, is the acceptance harness a
+  fingerprint-controlling backend has to pass.** The mock proved the seam admits a backend
+  that is not rustls; it could not prove the seam admits one that *reproduces a fingerprint*,
+  because it consumes nothing — it clones the profile's spec and hands the stream back, so
+  cipher order, GREASE placement and the extension set were never exercised.
+
+  This backend performs the step every real backend performs before any bytes move: flatten
+  the profile into the vocabulary a TLS library accepts, which is wire code points and flags
+  rather than Rust types. `SSL_CTX_set_cipher_list` takes numbers. Whatever a backend cannot
+  express as numbers is lost at that boundary, silently, and the ClientHello is wrong.
+  `RecordedClientHello` is that intermediate form, and `to_spec()` rebuilds a
+  `ClientHelloSpec` from it **alone** — never from the profile it came from, because reaching
+  back would make the round trip vacuous.
+
+  Nine tests. The one that matters compares the reconstruction's JA4 with the profile's
+  target. A mutation test proves it can fail: dropping an extension, dropping a cipher suite,
+  reversing the signature algorithms, or clearing ALPN each move the fingerprint. One case
+  deliberately does *not* — transposing two cipher suites, because JA4 sorts before hashing —
+  and it is caught by a separate order assertion instead, which is why cipher order is its own
+  test rather than folded into the JA4 one. An unrecognised TLS version code point is an error
+  rather than a silent drop, and the error names the code point.
+
+  Behind the same `--cfg chromulate_mock_backend` flag as the mock; nothing ships it.
+
+  Still not established, and it is the important half: **configuration fidelity is not wire
+  fidelity.** This harness shows a backend *could* be handed everything the profile specifies.
+  Whether it *sends* it is what `tests/emitted_client_hello.rs` decodes real bytes for, and
+  what rustls fails. Only a real second TLS implementation closes that gap.
 
 - **The minimum supported Rust version is 1.88**, corrected rather than raised.
   `rust-version` said 1.85 while `cargo +1.85.0 check --workspace --all-features` had been
@@ -692,5 +716,6 @@ failing test before the fix. The ones worth recording:
   values, the subresource header order, and the `cookie` header's position are modelled
   rather than observed, and are marked as such in the source.
 
-[Unreleased]: https://github.com/cagataycankaya/chromulate/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/cagataycankaya/chromulate/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/cagataycankaya/chromulate/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/cagataycankaya/chromulate/releases/tag/v0.1.0

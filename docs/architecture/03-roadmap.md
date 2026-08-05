@@ -263,10 +263,16 @@ trait members missing (`from_profile`, `target_identity`, `fidelity`, all of the
 because `from_profile` does not mention `IO` and so could not be resolved on an
 `IO`-generic trait. The trait is now split into `TlsBackendConfig` and `TlsBackend<IO>`.
 
-What this does *not* establish: the mock is undemanding. It needs no cipher order, no GREASE
-placement, no ALPS — the parts of a profile a real backend has to consume. So the seam is
-shown to admit a *different* implementation, not yet a *fingerprint-controlling* one. That
-remains the open question a BoringSSL backend would answer.
+The mock was undemanding — it consumes nothing — so a third implementation followed:
+`recording::RecordingBackend`, which flattens a profile into wire code points the way a TLS
+library requires and rebuilds a `ClientHelloSpec` from that alone. Its round-trip test
+compares the reconstruction's JA4 with the profile's target, and a mutation test proves the
+round trip can fail. This is the acceptance harness a BoringSSL backend is measured against.
+
+What this does *not* establish: configuration fidelity is not wire fidelity. The harness
+shows a backend *could* be handed everything the profile specifies; whether it *sends* it is
+what `tests/emitted_client_hello.rs` decodes real bytes for, and what rustls fails. Only a
+real second TLS implementation closes that.
 
 **A custom ClientHello encoder in front of rustls.** Assessed in the design document as
 not recommended: the ClientHello is part of a transcript both sides hash, and splicing a

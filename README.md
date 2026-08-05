@@ -17,7 +17,7 @@ Hyper + browser networking behaviour        not        a headless browser
 [![CI](https://github.com/cagataycankaya/chromulate/actions/workflows/ci.yml/badge.svg)](https://github.com/cagataycankaya/chromulate/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
-> **Status: 0.1.0, early development.** Everything described below is implemented and
+> **Status: 0.2.0, early development.** Everything described below is implemented and
 > tested — the examples compile, the CLI issues real requests, and every performance and
 > fidelity figure in the documentation was measured rather than estimated. What is early is
 > the surface: this is pre-1.0 and breaking changes will land in minor releases. Read
@@ -89,7 +89,7 @@ connection, as the browser does.
 
 ```toml
 [dependencies]
-chromulate = "0.1"
+chromulate = "0.2"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -313,10 +313,16 @@ opened. That is checked rather than asserted: a second implementation exists beh
 `--cfg chromulate_mock_backend`, sharing no code or types with rustls, and CI builds and
 tests both crates against it.
 
+There is also an acceptance harness for the backend that does not exist yet:
+`recording::RecordingBackend` flattens a profile into the wire code points a TLS library
+takes, rebuilds a ClientHello specification from that alone, and checks its JA4 against the
+profile's target. A mutation test proves the check can fail. That is the bar a BoringSSL
+backend has to clear.
+
 **No TLS backend other than rustls exists**, and none of the numbers above change until one
-does. The second implementation is a no-op used to keep the seam honest; it demands nothing
-of the profile, so it shows the seam admits a different backend rather than a
-fingerprint-controlling one.
+does. Both extra backends are measuring instruments, not TLS: they encrypt nothing, they are
+behind a build flag, and neither ships. And configuration fidelity is not wire fidelity —
+they show what a backend *could* be handed, never what it puts on the socket.
 
 Also measured, and also not matching:
 

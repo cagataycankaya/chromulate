@@ -124,6 +124,8 @@ pub mod fidelity;
 #[cfg(any(test, chromulate_mock_backend))]
 pub mod mock;
 pub mod provider;
+#[cfg(any(test, chromulate_mock_backend))]
+pub mod recording;
 pub mod resumption;
 pub mod server_name;
 pub mod trust;
@@ -162,14 +164,21 @@ pub type TlsStream<IO> = tokio_rustls::client::TlsStream<IO>;
 ///
 /// `chromulate-http` names this alias, and calls the engine only through
 /// [`TlsBackend`]. Adding a BoringSSL backend is therefore a matter of
-/// implementing that trait and pointing this alias at it under a cargo feature
-/// — not of changing the connection path.
+/// implementing that trait and pointing this alias at it under a build flag —
+/// not of changing the connection path.
 ///
 /// That claim is checked rather than asserted: the off-by-default
 /// `--cfg chromulate_mock_backend` flag points this alias at `mock::MockBackend`, which
 /// shares no code and no types with rustls, and the workspace still compiles
 /// and its tests still pass. See `mock` for the three trait members writing
 /// that second implementation turned out to be missing.
+///
+/// `recording::RecordingBackend`, behind the same flag, answers the harder
+/// question the mock cannot: whether a backend handed nothing but wire code
+/// points can still reproduce the profile's fingerprint. That is the bar a
+/// BoringSSL backend has to clear, and it is a *configuration* bar — sending
+/// what you were configured with is a separate claim that only decoding real
+/// bytes can settle.
 #[cfg(not(chromulate_mock_backend))]
 pub type ActiveBackend = TlsEngine;
 

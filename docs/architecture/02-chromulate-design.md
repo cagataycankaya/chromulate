@@ -1511,17 +1511,37 @@ stream type irrelevant to the question: `ActiveBackend::from_profile(&profile)` 
 to infer the parameter. The rule to apply when adding a member: it belongs on
 `TlsBackend<IO>` only if it actually involves the stream.
 
-**The seam has two implementations.** `mock::MockBackend`, behind
-`--cfg chromulate_mock_backend`, shares no code and no types with rustls and picks `IO` as
-its `Stream` where the rustls backend picks `tokio_rustls::client::TlsStream<IO>`. A CI job
-builds and tests `chromulate-tls` and `chromulate-http` against it. This is a cfg flag rather
-than a cargo feature on purpose: features must be additive, `--all-features` would enable it,
-and a CI run that believed it was exercising TLS while linking a backend that encrypts
-nothing would be worse than not checking the seam at all.
+**The seam has three implementations**, and they answer three different questions.
 
-What that does not prove: the mock is undemanding. It needs no cipher list, no GREASE
-placement, no ALPS — the things a profile actually drives. It establishes that the seam
-admits a *different* backend, not that it admits a *fingerprint-controlling* one.
+`TlsEngine` over rustls is the shipping one. `mock::MockBackend`, behind
+`--cfg chromulate_mock_backend`, shares no code and no types with rustls and picks `IO` as
+its `Stream` where the rustls backend picks `tokio_rustls::client::TlsStream<IO>` — it
+answers *does the seam admit a backend that is not rustls?*. A CI job builds and tests
+`chromulate-tls` and `chromulate-http` against it. That is a cfg flag rather than a cargo
+feature on purpose: features must be additive, `--all-features` would enable it, and a CI run
+that believed it was exercising TLS while linking a backend that encrypts nothing would be
+worse than not checking the seam at all.
+
+The mock left a gap, because it consumes nothing: it clones the profile's spec and hands the
+stream back, so cipher order, GREASE placement and the extension set were never exercised.
+`recording::RecordingBackend` closes it. It performs the one step every real backend performs
+before any bytes move — **flatten the profile into the vocabulary a TLS library accepts**,
+which is wire code points and flags, not Rust types. `SSL_CTX_set_cipher_list` takes numbers;
+whatever a backend cannot express as numbers is lost at that boundary, silently, and the
+ClientHello is wrong.
+
+`RecordedClientHello` is that intermediate form and `to_spec()` rebuilds a `ClientHelloSpec`
+from it *alone*, never from the profile it came from — reaching back would make the round
+trip vacuous. The test that matters compares the reconstruction's JA4 with the profile's
+target, and a mutation test proves it can fail: dropping an extension, dropping a cipher,
+reversing the signature algorithms or clearing ALPN each move the fingerprint. One
+deliberately does not: transposing two ciphers, because JA4 sorts. That case is caught by a
+separate order assertion, which is why the two are separate tests.
+
+This is the acceptance harness a BoringSSL backend is measured against. What it still does
+not prove is that a backend *sends* what it was configured with — that is what
+`tests/emitted_client_hello.rs` decodes real bytes for, and what rustls fails. Configuration
+fidelity and wire fidelity are different claims and only the first is checked here.
 
 The earlier version of this section said the seam "does not exist yet and is Phase 5 work".
 It had in fact been written, exported, and left with zero callers — which is why the shipped
