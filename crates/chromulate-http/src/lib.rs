@@ -69,6 +69,7 @@ pub mod http2;
 pub mod middleware;
 pub mod pool;
 pub mod redirect;
+pub mod session;
 pub mod time;
 #[cfg(feature = "validator-store")]
 pub mod validators;
@@ -85,6 +86,7 @@ pub use http2::{DEFAULT_CONNECTION_WINDOW, Http2Fidelity, UnsupportedSetting};
 pub use middleware::{RateLimit, RateLimiter, Retry, RetryOn, RetryPolicy};
 pub use pool::{ConnectionIdentity, Pool, PoolConfig, PoolKey, Protocol};
 pub use redirect::{CREDENTIAL_HEADERS, crosses_origin, is_redirect, method_after};
+pub use session::{ProxyIsolation, SessionFactory};
 pub use time::{Clock, Sleeper, SystemClock, TimeSource, TokioSleeper};
 #[cfg(feature = "validator-store")]
 pub use validators::{DEFAULT_URL_CAPACITY, ValidatorStore, Validators};

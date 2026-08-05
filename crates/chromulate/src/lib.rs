@@ -119,6 +119,10 @@ pub use chromulate_core::{
     Body, BoxError, BoxFuture, Error, Exchange, FetchDest, FetchMode, Middleware, Next, Origin,
     RedirectPolicy, Request, RequestOptions, Resolve, Response as HttpResponse, Result, Timings,
 };
+/// Re-exported beside [`Client`] rather than left in the `engine` module: it is
+/// the answer to "does each of my proxies get its own cookies", which is a
+/// question asked at the same call site as `proxy_pool`.
+pub use chromulate_http::ProxyIsolation;
 pub use chromulate_profile::{CHROME_STABLE_CAPTURE, Platform, Profile, ProfileRegistry};
 
 /// The cookie jar and its vocabulary.
@@ -134,7 +138,7 @@ pub mod engine {
     pub use chromulate_http::{
         ConnectionIdentity, Engine, EngineBuilder, EngineConfig, HstsStore, Http2Fidelity, Pool,
         PoolConfig, PoolKey, Protocol, RateLimit, RateLimiter, RequestUrl, ResponseInfo, Retry,
-        RetryOn, RetryPolicy, UnsupportedSetting,
+        RetryOn, RetryPolicy, SessionFactory, UnsupportedSetting,
     };
 }
 

@@ -44,10 +44,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A pool of proxies rotates round-robin, one exit per request. The pool key
     // includes the exit, so a connection opened through one proxy is never
     // reused for a request routed through another.
+    //
+    // Each exit also keeps its own cookies, because a pool of two or more
+    // defaults to `ProxyIsolation::PerProxy`: presenting one session from every
+    // exit would tell the origin that the addresses are one client. Add
+    // `.proxy_isolation(ProxyIsolation::Shared)` for the other case — rotating
+    // exits to spread load on a site you are logged in to.
     let rotating = Client::builder()
         .proxy_pool(["socks5h://127.0.0.1:1080", "socks5h://127.0.0.1:1081"])?
         .build()?;
-    println!("rotating client ready: {:?}", rotating.profile().name);
+    println!(
+        "rotating client ready: {:?}, isolation {:?}",
+        rotating.profile().name,
+        rotating.proxy_isolation()
+    );
 
     Ok(())
 }

@@ -402,3 +402,94 @@ fn reason(status: u16) -> &'static str {
         _ => "Status",
     }
 }
+
+/// A local HTTP `CONNECT` proxy that tunnels every request to one fixed
+/// address, whatever authority the `CONNECT` line named.
+///
+/// It stands in for one exit address. The target is ignored on purpose, and
+/// that is what lets a test address the origin by a real hostname: a proxied
+/// route hands the name to the proxy rather than resolving it, so the client
+/// needs no resolver and the bytes still arrive at the loopback listener the
+/// test started.
+///
+/// Two of these in front of one [`TestServer`] are the local reproduction of
+/// "one origin, reached through two different exits" — which is the measurement
+/// this file exists to make runnable without anybody's paid proxies.
+pub struct TestProxy {
+    addr: SocketAddr,
+    tunnels: Arc<AtomicUsize>,
+}
+
+impl TestProxy {
+    /// Starts a proxy that tunnels everything to `origin`.
+    pub async fn start(origin: SocketAddr) -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("the test proxy must bind a loopback port");
+        let addr = listener
+            .local_addr()
+            .expect("a bound listener has a local address");
+        let tunnels = Arc::new(AtomicUsize::new(0));
+
+        {
+            let tunnels = Arc::clone(&tunnels);
+            tokio::spawn(async move {
+                loop {
+                    let Ok((client, _)) = listener.accept().await else {
+                        return;
+                    };
+                    tunnels.fetch_add(1, Ordering::SeqCst);
+                    tokio::spawn(async move {
+                        tunnel(client, origin).await;
+                    });
+                }
+            });
+        }
+
+        Self { addr, tunnels }
+    }
+
+    /// The `http://` URL to hand to `proxy` or `proxy_pool`.
+    pub fn url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    /// How many tunnels this exit was asked to open.
+    pub fn tunnels(&self) -> usize {
+        self.tunnels.load(Ordering::SeqCst)
+    }
+}
+
+async fn tunnel(mut client: TcpStream, origin: SocketAddr) {
+    // Read the `CONNECT` head and nothing past it: the byte after the blank
+    // line already belongs to the tunnel, and a `TcpStream` cannot be unread.
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        match client.read(&mut byte).await {
+            Ok(0) | Err(_) => return,
+            Ok(_) => head.push(byte[0]),
+        }
+        if head.ends_with(b"\r\n\r\n") {
+            break;
+        }
+        if head.len() > 16 * 1024 {
+            return;
+        }
+    }
+    if !head.starts_with(b"CONNECT ") {
+        return;
+    }
+
+    let Ok(mut upstream) = TcpStream::connect(origin).await else {
+        return;
+    };
+    if client
+        .write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+}
