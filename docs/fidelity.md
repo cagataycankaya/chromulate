@@ -25,6 +25,7 @@ this crate does not meet it, and no configuration of it does.
 | HTTP/2 SETTINGS and connection window | **Exact match** |
 | HTTP request header set, values, and order | **Exact match** against the capture |
 | HTTP/2 pseudo-header order | Does not match (`m,s,a,p` against Chrome's `m,a,s,p`) |
+| HTTP/2 standalone PRIORITY frames | Both send none — but see below before reading that as a match |
 | HTTP/2 HEADERS priority fields | Not sent at all |
 | TLS ClientHello / JA4 | **Does not match**, and is distinguishable at a glance |
 | GREASE | Not emitted, in any slot |
@@ -66,13 +67,48 @@ accepts no instruction on its shape. `chromulate fingerprint` prints the full li
 divergences for the linked provider, so this is checkable from a shell rather than only
 from this document.
 
+### What has been built towards closing it, and why none of it moves the numbers above
+
+Because the gap is a property of rustls rather than of how it is configured, closing it
+needs a different TLS implementation. The seam that would accept one is in place:
+`chromulate-http` opens every TLS connection through the `TlsBackend` trait and derives its
+stream type from the linked backend, so the string `rustls` does not appear anywhere in
+`crates/chromulate-http/src/` outside one explanatory comment. Two further implementations
+exist behind `--cfg chromulate_mock_backend`, and a CI job builds and tests against them.
+
+They answer two different questions, and neither is the question this document asks:
+
+- `mock::MockBackend` shares no code or types with rustls, which is what makes the seam's
+  independence a checked claim rather than an assertion.
+- `recording::RecordingBackend` flattens a profile into the wire code points a TLS library
+  accepts — `SSL_CTX_set_cipher_list` takes numbers — and rebuilds a `ClientHelloSpec` from
+  that alone. Its round trip must reproduce the profile's JA4, and a mutation test shows the
+  check can fail: dropping an extension, dropping a cipher suite, reversing the signature
+  algorithms or clearing ALPN each move the fingerprint. One case deliberately does not —
+  transposing two cipher suites, because JA4 sorts — so cipher order carries its own
+  assertion.
+
+**None of this changes a single figure in the table above, and it is worth being blunt about
+why.** The recording harness measures *configuration* fidelity: whether a backend could be
+handed everything the profile specifies without losing any of it at the boundary. This
+document measures *wire* fidelity: what a server actually receives. They are different
+claims, and a build can pass the first while failing the second — which is exactly what
+happens today, because rustls is still the only backend that opens a socket.
+
+So the harness is a bar for work that has not been done, not evidence about work that has.
+A BoringSSL backend would have to clear it, and clearing it would still not be enough on its
+own: `tests/emitted_client_hello.rs` decodes the bytes a real connection writes, and that is
+the test whose assertions have to turn from "differs" to "matches" one at a time before any
+number here changes. Run either with `cargo test -p chromulate-tls`; the recording tests
+compile in an ordinary test build, so they run on every platform in CI without the flag.
+
 ## HTTP/2
 
 | Field | Chrome | Chromulate | |
 |---|---|---|---|
 | SETTINGS | `1:65536;2:0;4:6291456;6:262144` | identical | match |
 | Connection `WINDOW_UPDATE` | `15663105` | identical | match |
-| Priority frames | none | none | match |
+| Priority frames | none | none | match, with two caveats below |
 | Pseudo-header order | `m,a,s,p` | `m,s,a,p` | **differs** |
 | Akamai fingerprint hash | `52d84b11737d980aef856699f885ca86` | `3cca6cd1f3324cc4e05a72aa0cd8b4b7` | differs |
 
@@ -82,11 +118,27 @@ hash does not either.
 **All four rows are verified from the wire by a hermetic test**, not only by the live echo
 above: `chromulate-http/tests/emitted_http2.rs` stands up a TLS listener that negotiates
 `h2`, records the client's opening frames, and decodes the SETTINGS order, the connection
-window update, the HEADERS flags, and the pseudo-header order out of the HPACK block. It
-asserts the two divergences rather than describing them, so a future `h2` release that
-closes either one fails the test and this document gets corrected instead of going stale.
-The test was mutation-checked: flipping the expected pseudo-header order to Chrome's turns
-it red with the wire's actual order in the failure message.
+window update, the PRIORITY frame count, the HEADERS flags, and the pseudo-header order out
+of the HPACK block. It asserts the two divergences rather than describing them, so a future
+`h2` release that closes either one fails the test and this document gets corrected instead
+of going stale. The test was mutation-checked: flipping the expected pseudo-header order to
+Chrome's turns it red with the wire's actual order in the failure message.
+
+Two caveats on the priority-frame row, because it is the weakest of the four and was until
+recently not checked at all — the frame loop ignored frame type `0x2` entirely while this
+document claimed all four rows were verified.
+
+It is now counted, but against the Chrome profile both sides are zero, so deleting the
+counting arm would leave the test green: the assertion does not prove the counter counts.
+What it catches is a profile whose capture *does* record PRIORITY frames — Firefox's
+`3:0:0:201,…`, for instance — against a client whose `h2` write path for them is
+`unimplemented!()`. That divergence was previously silent.
+
+And "Chrome sends none" is a fact about the captured scenario rather than about Chrome. Its
+reprioritisation path is live by default, so a page that reprioritises a resource does emit
+PRIORITY frames; the capture is a single navigation with nothing to reprioritise. Read the
+row as "none for a bare navigation", and expect a fingerprint captured mid-page-load to
+disagree.
 
 Separately, Chrome's first `HEADERS` frame carries priority information — captured as
 weight 256, depends-on 0, exclusive — and **Chromulate sends `HEADERS` with no priority
