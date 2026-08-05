@@ -184,7 +184,7 @@ pub struct EngineBuilder {
     #[cfg(feature = "validator-store")]
     validators: Option<Arc<crate::validators::ValidatorStore>>,
     #[cfg(feature = "adaptive-concurrency")]
-    concurrency: Option<Arc<crate::adaptive::AdaptiveConcurrency>>,
+    concurrency: Option<Arc<dyn crate::concurrency::ConcurrencyController>>,
 }
 
 impl fmt::Debug for EngineBuilder {
@@ -357,17 +357,32 @@ impl EngineBuilder {
         self
     }
 
-    /// Learns how many concurrent requests each origin serves comfortably.
+    /// Decides how many requests to one origin may be in flight at once.
     ///
-    /// The controller can only ever stay at or under the ceiling it was built
-    /// with; it has no way to discover that it could go faster than a caller
-    /// allowed. Read
-    /// [`AdaptiveConcurrency`](crate::adaptive::AdaptiveConcurrency)'s
-    /// documentation for what it does with a `429` and why that differs from a
-    /// `403`.
+    /// The engine asks this for permission before each hop and reports the
+    /// outcome against it afterwards; it holds no opinion of its own about what
+    /// a limit should be. Three things can go here:
+    ///
+    /// - [`AdaptiveConcurrency`](crate::adaptive::AdaptiveConcurrency), which
+    ///   learns a limit per origin from latency and treats a `429` as a one-way
+    ///   ratchet. Read its documentation for what it does with a `429` and why
+    ///   that differs from a `403`;
+    /// - [`FixedConcurrency`](crate::concurrency::FixedConcurrency), which
+    ///   bounds in-flight requests per origin at a number and never moves it;
+    /// - anything else implementing
+    ///   [`ConcurrencyController`](crate::concurrency::ConcurrencyController).
+    ///
+    /// A controller runs *below* the middleware chain, so a
+    /// [`RateLimiter`](crate::middleware::RateLimiter) the caller installed has
+    /// already been paid before one is consulted, and no controller can send a
+    /// request the limiter has not released. The two shipped here also take a
+    /// [`Ceiling`](crate::concurrency::Ceiling) that cannot be defaulted away.
     #[cfg(feature = "adaptive-concurrency")]
     #[must_use]
-    pub fn concurrency(mut self, concurrency: Arc<crate::adaptive::AdaptiveConcurrency>) -> Self {
+    pub fn concurrency(
+        mut self,
+        concurrency: Arc<dyn crate::concurrency::ConcurrencyController>,
+    ) -> Self {
         self.concurrency = Some(concurrency);
         self
     }
@@ -503,7 +518,7 @@ struct EngineInner {
     #[cfg(feature = "cache")]
     cache: Option<Arc<chromulate_cache::HttpCache>>,
     #[cfg(feature = "adaptive-concurrency")]
-    concurrency: Option<Arc<crate::adaptive::AdaptiveConcurrency>>,
+    concurrency: Option<Arc<dyn crate::concurrency::ConcurrencyController>>,
 }
 
 impl fmt::Debug for Engine {
@@ -662,17 +677,17 @@ impl Engine {
                     // correct: nothing was asked of the origin.
                     #[cfg(feature = "adaptive-concurrency")]
                     let permit =
-                        crate::adaptive::acquire_from(self.inner.concurrency.as_deref(), &url)
+                        crate::concurrency::acquire_from(self.inner.concurrency.as_deref(), &url)
                             .await;
                     let response = self
                         .hop(&mut request, body, &url, &options, &deadline, &mut timings)
                         .instrument(span)
                         .await?;
-                    // On a transport error the `?` above drops the permit, which
+                    // On a transport error the `?` above drops the lease, which
                     // returns the slot and teaches nothing — a failure to connect
                     // may be this host's network rather than the origin's load.
                     #[cfg(feature = "adaptive-concurrency")]
-                    crate::adaptive::complete_from(permit, &response);
+                    crate::concurrency::complete_from(permit, &response);
                     self.cache_after(pending, &url, response)
                 }
             };

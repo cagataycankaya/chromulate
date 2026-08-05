@@ -58,6 +58,24 @@
 //!   into it, retries it, or changes anything about the request to get a
 //!   different answer.
 //!
+//! # Which of those are this law's opinion, and what to do about it
+//!
+//! All of them. They were chosen for one workload — a crawl that must not earn
+//! `429`s — and a caller with a different one may disagree. One of those
+//! disagreements is answered here, one is deliberately refused, and everything
+//! else is answered by the seam:
+//!
+//! - the permanent ceiling is opt-out, through
+//!   [`AdaptiveConcurrency::with_ceiling_recovery`], which is off by default and
+//!   turns the ratchet into classic AIMD when it is on;
+//! - the `403` freeze is not configurable, because the knob would be "keep
+//!   ramping against an origin that has refused you" and that is outside this
+//!   project's scope. [`AdaptiveConcurrency::forget`] is how a caller who has
+//!   dealt with a refusal says so;
+//! - anything else — a different signal, a different ramp, no learning at all —
+//!   is a [`crate::concurrency::ConcurrencyController`] of the caller's own.
+//!   That trait is the seam, and this module is one implementation behind it.
+//!
 //! # A new origin
 //!
 //! The first request to an origin this process has not seen goes out at
@@ -84,12 +102,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
+use chromulate_core::BoxFuture;
 use http::header::{DATE, RETRY_AFTER};
 use http::{HeaderMap, StatusCode};
 use tokio::sync::Notify;
 use url::{Position, Url};
 
-use crate::middleware::RateLimiter;
+pub use crate::concurrency::Ceiling;
+use crate::concurrency::{ConcurrencyController, Lease, Outcome};
 use crate::time::TimeSource;
 
 /// How many origins a controller remembers before evicting.
@@ -128,42 +148,6 @@ const BASELINE_DRIFT: f64 = 1.05;
 /// Five milliseconds is well under the 11 ms the fastest origin in the table
 /// above managed, so nothing this is meant to detect hides beneath it.
 const DEGRADATION_FLOOR: Duration = Duration::from_millis(5);
-
-/// What a permit may not exceed however much the controller learns.
-///
-/// A caller who configured a rate limit configured a ceiling, and this
-/// controller's job is to stay at or under it — never to discover it could go
-/// faster. Passing one of these to [`AdaptiveConcurrency::new`] is not optional,
-/// and there is deliberately no `Default`: a ceiling that can be forgotten is a
-/// rule someone has to remember, and this is meant to be structural.
-///
-/// Every permit spends a token from the limiter *before* it is granted, so a
-/// request that has not paid the caller's rate cannot exist.
-#[derive(Clone)]
-pub enum Ceiling {
-    /// The caller configured no rate limit, so there is none to respect.
-    ///
-    /// A written choice rather than a defaulted one.
-    Unlimited,
-    /// Every permit spends a token from this limiter before it is issued.
-    ///
-    /// Share the same `Arc` the engine's [`crate::middleware::RateLimiter`]
-    /// middleware holds, so the two cannot disagree about how many requests
-    /// have been spent.
-    RateLimit(Arc<RateLimiter>),
-}
-
-impl fmt::Debug for Ceiling {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Unlimited => f.write_str("Unlimited"),
-            Self::RateLimit(limiter) => f
-                .debug_tuple("RateLimit")
-                .field(&limiter.limit().per_second)
-                .finish(),
-        }
-    }
-}
 
 /// The knobs, all of them with a low default.
 ///
@@ -375,7 +359,11 @@ pub struct OriginSnapshot {
     pub in_flight: usize,
     /// The most slots this origin may ever be granted again.
     ///
-    /// Starts at [`ConcurrencyConfig::max`] and only falls, on a `429` or `503`.
+    /// Starts at [`ConcurrencyConfig::max`] and falls on a `429` or `503`. It
+    /// rises again only for a caller who asked for that with
+    /// [`AdaptiveConcurrency::with_ceiling_recovery`], and then only on a clean
+    /// probe, so a snapshot taken while an origin is idle reports the ceiling as
+    /// it stood at the last probe rather than as it would be if one ran now.
     pub ceiling: usize,
     /// The latency this origin is measured against, once one probe has
     /// completed.
@@ -417,6 +405,13 @@ struct Origin {
     resume_at: Option<Instant>,
     /// The limit may not increase before this.
     hold_until: Option<Instant>,
+    /// When the ceiling last moved, or `None` while it stands at
+    /// [`ConcurrencyConfig::max`] and has nothing to recover from.
+    ///
+    /// Read only when a caller opted into
+    /// [`AdaptiveConcurrency::with_ceiling_recovery`]; without that it is
+    /// written by a refusal and never looked at again.
+    ceiling_since: Option<Instant>,
 }
 
 impl Origin {
@@ -435,6 +430,7 @@ impl Origin {
             retry_after_requested: None,
             resume_at: None,
             hold_until: None,
+            ceiling_since: None,
         }
     }
 
@@ -618,10 +614,11 @@ use date::http_date;
 
 /// Takes a permit from a controller the caller may not have installed.
 ///
-/// This and [`complete_from`] are the pair an engine wires in: one line before
-/// the request and one after, the same two lines whether or not a controller is
-/// configured. Without that, a call site that has an `Option` writes a `match`
-/// on both sides and the wiring stops being something anyone wants to add.
+/// This and [`complete_from`] are the concrete pair, for a caller driving
+/// *this* controller: one line before the request and one after, the same two
+/// lines whether or not a controller is configured, and no boxing either side.
+/// The engine wires in [`crate::concurrency::acquire_from`] instead, because it
+/// holds whatever controller the caller installed rather than this one.
 ///
 /// ```
 /// use chromulate_http::adaptive::{self, AdaptiveConcurrency, Ceiling};
@@ -647,9 +644,10 @@ pub async fn acquire_from(controller: Option<&AdaptiveConcurrency>, url: &Url) -
 
 /// Reports a response against a permit the caller may not have taken.
 ///
-/// The counterpart to [`acquire_from`]. `Retry-After` is only read when the
-/// status is one that carries it, so an ordinary response never pays for the
-/// wall-clock read that resolving its `HTTP-date` form needs.
+/// The counterpart to [`acquire_from`], and the same concrete pair rather than
+/// the erased one. `Retry-After` is only read when the status is one that
+/// carries it, so an ordinary response never pays for the wall-clock read that
+/// resolving its `HTTP-date` form needs.
 ///
 /// A request that produced no response at all reports nothing: dropping the
 /// `Option<Permit>` returns the slot without teaching the controller a verdict,
@@ -689,7 +687,7 @@ impl Permit {
         let now = self.shared.time.now();
         let latency = now.saturating_duration_since(self.started);
         self.reported = true;
-        release(&self.state, &self.shared.config, now, latency, Some(signal));
+        release(&self.state, &self.shared, now, latency, Some(signal));
     }
 
     /// Whether this permit had to queue for its slot.
@@ -710,14 +708,38 @@ impl Drop for Permit {
         // nobody observed one.
         let now = self.shared.time.now();
         let latency = now.saturating_duration_since(self.started);
-        release(&self.state, &self.shared.config, now, latency, None);
+        release(&self.state, &self.shared, now, latency, None);
+    }
+}
+
+/// Reports an [`Outcome`] from the seam as the [`Signal`] this law speaks.
+///
+/// The seam deliberately carries no verdict, so this is where one is reached —
+/// in the implementation whose opinion it is, rather than in the type every
+/// other implementation also has to use. `SystemTime::now` is read only for a
+/// status that can carry a `Retry-After`, so an ordinary response never pays for
+/// a wall-clock read.
+impl Lease for Permit {
+    fn complete(self: Box<Self>, outcome: &Outcome<'_>) {
+        let signal = match outcome.status() {
+            Some(status) => match Signal::from_status(status) {
+                Signal::Backpressure { .. } => Signal::Backpressure {
+                    retry_after: outcome
+                        .headers()
+                        .and_then(|headers| retry_after_delay(headers, SystemTime::now())),
+                },
+                other => other,
+            },
+            None => Signal::Failed,
+        };
+        Permit::complete(*self, signal);
     }
 }
 
 /// Returns a slot and applies whatever the outcome taught, then wakes a waiter.
 fn release(
     state: &OriginState,
-    config: &ConcurrencyConfig,
+    shared: &Shared,
     now: Instant,
     latency: Duration,
     signal: Option<Signal>,
@@ -726,7 +748,7 @@ fn release(
         let mut origin = state.lock();
         origin.in_flight = origin.in_flight.saturating_sub(1);
         if let Some(signal) = signal {
-            apply(&mut origin, config, now, latency, signal);
+            apply(&mut origin, shared, now, latency, signal);
         }
     }
     // Outside the lock: a woken waiter takes it immediately.
@@ -763,15 +785,10 @@ fn cooldown(config: &ConcurrencyConfig, refusals: u32) -> Duration {
 }
 
 /// The control law. See the [module documentation](self).
-fn apply(
-    origin: &mut Origin,
-    config: &ConcurrencyConfig,
-    now: Instant,
-    latency: Duration,
-    signal: Signal,
-) {
+fn apply(origin: &mut Origin, shared: &Shared, now: Instant, latency: Duration, signal: Signal) {
+    let config = &shared.config;
     match signal {
-        Signal::Healthy => healthy(origin, config, now, latency),
+        Signal::Healthy => healthy(origin, shared, now, latency),
         // A `403` is a refusal, not a rate signal, and the difference is the
         // whole of this arm. Nothing halves, nothing pauses, nothing is retried
         // and nothing about the next request changes; the flag is raised, the
@@ -789,7 +806,8 @@ fn apply(
 }
 
 /// One healthy response, and the probe verdict it may complete.
-fn healthy(origin: &mut Origin, config: &ConcurrencyConfig, now: Instant, latency: Duration) {
+fn healthy(origin: &mut Origin, shared: &Shared, now: Instant, latency: Duration) {
+    let config = &shared.config;
     origin.probe_total = origin.probe_total.saturating_add(latency);
     origin.probe_samples += 1;
     if origin.probe_samples < config.probe {
@@ -834,6 +852,11 @@ fn healthy(origin: &mut Origin, config: &ConcurrencyConfig, now: Instant, latenc
         return;
     }
 
+    // A clean probe is the only evidence this law accepts that an origin is
+    // healthy *now*, which is what a recovering ceiling has to rest on. Off
+    // unless the caller asked for it; see `relax_ceiling`.
+    relax_ceiling(origin, shared, now);
+
     // Condition 6, checked before the run is credited rather than after, which
     // is the whole of its effect. A probe landing inside a hold does not count
     // towards the next increase at all: banking evidence while the controller
@@ -873,11 +896,51 @@ fn healthy(origin: &mut Origin, config: &ConcurrencyConfig, now: Instant, latenc
     origin.limit_changed();
 }
 
+/// Lets a ceiling a refusal lowered climb back, one slot at a time.
+///
+/// Off unless the caller passed an interval to
+/// [`AdaptiveConcurrency::with_ceiling_recovery`], and there is no default
+/// interval on purpose: the ratchet was chosen deliberately for a workload that
+/// must not earn `429`s, and a caller who opts out of it is saying they know
+/// their own quota. With one set, this is the additive half of AIMD — one slot
+/// per interval of quiet, with the *limit* still having to earn each of those
+/// slots through the increase rule, so a recovered ceiling is permission to try
+/// again rather than a jump back to where the refusal happened.
+///
+/// The three guards are separable and each is reachable:
+/// [`AdaptiveConcurrency::ceiling_recovery`] being unset is what keeps today's
+/// permanence, the `max` check is what stops a fully recovered ceiling from
+/// growing without bound, and the interval check is what makes recovery take
+/// time. `ceiling_since` can only be `None` once the `max` check has passed for
+/// an origin that never refused, which cannot happen — a refusal is the only
+/// thing that lowers a ceiling, and it always records when.
+fn relax_ceiling(origin: &mut Origin, shared: &Shared, now: Instant) {
+    let Some(interval) = shared.ceiling_recovery else {
+        return;
+    };
+    if origin.ceiling >= shared.config.max {
+        return;
+    }
+    if origin
+        .ceiling_since
+        .is_none_or(|since| now < deadline(since, interval))
+    {
+        return;
+    }
+    // Bounded by the `max` check above rather than by a `min` here: two lines
+    // enforcing one rule means neither can be shown to be doing it, and the
+    // check has to exist anyway to stop `ceiling_since` being reset for ever.
+    origin.ceiling += 1;
+    origin.ceiling_since = Some(now);
+}
+
 /// A `429` or a `503`: a level this origin has now refused.
 ///
-/// The ceiling only ever falls. Halving and then climbing back would mean
-/// re-probing a level already known to refuse — choosing to be refused on a
-/// schedule — which is the one thing this controller exists not to do.
+/// The ceiling only ever falls, unless the caller asked for
+/// [`AdaptiveConcurrency::with_ceiling_recovery`]. Halving and then climbing
+/// back on this law's own initiative would mean re-probing a level already known
+/// to refuse — choosing to be refused on a schedule — which is the one thing
+/// this controller exists not to do.
 fn refuse(
     origin: &mut Origin,
     config: &ConcurrencyConfig,
@@ -897,6 +960,11 @@ fn refuse(
     // exceed the ceiling is the day this quietly starts raising it instead.
     origin.ceiling = origin.ceiling.min(learned);
     origin.limit = origin.limit.min(origin.ceiling);
+    // When the ceiling last moved, which is what a recovery interval is measured
+    // from. Written whether or not recovery is configured, because the cost is
+    // one `Instant` and the alternative is a field that means something
+    // different depending on a setting made elsewhere.
+    origin.ceiling_since = Some(now);
 
     // `Retry-After` is obeyed as given, up to the configured ceiling on a
     // pause. What was asked for is kept verbatim in the snapshot, so a caller
@@ -917,6 +985,13 @@ fn refuse(
 /// The parts a [`Permit`] needs after the controller may have been dropped.
 struct Shared {
     config: ConcurrencyConfig,
+    /// See [`AdaptiveConcurrency::with_ceiling_recovery`]. `None` — the default
+    /// — is the permanent ratchet this law has always had.
+    ///
+    /// Held here rather than in [`ConcurrencyConfig`] because that struct is
+    /// exhaustive by design, so a new field there is a source break for every
+    /// caller who wrote a literal without `..Default::default()`.
+    ceiling_recovery: Option<Duration>,
     time: TimeSource,
 }
 
@@ -924,6 +999,7 @@ impl fmt::Debug for Shared {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Shared")
             .field("config", &self.config)
+            .field("ceiling_recovery", &self.ceiling_recovery)
             .finish_non_exhaustive()
     }
 }
@@ -1079,6 +1155,7 @@ impl fmt::Debug for AdaptiveConcurrency {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AdaptiveConcurrency")
             .field("config", &self.shared.config)
+            .field("ceiling_recovery", &self.shared.ceiling_recovery)
             .field("ceiling", &self.ceiling)
             .field("origins", &self.len())
             .finish_non_exhaustive()
@@ -1098,6 +1175,7 @@ impl AdaptiveConcurrency {
         Self {
             shared: Arc::new(Shared {
                 config: config.sanitised(),
+                ceiling_recovery: None,
                 time: TimeSource::system(),
             }),
             ceiling,
@@ -1112,7 +1190,53 @@ impl AdaptiveConcurrency {
     pub fn with_time_source(mut self, time: TimeSource) -> Self {
         self.shared = Arc::new(Shared {
             config: self.shared.config,
+            ceiling_recovery: self.shared.ceiling_recovery,
             time,
+        });
+        self
+    }
+
+    /// Lets a ceiling that a `429` or `503` lowered climb back, one slot per
+    /// `interval`.
+    ///
+    /// **Off by default, and the default is the point.** Left alone, a refusal
+    /// lowers an origin's ceiling for the life of the entry and the controller
+    /// never approaches that level again, which is what a crawl that must not
+    /// earn `429`s wants. This turns that ratchet into the additive half of
+    /// classic AIMD, for the caller who knows their own quota — one told, for
+    /// instance, that their provider allows a hundred requests per second — and
+    /// would rather recover from a refusal than treat it as final.
+    ///
+    /// It is still slow on purpose: a recovered ceiling is only *permission* for
+    /// the limit to try that level again, and the limit still has to earn each
+    /// slot through the whole run of clean probes. Recovery is evaluated when a
+    /// clean probe completes, so an idle origin's ceiling does not move and a
+    /// snapshot reports it as of the last probe. An interval of zero means
+    /// "recover on every clean probe", which is a coherent choice and a fast one.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    ///
+    /// use chromulate_http::adaptive::{AdaptiveConcurrency, Ceiling};
+    ///
+    /// let controller = AdaptiveConcurrency::new(Ceiling::Unlimited)
+    ///     .with_ceiling_recovery(Duration::from_secs(600));
+    /// assert_eq!(
+    ///     controller.ceiling_recovery(),
+    ///     Some(Duration::from_secs(600))
+    /// );
+    /// assert_eq!(
+    ///     AdaptiveConcurrency::new(Ceiling::Unlimited).ceiling_recovery(),
+    ///     None,
+    ///     "a refusal is final unless the caller says otherwise"
+    /// );
+    /// ```
+    #[must_use]
+    pub fn with_ceiling_recovery(mut self, interval: Duration) -> Self {
+        self.shared = Arc::new(Shared {
+            config: self.shared.config,
+            ceiling_recovery: Some(interval),
+            time: self.shared.time.clone(),
         });
         self
     }
@@ -1121,6 +1245,13 @@ impl AdaptiveConcurrency {
     #[must_use]
     pub fn config(&self) -> &ConcurrencyConfig {
         &self.shared.config
+    }
+
+    /// How long a lowered ceiling waits before it may regain one slot, or
+    /// `None` when a refusal is final.
+    #[must_use]
+    pub fn ceiling_recovery(&self) -> Option<Duration> {
+        self.shared.ceiling_recovery
     }
 
     /// How many origins are remembered.
@@ -1227,12 +1358,7 @@ impl AdaptiveConcurrency {
         }
 
         // The caller's ceiling. There is no path to a `Permit` that skips this.
-        if let Ceiling::RateLimit(limiter) = &self.ceiling {
-            let wait = limiter.reserve();
-            if !wait.is_zero() {
-                self.shared.time.sleep(wait).await;
-            }
-        }
+        self.ceiling.pay(&self.shared.time).await;
 
         let waited = state.take_slot().await;
         Permit {
@@ -1242,5 +1368,20 @@ impl AdaptiveConcurrency {
             waited,
             reported: false,
         }
+    }
+}
+
+/// This law, behind the seam every controller is reached through.
+///
+/// The boxing is what erasure costs: one allocation for the future and one for
+/// the lease, per hop, on top of what the law itself does. A caller who holds an
+/// `AdaptiveConcurrency` directly and wants neither can call
+/// [`AdaptiveConcurrency::acquire`] and [`Permit::complete`], which are the same
+/// two calls without the indirection.
+impl ConcurrencyController for AdaptiveConcurrency {
+    fn acquire<'a>(&'a self, url: &'a Url) -> BoxFuture<'a, Box<dyn Lease>> {
+        Box::pin(async move {
+            Box::new(AdaptiveConcurrency::acquire(self, url).await) as Box<dyn Lease>
+        })
     }
 }
