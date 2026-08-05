@@ -56,7 +56,7 @@ reason is usually the useful part.
 | Is cancellation safe? | Yes, and structurally: dropping the response future drops the whole tree; there is no token to forget to check. A body dropped early takes its connection with it rather than pooling a socket at an unknown read position. | [4.4](#44-cancellation-and-deadlines), [7.4](#74-lifecycle-limits-and-eviction) |
 | Is there a Tower-like middleware layer? | Yes in shape, no in type: `Middleware` + `Next`, not `tower::Service`. Retry deliberately sits below the chain rather than in it. | [9.2](#92-middleware) |
 | What is the pool's ownership model? | HTTP/1.1 is exclusive and returns through the response body; HTTP/2 is shared and is registered when opened. Two protocols, two doors. | [7.4](#74-lifecycle-limits-and-eviction) |
-| How is backpressure applied? | Flow control and consumer polling bound bytes. Nothing bounds concurrent requests or open sockets — that is the caller's job, and the table says so explicitly. | [10.4](#104-backpressure-and-streaming) |
+| How is backpressure applied? | Flow control and consumer polling bound bytes. In a default build nothing bounds concurrent requests or open sockets — that is the caller's job, and the table says so explicitly; the off-by-default `adaptive-concurrency` feature adds a learned per-origin limit, not a socket ceiling. | [10.4](#104-backpressure-and-streaming) |
 | What is the task spawn strategy? | One driver task per connection, one per DNS resolution, none per request. | [10.3.1](#1031-task-spawning) |
 | How does lock contention behave under real load? | One mutex for the pool, measured flat to 100 origins at parity with `reqwest`; the sweep that used to make it bind is fixed and the fix is measured. | [10.3](#103-locks) |
 | Is there unsafe code? | None in any shipped crate — `forbid(unsafe_code)` throughout. One exception in `chromulate-bench`, which is `publish = false`: a counting global allocator cannot be written without it. | [3.3](#33-ownership-borrowing-and-the-cost-of-forbidding-unsafe) |
@@ -120,7 +120,7 @@ Six commitments constrain every decision that follows, and each is argued where 
 bites rather than here. Coherence over configurability: the library refuses to make it
 convenient to assemble an identity no real browser produces (section 5). Captured, never
 invented: every fingerprint constant traces to an observed capture with recorded
-provenance, a project rule (`CLAUDE.md:30-35`) that the profile loader enforces by
+provenance, a project rule (`CLAUDE.md:36-42`) that the profile loader enforces by
 rejecting a profile without one. Honest capability reporting: where the implementation
 cannot reach the target shape, the documentation says so in the same place it describes the
 target (section 8). Streaming by default: buffering happens when a caller asks for it, with
@@ -158,6 +158,7 @@ graph TD
     http --> proxy
     http --> profile
     http --> core
+    http -.->|"cache feature"| cache["chromulate-cache"]
 
     tls --> fingerprint["chromulate-fingerprint"]
     tls --> core
@@ -170,7 +171,15 @@ graph TD
     compression --> core
     dns --> core
     proxy --> core
+    cache --> core
+    h3["chromulate-h3"] --> core
 ```
+
+Two of those nodes are not reachable from the facade. `chromulate-cache` is an optional
+dependency of `chromulate-http`, drawn dashed because the edge exists only when the
+off-by-default `cache` feature is on (`crates/chromulate-http/Cargo.toml:111`).
+`chromulate-h3` has no inbound edge at all: it is published, it depends on core, and nothing
+in the workspace consumes it yet — section 2.3 says why.
 
 Three properties of this graph matter more than the individual edges.
 
@@ -267,10 +276,12 @@ section 2.3 argues that it should be.
 
 **`chromulate`** is the facade: `Client`, its builder, and the ergonomic request API. It
 re-exports what a normal user needs so that a typical `Cargo.toml` has one Chromulate
-dependency. It also hosts the built-in middleware (retry, rate limiting, tracing) behind
-feature flags, because those need no privileged access to engine internals — they are
-ordinary `Middleware` implementations, and shipping them in the facade proves the plugin
-surface is sufficient.
+dependency. The built-in policies are among those re-exports rather than its own code: rate
+limiting and retry are unconditional modules of `chromulate-http`
+(`crates/chromulate-http/src/middleware/mod.rs:7-8`) and the facade names them again
+(`crates/chromulate/src/lib.rs:136-137`). There is no feature flag on either, and no tracing
+middleware exists anywhere in the workspace — telemetry is the two spans of section 9.7, not
+a plugin.
 
 **`chromulate-cli`** is a binary for the workflows that need a command line rather than a
 program. Four subcommands ship (`crates/chromulate-cli/src/main.rs:38-53`): `get` fetches a
@@ -330,16 +341,18 @@ natural place to put shared mutable state.
 trait: the engine runs the chain, the facade builds it, and every plugin implements it. If
 it lived in a separate crate, that crate would be a dependency of core's dependents and of
 core's consumers alike, and would become a second core with all the version-coupling that
-implies. The concrete middlewares do not need a crate either — they live in the facade
-behind feature flags, which has the useful side effect that the built-in middleware is
-written against exactly the public API a third party has.
+implies. The concrete policies do not need a crate either — `rate_limit` and `retry` are
+modules of `chromulate-http` (`crates/chromulate-http/src/middleware/mod.rs:7-8`), compiled
+unconditionally, and the facade re-exports them. Only one of the two is actually a
+`Middleware`; section 9.3 is about the one that is not, and about what that says for the
+seam.
 
 **`chromulate-metrics` — `tracing` plus a middleware.** `tracing` is already a workspace
 dependency (`Cargo.toml:61`). A metrics crate would either wrap OpenTelemetry, forcing a
-fast-moving dependency on every user, or reimplement what `tracing` already does. The
-design instead commits to emitting spans with stable names and stable field names — that
-stability is the actual contract — and leaves the bridge to the user's telemetry stack.
-Section 9.7 specifies the span vocabulary.
+fast-moving dependency on every user, or reimplement what `tracing` already does. The design
+instead emits `tracing` spans and leaves the bridge to the user's telemetry stack. Section
+9.7 lists the two spans that exist and is explicit that their names and fields are not yet
+promised by semver.
 
 ---
 
@@ -703,31 +716,44 @@ produce an identity that no real browser produces.**
 A `Profile` is one value describing one browser build on one platform. It is constructed
 from one capture and is never assembled from parts of several.
 
+The struct is flat (`crates/chromulate-profile/src/profile.rs:117-144`). Two of its fields
+are the fingerprint specs from `chromulate-fingerprint`; the rest are scalars.
+
 ```
 Profile
-├── metadata
-│   ├── id                  chrome-stable-151-macos
-│   ├── family, channel, version, platform
-│   └── provenance          browser build, platform, endpoint, method, captured_at
-├── tls: ClientHelloSpec
-│   ├── cipher_suites       wire order, GREASE positions marked
-│   ├── extensions          the SET, plus an ExtensionOrder policy
-│   ├── supported_groups, key_share_groups
+├── name                    chrome
+├── version                 151.0.0.0
+├── platform: Platform
+├── user_agent: String
+├── client_hint_brands: Vec<Brand>
+├── client_hello: ClientHelloSpec
+│   ├── cipher_suites       wire order
+│   ├── extensions          the SET, plus an extension_order policy
+│   ├── supported_versions, supported_groups, key_share_groups
 │   ├── signature_algorithms, alpn, alps
-│   └── certificate_compression, psk_modes, ec_point_formats
+│   ├── certificate_compression, psk_key_exchange_modes, ec_point_formats
+│   └── grease: GreasePlacement
 ├── http2: Http2Spec
 │   ├── settings            ordered list
-│   ├── connection_window_update_increment
-│   ├── headers_frame_priority
+│   ├── connection_window_update
+│   ├── priority_frames, headers_priority
 │   └── pseudo_header_order
-├── headers: HeaderProfile
-│   ├── user_agent, client_hint_brands, platform, mobile
-│   ├── accept              per FetchDest
-│   ├── accept_language, accept_encoding
-│   └── order               navigation order, subresource order
-└── behaviour
-    └── redirect limit, connection window, priority hints
+├── accept: String
+├── accept_language: String
+├── accept_encoding: String
+├── header_order: HeaderOrder
+│   ├── navigate            the captured navigation order
+│   └── subresource         Option, absent in the shipped capture — §5.6
+├── observed_headers: BTreeMap<String, String>
+└── provenance: Option<Provenance>
 ```
+
+Three things this shape is *not*, each of which an earlier version of this section claimed.
+There is no nested `metadata` block and no `id`, `family`, `channel` or `mobile` field — the
+versioned id of §6.2 is a naming convention for registry keys, not a field. There is no
+`behaviour` block: the redirect limit and the connection window belong to `EngineConfig` and
+to `Http2Spec` respectively, not to the identity. And `accept` is a single `String`, the
+navigation value, not a map keyed by fetch destination; §5.6 is about why.
 
 Every field of the Chrome profile traces to a field of
 `crates/chromulate-fingerprint/tests/data/chrome-151-macos.json`. The cipher order comes
@@ -751,7 +777,7 @@ designed and has not been written, and it is kept because the reasoning still go
 gets built next. What exists today is stated first, so the two are not confused.
 
 Overriding a captured value goes through the client builder, not through the profile.
-`ClientBuilder::user_agent` (`crates/chromulate/src/client.rs:397`) sets a default header
+`ClientBuilder::user_agent` (`crates/chromulate/src/client.rs:403`) sets a default header
 and says on the type what that costs: the user agent is one part of a whole that also
 includes the handshake, the HTTP/2 preface and the client hint brands, so changing it alone
 produces a client its own handshake contradicts. The warning is in the doc comment, where a
@@ -793,7 +819,7 @@ This classification is how the design's central promise was meant to be kept: it
 "please keep your identity coherent" from a documentation request into something the type
 system participates in. Until `derive()` exists, nothing in the type system distinguishes
 the classes. What the builder offers instead is header-shaped overrides that carry a warning
-in prose (`client.rs:384-392`), and a wholesale `ClientBuilder::tls` swap (`client.rs:450`)
+in prose (`client.rs:392-398`), and a wholesale `ClientBuilder::tls` swap (`client.rs:456`)
 for a caller who wants a different engine entirely — coarse enough that nobody reaches it by
 accident, but not the recorded, reportable divergence this section asks for.
 
@@ -816,35 +842,45 @@ rather than in a comment.
 
 The second sample also shows the extension *count* changing with session state: 16
 extensions on a fresh connection, 17 when a session ticket allowed `pre_shared_key`
-(`chrome-151-macos.json:29`). The identity therefore has to be resolved per connection, not
-per client:
+(`chrome-151-macos.json:29`). The draw therefore has to be resolved per connection, not per
+client. A TLS connection has exactly one ClientHello; every request on that connection
+inherits it. This is the fact that forces identity into the pool key, and section 7.2
+follows it through.
 
-**`Profile`** (static, captured, shared by `Arc` across the client) → **`ConnectionIdentity`**
-(one concrete draw: one extension permutation, one GREASE draw, PSK present or not),
-materialised when a connection is established and retained for that connection's lifetime.
+**The type named `ConnectionIdentity` is not that draw.** It is worth saying plainly,
+because the name invites the opposite reading. `ConnectionIdentity::of`
+(`crates/chromulate-http/src/pool.rs:73-87`) is
+`format!("{}|{}|{}", profile.ja4(), profile.akamai_http2(), profile.user_agent)` plus a
+cached hash of that string, built **once per engine** and never per connection. It carries
+no extension permutation, no GREASE draw and no PSK state. What it answers is the pool's
+question — *were these two connections opened from the same profile* — and for that a
+profile-derived digest is exactly right, because two connections from one profile are
+interchangeable to the pool however their extension orders happened to fall.
 
-Retaining it for the connection's lifetime is not an optimisation. A TLS connection has
-exactly one ClientHello; every request on that connection inherits it. This is the fact
-that forces identity into the pool key, and section 7.2 follows it through.
+Nothing today materialises the per-connection draw as a value. rustls permutes the extension
+order itself, per connection (§8.2), and emits no GREASE at all (§8.3), so the draw exists on
+the wire without a Chromulate type ever holding it. A backend that shapes its own ClientHello
+would need one; the rustls path does not.
 
 ### 5.5 What a profile determines
 
 | Observable | Profile field | Consumer |
 |---|---|---|
-| Cipher suite list and order | `tls.cipher_suites` | `chromulate-tls` |
-| Extension set and permutation policy | `tls.extensions`, `tls.order` | `chromulate-tls` |
-| Supported groups, key shares | `tls.supported_groups`, `tls.key_share_groups` | `chromulate-tls` |
-| Signature algorithms | `tls.signature_algorithms` | `chromulate-tls` |
-| ALPN list, and therefore HTTP version | `tls.alpn` | `chromulate-tls`, pool |
+| Cipher suite list and order | `client_hello.cipher_suites` | `chromulate-tls` |
+| Extension set and permutation policy | `client_hello.extensions`, `client_hello.extension_order` | `chromulate-tls` |
+| Supported groups, key shares | `client_hello.supported_groups`, `client_hello.key_share_groups` | `chromulate-tls` |
+| Signature algorithms | `client_hello.signature_algorithms` | `chromulate-tls` |
+| ALPN list, and therefore HTTP version | `client_hello.alpn` | `chromulate-tls`, pool |
 | HTTP/2 SETTINGS and their order | `http2.settings` | `chromulate-http` |
-| Connection window increment | `http2.connection_window_update_increment` | `chromulate-http` |
+| Connection window increment | `http2.connection_window_update` | `chromulate-http` |
 | Pseudo-header order | `http2.pseudo_header_order` | `chromulate-http` |
-| Header set and order | `headers.order` | `chromulate-header` |
-| `User-Agent` | `headers.user_agent` | `chromulate-header` |
-| `Sec-CH-UA*` | `headers.client_hint_brands`, `platform`, `mobile` | `chromulate-header` |
-| `Accept` | `headers.accept[dest]` | `chromulate-header` |
-| `Accept-Language` | `headers.accept_language` | `chromulate-header` |
-| `Accept-Encoding` and decoders | `headers.accept_encoding` | `chromulate-compression` |
+| Header set and order | `header_order` | `chromulate-header` |
+| `User-Agent` | `user_agent` | `chromulate-header` |
+| `Sec-CH-UA`, `Sec-CH-UA-Platform` | `client_hint_brands`, `platform` | `chromulate-header` |
+| `Sec-CH-UA-Mobile` | `observed_headers["sec-ch-ua-mobile"]`, verbatim (`chromulate-header/src/engine.rs:452`) | `chromulate-header` |
+| `Accept` | `accept` — one value, the navigation one | `chromulate-header` |
+| `Accept-Language` | `accept_language` | `chromulate-header` |
+| `Accept-Encoding` and decoders | `accept_encoding` | `chromulate-compression` |
 | `Sec-Fetch-*` | derived from `RequestOptions` | `chromulate-header` |
 
 The last row is the one that justifies `RequestOptions` existing in core. `Sec-Fetch-Site`
@@ -871,7 +907,7 @@ cannot, and the profile records the omission — which the specified but unbuilt
 `Client::identity_report()` (§5.3) would surface, and which today a reader finds by
 inspecting the profile.
 Writing plausible values instead would violate the project's central data rule
-(`CLAUDE.md:30-35`) and produce exactly the incoherent identity this section exists to
+(`CLAUDE.md:36-42`) and produce exactly the incoherent identity this section exists to
 prevent, with the added problem of being invisible.
 
 The same applies to high-entropy client hints. A browser sends `Sec-CH-UA-Arch`,
@@ -897,27 +933,36 @@ maintenance story that does not depend on heroics.
 
 ### 6.1 The file format
 
-Profiles are JSON with a mandatory `schema_version` and a mandatory `provenance` block. A
-profile without provenance fails to load — that is the mechanism that turns
-"captured, never invented" from a rule people are asked to follow into one the loader
-enforces.
+A capture is JSON with a mandatory provenance block, under the key `_provenance` — the
+leading underscore sorts the metadata above the data in an editor and marks it as being
+about the file rather than in it. A profile without provenance fails to load
+(`crates/chromulate-fingerprint/src/capture.rs:28-29`, the field is not `Option`), and that
+is the mechanism that turns "captured, never invented" from a rule people are asked to follow
+into one the loader enforces.
 
 ```json
 {
-  "schema_version": 1,
-  "id": "chrome-stable-151-macos",
-  "provenance": {
+  "_provenance": {
+    "description": "Live capture of Google Chrome's TLS ClientHello and HTTP/2 preface…",
     "browser": "Google Chrome 151.0.0.0",
-    "platform": "macOS",
-    "endpoint": "https://tls.peet.ws/api/all",
+    "platform": "macOS (arm64 host, Intel UA string as Chrome always reports)",
+    "endpoint": "https://tls.peet.ws/api/all and https://tls.peet.ws/api/clean",
     "capture_method": "browser automation, two separate TLS connections",
-    "captured_at": "2026-08-04"
+    "captured_at": "2026-08-04",
+    "user_agent": "Mozilla/5.0 (Macintosh; …) Chrome/151.0.0.0 Safari/537.36"
   },
-  "tls": { "...": "ClientHelloSpec" },
-  "http2": { "...": "Http2Spec" },
-  "headers": { "...": "HeaderProfile" }
+  "_finding_extension_order_is_randomised": { "...": "Finding, optional" },
+  "sample_navigate": { "...": "the fingerprints observed on a fresh connection" },
+  "sample_clean": { "...": "the same on a resumed connection, optional" },
+  "client_hello": { "...": "ClientHelloCapture" },
+  "http2": { "...": "Http2Capture" }
 }
 ```
+
+Those six keys are the whole format (`capture.rs:26-50`). **There is no `schema_version`
+field and no `id` field**, and both have been claimed here before: a versioned id such as
+`chrome-stable-151-macos` is a registry key chosen by whoever registers the profile
+(`ProfileRegistry::register_as`), not something the file carries.
 
 The shipped Chrome profile is compiled in as Rust constants rather than loaded from a file
 at runtime, so a binary has no runtime data dependency and a missing file cannot be a
@@ -925,11 +970,17 @@ production failure. The JSON loader exists for user-supplied captures and is the
 format, so a shipped profile and a user profile are interchangeable and the round trip is
 testable.
 
-Unknown fields are rejected on load rather than ignored. A typo in a hand-edited capture
-that silently does nothing is worse than an error, because the user will believe a setting
-took effect. Forward compatibility is handled by `schema_version`: a profile with a version
-newer than the loader understands is rejected with a message naming the versions, rather
-than partially parsed.
+**Unknown fields are ignored, not rejected — and they should be rejected.** No type in the
+capture module carries `#[serde(deny_unknown_fields)]`, so a typo in a hand-edited capture
+parses cleanly and silently does nothing, and the user believes a setting took effect. That
+is the worse of the two failure modes and it is the one that ships. The fix is one attribute
+per struct and a test that a misspelled key fails to load; it has not been written.
+
+Forward compatibility has no mechanism at all, for the same reason: with no `schema_version`
+in the file, a capture written against a newer format is not rejected with a message naming
+the versions — it is parsed as far as it goes, and whatever the loader does not recognise is
+dropped. Adding the field is a format change and therefore a major version, which is why it
+sits in §6.2's table as one rather than being slipped in.
 
 ### 6.2 Versioning and the compatibility policy
 
@@ -953,7 +1004,7 @@ Consequences for semver:
 | Correct an error in an existing profile | Minor, changelog entry with the new capture's provenance and the corrected fields |
 | Mark a profile deprecated | Minor |
 | Remove a deprecated profile | Major |
-| Change the profile schema | Major, or minor with a `schema_version` bump and both loaders retained |
+| Change the capture schema | Major. The minor path — a `schema_version` bump with both loaders retained — needs the field to exist first, and it does not (§6.1) |
 
 Correcting an existing profile is the uncomfortable case: it technically changes observable
 behaviour without a major bump. The alternative — issuing `chrome-stable-151-macos-v2` —
@@ -964,12 +1015,19 @@ makes the change auditable after the fact.
 
 ### 6.3 Deprecation
 
-A profile is marked deprecated when the build it models is more than ten releases behind
-current — roughly ten months. A deprecated profile still loads and still works; it emits
-one `tracing::warn` per process naming the profile and the current alias target. It is
-removed only at a major version. The reason for the long tail is that reproducing a
-historical measurement is a legitimate use, and a library that deletes old profiles makes
-old results unreproducible.
+**Specified, not built. There is no deprecation mechanism in `chromulate-profile`** — no
+deprecated flag on a profile, no warning, and nothing to deprecate: `with_builtin` registers
+exactly two names, `chrome` and `chrome-stable`, both pointing at the same profile
+(`crates/chromulate-profile/src/registry.rs:31-38`). The policy below is what should happen
+once a second captured build exists, and it is kept because that is the moment someone will
+need to have decided it, not because any of it runs today.
+
+A profile would be marked deprecated when the build it models is more than ten releases
+behind current — roughly ten months. A deprecated profile would still load and still work,
+emitting one `tracing::warn` per process naming the profile and the current alias target, and
+would be removed only at a major version. The reason for the long tail is that reproducing a
+historical measurement is a legitimate use, and a library that deletes old profiles makes old
+results unreproducible.
 
 ### 6.4 The refresh workflow
 
@@ -993,7 +1051,7 @@ weaker than it reads.
 **Verify.** `chromulate-cli verify` rebuilds every shipped profile from the capture
 compiled into the binary and compares JA3, JA4, the Akamai HTTP/2 string, the header order
 and the user agent, reporting any drift and exiting non-zero. It runs in CI
-(`.github/workflows/ci.yml:113`), so a change that alters a fingerprint computation and a
+(`.github/workflows/ci.yml:119`), so a change that alters a fingerprint computation and a
 change that alters a profile constant both fail loudly. What it does not do is reach an
 external capture — that is the `diff` step above.
 
@@ -1011,8 +1069,12 @@ A user with a browser Chromulate does not ship can capture it and register it:
 ```rust
 let profile = Profile::from_capture(&std::fs::read_to_string("my-firefox.json")?)?;
 let mut registry = ProfileRegistry::default();
-registry.register(profile)?;
+registry.register(profile);
 ```
+
+`register` returns `Option<Arc<Profile>>` — the entry it displaced, if the name was already
+taken (`crates/chromulate-profile/src/registry.rs:44`). It is not fallible, so the `?` this
+example used to carry did not compile.
 
 No fork, no upstream contribution required. This is the reason the project ships only the
 Chrome profile today and does not fabricate a Firefox or Safari one: no capture for them
@@ -1025,18 +1087,28 @@ exists in this repository, and the honest answer to "where is the Firefox profil
 
 ### 7.1 The pool key
 
-```
-PoolKey {
-    origin:   Origin,          // scheme, host, port — uri.rs:16-20
-    proxy:    Option<ProxyId>, // which proxy, or direct
-    identity: IdentityId,      // which resolved profile
+```rust
+pub struct PoolKey {              // crates/chromulate-http/src/pool.rs:134-147
+    pub scheme: Arc<str>,         // `http` or `https`
+    pub host: Arc<str>,           // lowercased
+    pub port: u16,                // scheme default filled in
+    pub proxy: Option<Arc<str>>,  // credentials redacted
+    pub identity: ConnectionIdentity, // the profile — §7.2
+    pub protocol: Protocol,       // what ALPN settled on
 }
 ```
 
-`Origin` already provides the normalised comparison and hashing this needs
-(`uri.rs:15-20`), including filling in the scheme's default port so that
-`https://example.com` and `https://example.com:443` are one key (`uri.rs:32-34`, with the
-round trip back out at `uri.rs:65-70` and the test at `uri.rs:117-124`).
+Six components, not the three an earlier version of this section drew. The origin is spelled
+out as `scheme`, `host` and `port` rather than held as an `Origin`, so the normalisation the
+key needs — lowercasing the host, filling in the scheme's default port so that
+`https://example.com` and `https://example.com:443` are one key — happens where the key is
+built rather than inside a shared type.
+
+`protocol` is the sixth, and it is the one worth explaining because it is not obvious.
+HTTP/1.1 and HTTP/2 connections to the same origin under the same profile live in two
+different maps and obey opposite ownership rules (§7.4), so a checkout has to name which
+population it means before it can look anything up. Keeping the protocol out of the key would
+mean a lookup could match a connection it cannot use.
 
 ### 7.2 Why identity is in the key
 
@@ -1074,14 +1146,23 @@ presented certificate covers the new host and the host resolves to the same addr
 Browsers do this and it materially reduces connection count on sites that shard across
 subdomains.
 
-Chromulate coalesces, with the identity and proxy constraints intact. The pool keeps a
-secondary index from `(identity, proxy, resolved_ip)` to live HTTP/2 connections; a
-checkout that misses the primary key consults it and accepts a connection whose
-certificate's subject alternative names cover the requested host. A `421 Misdirected
-Request` response disables coalescing for that host and connection pair and retries on a
-fresh connection, because the server has told us our inference was wrong.
+**Not implemented.** `PoolState` holds four fields — `idle`, `multiplexed`, `idle_held` and
+`last_sweep` (`pool.rs:270-290`) — and there is no secondary index of any kind. `421` does not
+appear anywhere in the workspace. A request for `img.example.com` opens its own connection
+even when a live HTTP/2 connection to `www.example.com` presents a certificate covering both,
+so Chromulate holds more connections than a browser would against a sharded site. Since a
+server cannot see which of its own connections a client chose to open, this is a resource
+cost rather than an observable difference — the same category as the missing connect race in
+§7.5.
 
-Coalescing never crosses an identity or a proxy boundary, for the reasons in 7.2.
+The design is kept because it constrains what building it would mean rather than because it
+describes anything: a secondary index from `(identity, proxy, resolved_ip)` to live HTTP/2
+connections, consulted only when the primary key misses, accepting a connection whose
+certificate's subject alternative names cover the requested host. A `421 Misdirected Request`
+would disable coalescing for that host and connection pair and retry on a fresh connection,
+because the server has told us our inference was wrong. Coalescing would never cross an
+identity or a proxy boundary, for the reasons in §7.2 — which is also why the index is keyed
+on identity and proxy rather than on the address alone.
 
 ### 7.4 Lifecycle, limits and eviction
 
@@ -1106,6 +1187,13 @@ currently holds. So 256 concurrent requests to one origin produce 256 connection
 once. This is deliberate — blocking a request behind a connection permit turns a pool
 setting into a latency cliff — but it means the caps are not a file-descriptor guarantee,
 and a caller that needs one has to bound its own concurrency.
+
+One thing does bound requests in flight, and it is off by default: with the
+`adaptive-concurrency` feature on, each hop takes a per-origin permit before it runs
+(`engine.rs:562-564`, `crates/chromulate-http/src/adaptive.rs`). That limit is *learned* from
+what the origin's latency and status codes say it is comfortable serving, so it is not a
+file-descriptor guarantee either — it is a politeness control that happens to cap
+concurrency. A caller that needs a hard socket ceiling still has to impose one itself.
 
 Eviction happens on idle expiry, on any protocol error, and when the total cap is reached —
 least-recently-used first among idle connections. A connection is also dropped rather than
@@ -1348,13 +1436,18 @@ within the current stack; on HTTP/2 it is not.
 
 ### 8.6 What would have to change
 
-Four options, in increasing order of cost.
+Four options were listed here, in increasing order of cost. Two have since shipped and are
+stated as done rather than as plans; neither closed the gap, for reasons given under each.
 
-**Switch the rustls provider to `aws-lc-rs`.** Cheap, self-contained, and it supplies
-`X25519MLKEM768` so the group list and key shares can match the capture. It does not touch
-GREASE, ALPS, SCT, the missing cipher suites, or the SCSV. It also adds a C build
-dependency, which is a real cost for a crate that currently builds with pure Rust. Worth
-doing, worth not overselling.
+**Switch the rustls provider to `aws-lc-rs`. Done, behind an off-by-default feature**
+(`crates/chromulate-tls/Cargo.toml`, selected at `provider.rs:32-39`). It supplies
+`X25519MLKEM768`, so on that build the profile's group list goes from three of four offered
+to four of four and the key shares become exactly the pair the capture shows, because a
+hybrid group carries its classical companion (`chromulate-tls/src/lib.rs:54-60`). It does not
+touch GREASE, ALPS, SCT, the six missing cipher suites, or the SCSV — the capability
+statement in §8.4 is otherwise unchanged by it. It is off by default because it adds a C
+build dependency, and a pure-Rust build needing no C toolchain is part of what this project
+is. Worth having, worth not overselling.
 
 **Contribute the missing pieces upstream to rustls.** GREASE and ALPS are both plausible
 upstream features — GREASE is an anti-ossification measure with an independent rationale,
@@ -1377,9 +1470,14 @@ toolchain, a large unsafe surface behind an FFI boundary, and — for a project 
 distinguishing property is `forbid(unsafe_code)` — a change of identity. The tractable
 middle path is to make the TLS backend a trait, so a BoringSSL backend can exist as an
 opt-in crate maintained by whoever needs it without the default build acquiring a C
-dependency. Section 9.8 specifies that seam.
+dependency. **That seam is built** — §9.8 describes it as it stands, not as a plan — but no
+backend other than rustls exists, so nothing about the emitted bytes has changed. A seam is
+permission to write the thing, not the thing.
 
-Until one of these lands, the capability statement in 8.4 stands as written.
+Two of the four have therefore landed, and neither moved the numbers this section is about:
+the provider switch changed the supported groups and the key shares, and the backend seam
+changed nothing observable at all. Until a second backend or an upstream rustls change lands,
+the rest of the capability statement in §8.4 stands as written.
 
 ---
 
@@ -1424,21 +1522,34 @@ attributable without a stack trace.
 
 ### 9.3 Retry policies
 
-A retry policy is a middleware, not a separate trait. It consults `Error::is_retryable`
+**The shipped retry is not a middleware, and the module says so in its first line:**
+"[`Retry`] is not, and cannot be" one
+(`crates/chromulate-http/src/middleware/mod.rs:3-5`). `Retrying` implements `Exchange`
+(`middleware/retry.rs:199`) and is installed beneath the chain by `EngineBuilder::retry`
+(`engine.rs:281`), not inside it. One retry therefore re-runs a whole logical request
+including its redirect chain, and every attempt is visible to the middleware above it.
+
+The policy itself is unchanged by where it sits. It consults `Error::is_retryable`
 (`error.rs:208`) for the transport verdict, `Body::try_clone` (`body.rs:98`) for whether the
 request can be replayed at all, and applies its own idempotency policy on top — because
 core's verdict deliberately does not know whether the caller considers their `POST` safe to
-repeat. Shipping retry as a middleware rather than an engine feature is the proof that the
-middleware seam is expressive enough for cross-cutting concerns with state.
+repeat.
 
-That proof very nearly failed. `Next` was originally not `Copy`, and `Next::run` takes
-`self`, so a middleware could drive the rest of the chain exactly once — which makes retry,
-hedging, circuit-breaking, and fallback all inexpressible, and forced the shipped retry to
-be an `Exchange` decorator instead of a middleware. Both of `Next`'s fields are shared
-references, so `#[derive(Clone, Copy)]` costs nothing and restores the seam; the test
-`a_middleware_can_run_the_rest_of_the_chain_more_than_once` pins it. The general lesson is
-that a plugin seam is only as expressive as its least capable type, and the way to find out
-is to write a plugin that needs the hard case.
+What this section used to claim was that shipping retry *as a middleware* proved the seam
+expressive enough for cross-cutting concerns with state. That proof was never delivered, and
+the reason is worth keeping because it is the more interesting half. `Next` was originally not
+`Copy`, and `Next::run` takes `self`, so a middleware could drive the rest of the chain
+exactly once — which makes retry, hedging, circuit-breaking and fallback all inexpressible,
+and is what forced retry to be an `Exchange` decorator. Both of `Next`'s fields are shared
+references, so `#[derive(Clone, Copy)]` costs nothing and restores the seam; `Next` **is**
+`Copy` today (`crates/chromulate-core/src/traits.rs:108`) and the test
+`a_middleware_can_run_the_rest_of_the_chain_more_than_once` pins it. So the seam is now
+expressive enough for a retry middleware — nobody has written one, because the `Exchange`
+decorator already works and re-running the redirect loop is the behaviour wanted. The general
+lesson stands and is sharper for the outcome: a plugin seam is only as expressive as its least
+capable type, the way to find out is to write a plugin that needs the hard case, and a seam
+that has been fixed but not re-exercised is a seam whose sufficiency is still an argument
+rather than a demonstration.
 
 ### 9.4 Proxy providers
 
@@ -1465,20 +1576,31 @@ a replacement implementation small.
 
 ### 9.7 Telemetry
 
-Not a trait. `tracing` spans with a stable vocabulary, which is the actual contract:
+Not a trait. `tracing` spans, and there are exactly two of them in the workspace. Both are at
+`DEBUG`, and neither carries a `chromulate.` prefix:
 
-| Span | Fields |
-|---|---|
-| `chromulate.request` | `method`, `url`, `profile`, `redirect_count` |
-| `chromulate.resolve` | `host`, `addr_count`, `cached` |
-| `chromulate.connect` | `target`, `proxy`, `reused` |
-| `chromulate.handshake` | `alpn`, `tls_version`, `resumed` |
-| `chromulate.exchange` | `version`, `status` |
+| Span | Fields | Where |
+|---|---|---|
+| `exchange` | `method`, `host`, `hop` | `crates/chromulate-http/src/engine.rs:543-548` |
+| `connect` | `target`, `proxy` | `crates/chromulate-http/src/connect.rs:222-226` |
 
-Field *names* are covered by semver; field values and span nesting are not. A user bridges
-these to OpenTelemetry, Prometheus or anything else with the subscriber of their choice, and
-Chromulate acquires no telemetry dependency. Section 13.3 constrains what may appear in
-these fields.
+`hop` is the redirect index, so a redirect chain is several `exchange` spans rather than one
+span with a count. `proxy` is the proxy's label with credentials already redacted, or the
+literal `none`.
+
+Three things a reader should not infer from the table. There is no `request` span above the
+hops, no `resolve` span, and no `handshake` span — DNS and the TLS handshake happen inside
+`connect` and are not separately instrumented. The URL is deliberately absent from
+`exchange`: the comment at the callsite says why, and it is a rule rather than an omission —
+a query string routinely carries tokens, and §13.3 governs what may appear in a field.
+
+**No semver promise covers any of this.** An earlier version of this section said field names
+were covered; that promise was made about five span names none of which existed, so there is
+nothing to have kept. The names and fields above describe what the code emits today, and a
+user bridging them to OpenTelemetry or Prometheus should expect to adjust across releases.
+Making the vocabulary a contract is a reasonable thing to want and it would start with
+choosing which spans are worth promising — the two here were added where they were useful for
+debugging, not designed as an interface.
 
 ### 9.8 The backend seam
 
@@ -1511,17 +1633,37 @@ stream type irrelevant to the question: `ActiveBackend::from_profile(&profile)` 
 to infer the parameter. The rule to apply when adding a member: it belongs on
 `TlsBackend<IO>` only if it actually involves the stream.
 
-**The seam has two implementations.** `mock::MockBackend`, behind
-`--cfg chromulate_mock_backend`, shares no code and no types with rustls and picks `IO` as
-its `Stream` where the rustls backend picks `tokio_rustls::client::TlsStream<IO>`. A CI job
-builds and tests `chromulate-tls` and `chromulate-http` against it. This is a cfg flag rather
-than a cargo feature on purpose: features must be additive, `--all-features` would enable it,
-and a CI run that believed it was exercising TLS while linking a backend that encrypts
-nothing would be worse than not checking the seam at all.
+**The seam has three implementations**, and they answer three different questions.
 
-What that does not prove: the mock is undemanding. It needs no cipher list, no GREASE
-placement, no ALPS — the things a profile actually drives. It establishes that the seam
-admits a *different* backend, not that it admits a *fingerprint-controlling* one.
+`TlsEngine` over rustls is the shipping one. `mock::MockBackend`, behind
+`--cfg chromulate_mock_backend`, shares no code and no types with rustls and picks `IO` as
+its `Stream` where the rustls backend picks `tokio_rustls::client::TlsStream<IO>` — it
+answers *does the seam admit a backend that is not rustls?*. A CI job builds and tests
+`chromulate-tls` and `chromulate-http` against it. That is a cfg flag rather than a cargo
+feature on purpose: features must be additive, `--all-features` would enable it, and a CI run
+that believed it was exercising TLS while linking a backend that encrypts nothing would be
+worse than not checking the seam at all.
+
+The mock left a gap, because it consumes nothing: it clones the profile's spec and hands the
+stream back, so cipher order, GREASE placement and the extension set were never exercised.
+`recording::RecordingBackend` closes it. It performs the one step every real backend performs
+before any bytes move — **flatten the profile into the vocabulary a TLS library accepts**,
+which is wire code points and flags, not Rust types. `SSL_CTX_set_cipher_list` takes numbers;
+whatever a backend cannot express as numbers is lost at that boundary, silently, and the
+ClientHello is wrong.
+
+`RecordedClientHello` is that intermediate form and `to_spec()` rebuilds a `ClientHelloSpec`
+from it *alone*, never from the profile it came from — reaching back would make the round
+trip vacuous. The test that matters compares the reconstruction's JA4 with the profile's
+target, and a mutation test proves it can fail: dropping an extension, dropping a cipher,
+reversing the signature algorithms or clearing ALPN each move the fingerprint. One
+deliberately does not: transposing two ciphers, because JA4 sorts. That case is caught by a
+separate order assertion, which is why the two are separate tests.
+
+This is the acceptance harness a BoringSSL backend is measured against. What it still does
+not prove is that a backend *sends* what it was configured with — that is what
+`tests/emitted_client_hello.rs` decodes real bytes for, and what rustls fails. Configuration
+fidelity and wire fidelity are different claims and only the first is checked here.
 
 The earlier version of this section said the seam "does not exist yet and is Phase 5 work".
 It had in fact been written, exported, and left with zero callers — which is why the shipped
@@ -1653,16 +1795,24 @@ mechanisms here and only one of them is a queue:
 | Response bytes in flight | HTTP/2 flow control windows, and the consumer's polling — see below | — |
 | Request bytes in flight | the transport draining `Body::stream` chunk by chunk | — |
 | Response body held in memory | the consumer: `bytes_stream` is constant-memory, `bytes` buffers whole | `bytes` is bounded only by `max_response_size` |
-| Concurrent requests | **nothing in this crate** | the caller must bound its own concurrency |
+| Concurrent requests | a per-origin permit per hop, under the off-by-default `adaptive-concurrency` feature (`engine.rs:562-564`) | in a default build, nothing — the caller must bound its own concurrency |
 | Sockets open at once | **nothing in this crate** | `max_per_host` / `max_total` bound *idle* connections only |
 | Request rate | `RateLimit` middleware, if the caller installs one | off by default |
 
 The last three are the ones that surprise people. `Engine::acquire` has no semaphore: a
 request that finds nothing pooled opens a connection regardless of how many are already
 open, so the pool's caps decide what is *kept* rather than what exists. Blocking a request
-behind a connection permit was rejected because it turns a pool setting into a latency
+behind a *connection* permit was rejected because it turns a pool setting into a latency
 cliff that is very hard to attribute from the outside — but it does mean a caller issuing
 10,000 concurrent requests gets 10,000 sockets, and that bounding it is the caller's job.
+
+`adaptive-concurrency` is the one exception and it is a different mechanism, not a
+reversal of that decision. Its permit is per *origin* and its limit is discovered from the
+origin's own latency and refusals rather than configured, so it never turns a static setting
+into a cliff. It is also off by default, which means the default build behaves exactly as the
+paragraph above describes. A cache hit takes no permit at all — nothing was asked of the
+origin — and a transport error drops the permit without teaching the controller anything,
+because a failure to connect may be this host's network rather than the origin's load.
 
 HTTP/2 flow control is the backpressure mechanism, and it only works if the client releases
 capacity as the consumer consumes rather than as bytes arrive. The response `Body` must poll
@@ -1839,7 +1989,7 @@ round-trips, pool reuse, proxy tunnels, decompression pipelines, and cancellatio
 belong here, and all can run with no network.
 
 Compatibility tests hit real endpoints and are gated behind the `network-tests` feature so
-the default `cargo test` stays offline (`CLAUDE.md:171-172`). These are the tests that fetch
+the default `cargo test` stays offline (`CLAUDE.md:221-222`). These are the tests that fetch
 a real HTTPS page and query an echo endpoint for the fingerprint actually presented. They
 run on a schedule, not on every pull request, because they fail for reasons unrelated to
 the change under test.
@@ -1895,10 +2045,18 @@ Platform matrix: Linux, macOS, Windows, on stable and on the MSRV of 1.88
 Always on. Verification uses `webpki-roots` (`Cargo.toml:75`) by default, with platform
 root store support as an option.
 
-There is no convenient way to turn verification off. If a mechanism for accepting invalid
-certificates exists at all, it is behind a non-default cargo feature, its type is named to
-be uncomfortable to write, and using it emits a warning-level trace event on every
-connection. The reasoning is specific to this library's users: a scraping tool with an easy
+There is no convenient way to turn verification off. The mechanism that exists —
+`TlsEngineBuilder::danger_accept_invalid_certs` — is behind the non-default
+`dangerous-configuration` feature, its name is uncomfortable to write, and using it emits a
+warning-level trace event.
+
+**That warning fires once per engine, not once per connection**, because it sits in
+`TlsEngineBuilder::build()` (`crates/chromulate-tls/src/engine.rs:385`), where the verifier is
+installed. Building the configuration is where the decision is made, so that is where it is
+reported; a per-connection warning would need the event at the handshake instead, and would
+trade one legible line for one line per request. Worth knowing before relying on the log to
+tell you an unverified connection just happened — it tells you an unverified *engine* was
+built. The reasoning for making it awkward at all is specific to this library's users: a scraping tool with an easy
 TLS-off switch becomes a fleet of machine-to-machine clients accepting any certificate, and
 those clients are frequently pointed at hosts chosen by untrusted input.
 
@@ -1970,7 +2128,7 @@ argument that keeps the codebase testable. A test can assert that a computed JA4
 captured JA4; no test in this repository can assert that a third party's classifier fails
 to flag a request, because that classifier is not here and changes without notice. Building
 toward an unverifiable goal produces a codebase where nobody can tell whether a change made
-things better or worse. The project's scope boundary (`CLAUDE.md:117-122`) says the same in
+things better or worse. The project's scope boundary (`CLAUDE.md:167-172`) says the same in
 one paragraph.
 
 ---
@@ -1991,19 +2149,19 @@ a measurement now exists it names the figure or points at
 | 5 | HTTP status errors | Not errors | `Error::Status` variant | Makes middleware composable — no unwrapping to inspect a 404. Costs a small surprise for users coming from clients that error on 4xx. |
 | 6 | TLS backend | rustls (`Cargo.toml:71`) | BoringSSL FFI; OpenSSL; native-tls | Pure Rust, no C toolchain, `forbid(unsafe_code)` stays honest. Costs byte-exact ClientHello fidelity — section 8. This is the project's largest single trade-off. |
 | 7 | Protocol implementations | hyper and h2 | Bespoke HTTP/1.1 and HTTP/2 | Correctness and maturity for free. Costs pseudo-header order and header order control on HTTP/2 (section 8.5). |
-| 8 | Pool key | Origin + proxy + identity | Origin only; origin + proxy | Prevents a silent, load-dependent identity mix (section 7.2). Costs connection reuse when rotating profiles — a legible, measurable cost. |
+| 8 | Pool key | scheme + host + port + proxy + identity + protocol (`pool.rs:134-147`) | Origin only; origin + proxy | Prevents a silent, load-dependent identity mix (section 7.2); `protocol` keeps the two populations, which obey opposite ownership rules, from matching each other. Costs connection reuse when rotating profiles — a legible, measurable cost. |
 | 9 | Fingerprint / profile split | Two crates | One crate | Keeps the golden test a genuine cross-check between algebra and data. Costs one crate boundary. |
 | 10 | HTTP/2 location | Inside `chromulate-http` | `chromulate-http2` | Avoids making the pool's internals public API. Costs a larger crate and slower incremental builds. |
 | 11 | Middleware trait location | `chromulate-core` | `chromulate-middleware` | Avoids a second core that everything depends on. Costs nothing identifiable. |
 | 12 | Shipped profile storage | Rust constants, JSON loader for user captures | Runtime file loading; build script | No runtime file dependency; a missing file cannot be a production failure. Costs a recompile to change a profile, which is correct — profile changes are reviewable code changes. |
 | 13 | Extension order model | Set plus permutation policy | Frozen wire order | Matches the verified capture finding (`chrome-151-macos.json:12-16`). A frozen order would be less faithful and trivially distinguishable. Costs a more complex type. |
 | 14 | `forbid(unsafe_code)` | Yes (`Cargo.toml:91`) | Allow with review | No `pin-project-lite`; streams are boxed (`body.rs:19`). One allocation per streaming body. Buys an auditable memory-safety story for a library pointed at untrusted input. |
-| 15 | HTTP cache | Not in v1 | `chromulate-cache` | The `Middleware` seam already supports it (`traits.rs:97`); most target users do not want one. Costs feature parity with browser behaviour on repeat fetches. |
+| 15 | HTTP cache | `chromulate-cache`, behind `chromulate-http`'s off-by-default `cache` feature (section 2.3) | No cache at all; a cache on by default | A cache is state a caller should opt into, and a wrong cache is worse than none. Costs a feature flag and a direct dependency to name the type; a default build still has no repeat-fetch parity with a browser. |
 | 16 | Pool concurrency | Single `Mutex<PoolState>` (`pool.rs:266`) | Sharded map; lock-free | Measured flat in origin count to 100 origins, at parity with `reqwest`, once the release sweep was amortised (§10.3). Costs a shared lock on every checkout and release; sharding needs a measurement showing that lock binding before it is worth a second data structure. |
 | 17 | Body default | Streaming (`body.rs:1-7`) | Buffer, opt into streaming | Constant memory for large downloads; `collect(limit)` (`body.rs:112`) is one call away when a caller wants bytes. Costs a slightly less convenient default for small JSON responses. |
 | 18 | `HostPort` host storage | `Arc<str>` (`traits.rs:29`) | `String`; `Box<str>` | Cheap clones into cache and pool keys. Costs one atomic per clone, which is less than a string copy. |
 | 19 | Facade crate | Yes | Users depend on component crates | One dependency line for the common case; component crates remain independently usable. Costs a re-export layer to maintain. |
-| 20 | Telemetry | `tracing` spans with a stable field vocabulary | OpenTelemetry dependency; metrics crate | No fast-moving telemetry dependency forced on users. Costs users writing their own bridge. |
+| 20 | Telemetry | `tracing` spans — two of them, `exchange` and `connect` (section 9.7) | OpenTelemetry dependency; metrics crate | No fast-moving telemetry dependency forced on users. Costs users writing their own bridge, and the vocabulary is not yet a semver contract, so a bridge may need adjusting across releases. |
 | 21 | Session concept | No session crate | `chromulate-session` | Cookie persistence, pooling and identity already have owners (section 2.3). Costs an unmet expectation for users looking for the name. |
 | 22 | Redirect handling | Inside the engine, below middleware | Redirect as middleware | Middleware sees one logical request (`traits.rs:149-150`); the engine can enforce credential-dropping on cross-origin hops. Costs per-hop visibility for middleware — section 15. |
 

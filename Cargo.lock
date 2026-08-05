@@ -286,7 +286,7 @@ dependencies = [
 
 [[package]]
 name = "chromulate"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.23.0",
  "bytes",
@@ -316,7 +316,7 @@ dependencies = [
 
 [[package]]
 name = "chromulate-bench"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "chromulate",
@@ -340,7 +340,7 @@ dependencies = [
 
 [[package]]
 name = "chromulate-cache"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "chromulate-core",
@@ -356,7 +356,7 @@ dependencies = [
 
 [[package]]
 name = "chromulate-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chromulate",
  "clap",
@@ -367,7 +367,7 @@ dependencies = [
 
 [[package]]
 name = "chromulate-compression"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-compression",
  "bytes",
@@ -384,7 +384,7 @@ dependencies = [
 
 [[package]]
 name = "chromulate-cookie"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chromulate-core",
  "criterion",
@@ -399,7 +399,7 @@ dependencies = [
 
 [[package]]
 name = "chromulate-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "criterion",
@@ -415,7 +415,7 @@ dependencies = [
 
 [[package]]
 name = "chromulate-dns"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chromulate-core",
  "futures-util",
@@ -424,7 +424,7 @@ dependencies = [
 
 [[package]]
 name = "chromulate-fingerprint"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "hex",
@@ -438,7 +438,7 @@ dependencies = [
 
 [[package]]
 name = "chromulate-h3"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "chromulate-core",
@@ -458,7 +458,7 @@ dependencies = [
 
 [[package]]
 name = "chromulate-header"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "chromulate-core",
@@ -471,7 +471,7 @@ dependencies = [
 
 [[package]]
 name = "chromulate-http"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "chromulate-cache",
@@ -505,7 +505,7 @@ dependencies = [
 
 [[package]]
 name = "chromulate-profile"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chromulate-core",
  "chromulate-fingerprint",
@@ -515,7 +515,7 @@ dependencies = [
 
 [[package]]
 name = "chromulate-proxy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.23.0",
  "chromulate-core",
@@ -529,7 +529,7 @@ dependencies = [
 
 [[package]]
 name = "chromulate-tls"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chromulate-core",
  "chromulate-fingerprint",

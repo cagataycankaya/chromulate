@@ -2,8 +2,9 @@
 
 Status: assessment with a working spike. Written 2026-08-04.
 
-`README.md:163` says HTTP/3 is not implemented, and that Chrome upgrades where an origin
-offers it and this does not. That is still true after this work, and this document argues
+`README.md:163` says HTTP/3 is assessed but not shipped, and `README.md:336` adds that Chrome
+upgrades where an origin offers it and Chromulate stays on HTTP/2. Both are still true after
+this work, and this document argues
 it should stay true for the QUIC half for now. It also explains why the other half —
 learning that an origin *offers* HTTP/3 — has shipped.
 
@@ -41,13 +42,16 @@ grammar and `AltSvcCache` holds per-origin state with expiry
 (`crates/chromulate-h3/src/alt_svc.rs`). This is the discovery half of HTTP/3 and it is
 useful whether or not QUIC ever lands: an origin answering `Alt-Svc: h3=":443"` is telling
 every client that it speaks HTTP/3, and recording that is an observation about the origin.
-It is pure protocol work with no transport, no `unsafe`, and no new risk. 29 tests.
+It is pure protocol work with no transport, no `unsafe`, and no new risk. 50 tests under
+`alt_svc::tests`, up from the 29 this document was written with — the adversarial parser
+coverage and the cache bound landed after.
 
 **A QUIC spike, behind the non-default `quic-spike` feature.** Enough code to observe what
 the `quinn` stack would put on the wire, plus one real request
 (`crates/chromulate-h3/src/spike/`). 24 tests, of which one is the live request and is
-`#[ignore]`d as well as feature-gated, so `cargo test --workspace --all-features` runs 52
-and skips it. The spike exists to be measured, not used.
+`#[ignore]`d as well as feature-gated. `cargo test -p chromulate-h3 --all-features` therefore
+reports 74 tests, 73 passed and 1 ignored, plus 2 doc-tests. The spike exists to be measured,
+not used.
 
 Both halves were written failing-test-first, and the guards were mutation-checked: eight
 mutations, each applied alone with the tree restored afterwards, each turning at least one
@@ -251,7 +255,7 @@ public API. Connection ID lengths *are* reachable, via
 **And the extension set is not reachable at all.** `rustls`'s `ClientExtensions` is
 `pub(crate)` and its field list *is* the extension universe: there is no arbitrary-extension
 injection, so `application_settings` and ECH cannot be added by any consumer. This is the
-same wall `docs/fidelity.md:60-63` already documents for TCP. It is not a QUIC problem; it
+same wall `docs/fidelity.md:64-67` already documents for TCP. It is not a QUIC problem; it
 is the existing TLS problem, unchanged.
 
 **HTTP/3 adds a second fingerprint surface below TLS.** `h3` hard-codes its SETTINGS content
@@ -264,7 +268,7 @@ identifiers are defined at `src/proto/frame.rs:445-446`. The public builder offe
 `enable_extended_connect`, and no reordering or omission.
 
 This is the HTTP/2 SETTINGS story again — the one this project reproduces *exactly* today,
-per `docs/fidelity.md:69` — except that here the ordering is not reachable. It has been read
+per `docs/fidelity.md:73` — except that here the ordering is not reachable. It has been read
 from source, not observed on the wire, because observing our own SETTINGS frame needs a
 server the spike does not stand up.
 
@@ -302,7 +306,7 @@ Everything above measures the gap between this stack and *some* browser. None of
 the gap to Chrome, because:
 
 **There is no Chrome-over-QUIC capture in this repository, and this project's first data
-rule forbids inventing one.** `CLAUDE.md:29-35` requires every fingerprint constant to trace
+rule forbids inventing one.** `CLAUDE.md:36-42` requires every fingerprint constant to trace
 to an observed capture with recorded provenance, and the profile loader enforces it by
 rejecting a profile without one. `01-browser-networking-reference.md:852-855` already says
 the same thing about this exact subject: *the capture contains no HTTP/3 evidence*, and an
@@ -400,7 +404,7 @@ cache to live on the `Client` and survive across requests.
 **Files that would change**, none of which this wave touched: `crates/chromulate-http/src/pool.rs`
 (key and ownership model), `connect.rs` (a UDP dial path beside the TCP one), `engine.rs` (
 protocol selection and the upgrade decision), `crates/chromulate/src/client.rs` (builder
-surface and the cache's home), plus `docs/fidelity.md` and `README.md:163,308`, which both
+surface and the cache's home), plus `docs/fidelity.md:31` and `README.md:163,336`, which all
 state HTTP/3 is unsupported and would become wrong.
 
 **What would not change:** `chromulate-header` (HTTP/3 uses the same pseudo-headers in the

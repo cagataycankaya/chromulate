@@ -187,7 +187,7 @@ does.
 - `chromulate-cli fingerprint` prints the target fingerprint the profile describes and the
   configuration actually handed to rustls, side by side.
 - `chromulate verify` recomputes every shipped profile against its capture and exits non-zero
-  on a mismatch. This runs in CI (`.github/workflows/ci.yml:113`).
+  on a mismatch. This runs in CI (`.github/workflows/ci.yml:119`).
 - Clippy clean across the workspace; `cargo test` green offline, with network tests behind
   the `network-tests` feature.
 
@@ -235,13 +235,20 @@ After this phase the project can state its fidelity as a number instead of an ar
 
 ## Phase 5: Closing the TLS gap
 
-**Status: Speculative.** Four independent options, each with its own definition of done.
-None is a prerequisite for a useful 1.0.
+**Status: Partly done.** Four independent options, each with its own definition of done. Two
+have landed, one is outstanding and outside this project's control, and one was considered
+and rejected. None is a prerequisite for a useful 1.0, and the two that landed did not close
+the gap this phase is named for — section 8.4 of the design document still stands.
 
-**Switch the rustls provider to `aws-lc-rs`.** Supplies `X25519MLKEM768`, so the group list
-and the two-share key exchange can match the capture (`chrome-151-macos.json:84-86`). Done
-when the Phase 4 diff no longer reports a supported-groups mismatch, and when the C build
-dependency is documented and gated behind a feature so pure-Rust builds remain possible.
+**Switch the rustls provider to `aws-lc-rs`. Status: Done.** It ships behind the
+off-by-default `aws-lc-rs` feature (`crates/chromulate-tls/Cargo.toml`), which selects the
+provider at `provider.rs:32-39`. It supplies `X25519MLKEM768`, so on that build the profile's
+group list goes from three of four offered to four of four and the key shares become exactly
+the pair the capture shows (`chrome-151-macos.json:84-86`), which
+`crates/chromulate-tls/src/lib.rs:54-60` records. The stated conditions are both met: the C
+build dependency is documented in the feature's own comment and is gated, so a pure-Rust
+build with no C toolchain remains the default. Nothing else in the fidelity gap moved — not
+GREASE, not ALPS, not the SCT extension, not the six missing cipher suites, not the SCSV.
 
 **Contribute GREASE and ALPS upstream to rustls.** rustls's own documentation lists ALPS as
 something it may implement (rustls 0.23.43, `src/manual/features.rs:98`). Done when the
@@ -263,10 +270,16 @@ trait members missing (`from_profile`, `target_identity`, `fidelity`, all of the
 because `from_profile` does not mention `IO` and so could not be resolved on an
 `IO`-generic trait. The trait is now split into `TlsBackendConfig` and `TlsBackend<IO>`.
 
-What this does *not* establish: the mock is undemanding. It needs no cipher order, no GREASE
-placement, no ALPS — the parts of a profile a real backend has to consume. So the seam is
-shown to admit a *different* implementation, not yet a *fingerprint-controlling* one. That
-remains the open question a BoringSSL backend would answer.
+The mock was undemanding — it consumes nothing — so a third implementation followed:
+`recording::RecordingBackend`, which flattens a profile into wire code points the way a TLS
+library requires and rebuilds a `ClientHelloSpec` from that alone. Its round-trip test
+compares the reconstruction's JA4 with the profile's target, and a mutation test proves the
+round trip can fail. This is the acceptance harness a BoringSSL backend is measured against.
+
+What this does *not* establish: configuration fidelity is not wire fidelity. The harness
+shows a backend *could* be handed everything the profile specifies; whether it *sends* it is
+what `tests/emitted_client_hello.rs` decodes real bytes for, and what rustls fails. Only a
+real second TLS implementation closes that.
 
 **A custom ClientHello encoder in front of rustls.** Assessed in the design document as
 not recommended: the ClientHello is part of a transcript both sides hash, and splicing a
@@ -341,7 +354,10 @@ against the cost of a syscall.
 
 ## Phase 8: Ecosystem and long term
 
-**Status: Speculative.** Roughly in priority order.
+**Status: read the item, not the phase.** Roughly in priority order. This phase was written as
+speculative and is no longer: HSTS and the HTTP cache have landed in full, HTTP/3 has landed
+in half, and CI maturity has landed except for one piece. Only the first and fifth items below
+are untouched.
 
 **More captured profiles.** Chrome Beta, Chrome Canary, Chrome on Linux and Windows,
 Firefox, Safari. Each needs a real capture; none will be written by hand. The blocker is
@@ -373,10 +389,19 @@ documentation rather than left to be discovered.
 examples, a plugin guide covering the seven seams, and a performance guide that exists only
 once Phase 7 has produced numbers to put in it.
 
-**CI maturity.** The platform matrix on stable and on the 1.88 MSRV (`Cargo.toml:28`), Miri
-over `chromulate-core` only (it has no I/O and is therefore tractable), coverage reporting,
-and a scheduled job running the `network-tests` suite separately from pull-request CI so
-that an unrelated upstream outage does not block a merge.
+**CI maturity.** **Done except for coverage reporting.** The platform matrix runs the tests on
+Linux, macOS and Windows (`.github/workflows/ci.yml:47-53`); a separate job checks the 1.88
+MSRV with `cargo +1.88.0` pinned explicitly, because `rust-toolchain.toml` would otherwise win
+and silently run it on stable (`:62-75`); Miri runs over `chromulate-core` only, for the
+tractability reason above (`:88-105`); and the `network-tests` suite runs in its own job with
+`continue-on-error`, on a nightly cron rather than per push, so an unrelated upstream outage
+does not block a merge (`:8-14`, `:219-229`).
+
+**Coverage reporting is the one item still missing**, and it is the one with the least
+obvious payoff: a line-coverage number over a workspace whose hardest properties are checked
+by mutation (`tools/cookie-mutation-check.py`) and by emitted-shape decoding would move
+without meaning much either way. Worth adding for the diff view on a pull request rather than
+for the percentage.
 
 ---
 
