@@ -426,7 +426,7 @@ fn no_grease_appears_anywhere_in_the_emitted_extension_list() {
     let hello = emit(&chrome_engine(), name("example.com"));
     assert!(
         !hello.extensions.iter().any(|id| id & 0x0f0f == 0x0a0a),
-        "the profile marks five GREASE slots; rustls fills none of them: {:04x?}",
+        "the profile marks six GREASE positions; rustls fills none of them: {:04x?}",
         hello.extensions
     );
 }

@@ -20,6 +20,11 @@
 //!   carrying on.
 
 #![cfg(feature = "early-stop")]
+// Nor under `--cfg chromulate_mock_backend`: this test needs a real TLS origin
+// and a `TlsEngine` that trusts its certificate. The mock backend performs no
+// handshake, so there is nothing here for it to measure. The two gates are
+// independent and both apply.
+#![cfg(not(chromulate_mock_backend))]
 
 mod common;
 

@@ -31,9 +31,11 @@
 //! a real connection writes, in `tests/emitted_client_hello.rs`, rather than
 //! inferred from reading rustls:
 //!
-//! - **No GREASE.** The profile marks five GREASE slots — first cipher, first
-//!   and last extension, first supported group, first key share, first
-//!   supported version. rustls fills none of them.
+//! - **No GREASE.** The profile marks six GREASE positions — first cipher,
+//!   first and last extension, first supported group, first key share, first
+//!   supported version. rustls fills none of them. (`GreasePlacement` spells
+//!   these as five booleans, because one flag covers both extension slots;
+//!   count positions against the capture, not against the struct.)
 //! - **Four extensions are missing** of the profile's sixteen:
 //!   `signed_certificate_timestamp`, `application_settings` (ALPS — rustls
 //!   states it does not implement it, `src/manual/features.rs:98`) and
@@ -119,12 +121,14 @@
 pub mod backend;
 pub mod engine;
 pub mod fidelity;
+#[cfg(any(test, chromulate_mock_backend))]
+pub mod mock;
 pub mod provider;
 pub mod resumption;
 pub mod server_name;
 pub mod trust;
 
-pub use backend::{TlsBackend, TlsConnection, TlsIo};
+pub use backend::{TlsBackend, TlsBackendConfig, TlsConnection, TlsIo};
 pub use engine::{Alpn, HandshakeInfo, TlsEngine, TlsEngineBuilder};
 pub use fidelity::{
     Fidelity, STRUCTURAL_LIMITS, TargetIdentity, target_client_hello, target_identity,
@@ -142,4 +146,38 @@ pub use trust::{RootSource, TrustPolicy};
 /// This is `tokio_rustls`'s own client stream, re-exported so a caller does not
 /// have to depend on `tokio-rustls` to name the return type of
 /// [`TlsEngine::connect`].
+///
+/// It is also one of the two aliases a second backend would redefine — see
+/// [`ActiveBackend`].
 pub type TlsStream<IO> = tokio_rustls::client::TlsStream<IO>;
+
+/// The TLS backend this build links.
+///
+/// Backend choice is deliberately a *build-time* alias rather than a runtime
+/// object. Naming the backend concretely is what keeps [`TlsBackend::Stream`]
+/// concrete, and therefore what keeps virtual dispatch off the request path;
+/// resolving it at runtime would put a vtable between every `poll_read` and the
+/// socket for a choice nobody changes while the process is running. It is the
+/// same trade rustls makes with its crypto providers.
+///
+/// `chromulate-http` names this alias, and calls the engine only through
+/// [`TlsBackend`]. Adding a BoringSSL backend is therefore a matter of
+/// implementing that trait and pointing this alias at it under a cargo feature
+/// — not of changing the connection path.
+///
+/// That claim is checked rather than asserted: the off-by-default
+/// `--cfg chromulate_mock_backend` flag points this alias at `mock::MockBackend`, which
+/// shares no code and no types with rustls, and the workspace still compiles
+/// and its tests still pass. See `mock` for the three trait members writing
+/// that second implementation turned out to be missing.
+#[cfg(not(chromulate_mock_backend))]
+pub type ActiveBackend = TlsEngine;
+
+/// The TLS backend this build links — here, the mock, because the
+/// `--cfg chromulate_mock_backend` is set.
+///
+/// **This build performs no encryption.** The feature exists to prove the
+/// backend seam admits an implementation that is not rustls; it is not a
+/// configuration anyone should ship.
+#[cfg(chromulate_mock_backend)]
+pub type ActiveBackend = mock::MockBackend;

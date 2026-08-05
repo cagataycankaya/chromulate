@@ -53,9 +53,13 @@ Extensions Chrome sends that Chromulate does not:
   `TLS_EMPTY_RENEGOTIATION_INFO_SCSV` cipher suite instead, which also adds a tenth
   cipher that Chrome's list does not have
 
-**GREASE is never emitted.** The profile models it in five slots (first cipher, first
-extension, first supported group, first key share, last extension) and RFC 8701 is
-implemented and tested; none of it reaches the wire.
+**GREASE is never emitted.** The profile models it in six wire positions (first cipher,
+first extension, last extension, first supported group, first key share, first supported
+version) and RFC 8701 is implemented and tested; none of it reaches the wire. The count is
+worth stating carefully, because `GreasePlacement` carries five booleans — its `extensions`
+flag covers both the first and last slot — and prose that says "five" while enumerating six
+is how the supported-version slot went missing from this document until 2026-08-05. Count
+against `client_hello.grease_positions` in the capture, not against the struct.
 
 The reason is structural rather than an oversight: rustls builds its own ClientHello and
 accepts no instruction on its shape. `chromulate fingerprint` prints the full list of

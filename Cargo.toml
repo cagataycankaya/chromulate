@@ -89,6 +89,13 @@ reqwest = { version = "0.13", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+# `--cfg chromulate_mock_backend` swaps `chromulate-tls`'s `ActiveBackend` for a
+# no-op backend, so that CI can check the TLS seam admits an implementation that
+# is not rustls. It is deliberately NOT a cargo feature: features must be
+# additive, `--all-features` would enable it, and a CI run that thought it was
+# exercising TLS while linking a backend that encrypts nothing is a worse
+# outcome than not checking the seam at all.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(chromulate_mock_backend)'] }
 missing_debug_implementations = "warn"
 unreachable_pub = "warn"
 

@@ -25,6 +25,13 @@ Reading code produces a hypothesis, not a verdict.
   request, or a captured fingerprint comparison.
 - Performance claims need at least three measured runs, or they are labelled UNMEASURED.
 - A bug is "fixed" only when the original failing reproduction turns green.
+- **For a `-sys` crate, the build script is part of the source.** A vendored C header under
+  `deps/` tells you what upstream shipped, not what you will link. A feasibility study here
+  read `boring-sys2`'s vendored `ssl.h`, found no `X25519MLKEM768`, and concluded — with a
+  VERIFIED label — that the crate could not match Chrome 151. The build script applies a
+  patch that adds it before bindgen runs, so the conclusion was exactly backwards. Grep the
+  patches and the build script, or better, build a probe and print what the library
+  actually offers.
 
 ### Fingerprint data is captured, never invented
 
@@ -50,7 +57,12 @@ entry it was just handed is a silently disabled feature rather than a small one.
 ### Correctness constraints that are easy to get wrong
 
 - Chrome randomises ClientHello extension **order** on every connection, so JA3 is not
-  stable across connections for a single browser build. Cipher suite order *is* stable.
+  stable across connections for a single browser build. Cipher suite order *is* stable
+  across connections — but **not across machines**. BoringSSL orders the TLS 1.3 suites on
+  `EVP_has_aes_hardware()`, so ChaCha20 leads on a host without AES-NI and trails on one
+  with it. A captured cipher order is therefore a capture *for that device class*, and
+  Chrome's JA4 `_b` component is two strings rather than one. `aes_hw_override` is what
+  pins it if a profile must be replayed on the other class.
   Profiles model the extension set plus its permutation rules, not one frozen order.
 - GREASE values must be drawn from the reserved `0x?A?A` set and placed where the real
   browser places them. The Chrome 151 capture records **six** positions: first cipher,
@@ -60,7 +72,12 @@ entry it was just handed is a silently disabled feature rather than a small one.
   right about different things, and prose that says one while enumerating the other is
   how `docs/fidelity.md` came to omit the supported-version slot entirely. Count
   positions against `client_hello.grease_positions` in the capture, not against the
-  struct.
+  struct. Six positions but only **five independent values**: BoringSSL draws the first
+  supported group and the first key share from the same `ssl_grease_group` slot, so those
+  two are necessarily equal on a given connection. Generating them independently produces
+  a hello that still passes a naive "is there GREASE here" check and is distinguishable
+  from Chrome's. There is no GREASE in `signature_algorithms` — BoringSSL supports it
+  behind a separate flag that Chromium never sets.
 - `pre_shared_key`, when present, must be the final extension (RFC 8446 §4.2.11).
 - HTTP/2 pseudo-header order is part of the fingerprint: `:method`, `:authority`,
   `:scheme`, `:path`.

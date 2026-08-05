@@ -75,7 +75,8 @@ pub fn target_identity(profile: &Profile) -> TargetIdentity {
 /// findings of `tests/emitted_client_hello.rs`, which decodes the bytes a real
 /// `ClientConnection` writes and compares them to the Chrome 151 profile.
 pub const STRUCTURAL_LIMITS: &[&str] = &[
-    "GREASE is never emitted, in any of the five slots the profile marks",
+    "GREASE is never emitted, in any of the six positions the profile marks (first cipher, \
+     first and last extension, first supported group, first key share, first supported version)",
     "the extension permutation is rustls's own; it randomises per connection as the profile \
      expects, but by a different rule and without the GREASE brackets that frame Chrome's list",
     "extensions with no rustls equivalent are absent: signed_certificate_timestamp, \

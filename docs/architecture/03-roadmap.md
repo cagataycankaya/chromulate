@@ -248,10 +248,25 @@ something it may implement (rustls 0.23.43, `src/manual/features.rs:98`). Done w
 features are released upstream and the Phase 4 diff shrinks accordingly. Outside this
 project's control; needs an owner willing to work on someone else's schedule.
 
-**A pluggable TLS backend trait.** Specified in section 9.8 of the design document. Done
-when the rustls implementation sits behind the trait with no behaviour change, so that an
-out-of-tree BoringSSL backend is possible without the default build acquiring a C
-dependency.
+**A pluggable TLS backend trait. Status: Done (2026-08-05).** Specified in section 9.8 of
+the design document. The rustls implementation now sits behind `TlsBackend` with no
+behaviour change: `chromulate-http` holds an `ActiveBackend`, handshakes through the trait,
+and derives its stream type from it, so an out-of-tree BoringSSL backend is possible without
+the default build acquiring a C dependency. The full battery — `fmt`, `clippy` under
+`RUSTFLAGS=-D warnings`, the workspace tests, `cargo +1.88 check`, and `cargo doc` under
+`RUSTDOCFLAGS=-D warnings` — was green across the change.
+
+A second implementation followed, because a trait with one is a guess: `mock::MockBackend`
+under `--cfg chromulate_mock_backend`, checked by its own CI job. Writing it found three
+trait members missing (`from_profile`, `target_identity`, `fidelity`, all of them inherent
+`TlsEngine` methods the seam could not reach) and one that could not be called at all,
+because `from_profile` does not mention `IO` and so could not be resolved on an
+`IO`-generic trait. The trait is now split into `TlsBackendConfig` and `TlsBackend<IO>`.
+
+What this does *not* establish: the mock is undemanding. It needs no cipher order, no GREASE
+placement, no ALPS — the parts of a profile a real backend has to consume. So the seam is
+shown to admit a *different* implementation, not yet a *fingerprint-controlling* one. That
+remains the open question a BoringSSL backend would answer.
 
 **A custom ClientHello encoder in front of rustls.** Assessed in the design document as
 not recommended: the ClientHello is part of a transcript both sides hash, and splicing a
