@@ -164,7 +164,7 @@ repository; the measured claims behind the fidelity rows are in
 | Connection pool keyed by profile identity | Yes — two profiles never share a connection, which is what stops a request being observed with another identity's fingerprint |
 | HSTS | Yes. Learned from responses, applied before the request leaves; a header arriving over cleartext is ignored |
 | HSTS preload list | Yes, behind the off-by-default `hsts-preload` feature: Chromium's complete list, 94,628 entries, which protects the first request to an origin. Off by default because it grows a release binary by 1,750,560 bytes (measured — almost all of it the table itself: `__TEXT,__const` grows 1,748,992 and executable code only 960) |
-| Proxies | Yes: HTTP `CONNECT`, SOCKS5 and SOCKS5h, with rotation and `NO_PROXY` |
+| Proxies | Yes: HTTP `CONNECT`, SOCKS5 and SOCKS5h, with rotation and `NO_PROXY`. A pool of two or more gives **each exit its own cookie jar, client-hint grant and validator store** by default, so rotating addresses does not present one session from all of them. `ClientBuilder::proxy_isolation` states either choice explicitly. TLS session tickets are still shared and can link exits below HTTP — see `ProxyIsolation`'s documentation |
 | DNS | Yes: caching, with concurrent lookups for one name collapsed into one. **Not TTL-aware** — `lookup_host` does not expose the TTL the server returned, so a fixed 60 s is applied and said so at `caching.rs:33-38` |
 | Happy Eyeballs (RFC 8305) | **No.** Addresses are tried in the resolver's order; a browser races the families. A latency difference, not an observable one |
 

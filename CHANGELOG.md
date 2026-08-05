@@ -149,6 +149,41 @@ that breaking changes may land in a minor release.
 
 ### Changed
 
+- **A rotating proxy pool no longer presents one session from every exit.** A `Client` built
+  with `proxy_pool` of two or more proxies, or with a custom `proxy_provider`, now gives each
+  exit address its own cookie jar, its own `Accept-CH` client-hint grant and its own
+  `ValidatorStore`. Measured against three real ISP proxies with distinct exit addresses
+  before the change: a cookie set through the first exit was presented from all three. That
+  did not merely waste the rotation — it told the origin the three addresses were one client,
+  which is a stronger signal than not rotating at all, and it happened silently.
+
+  Clients with no proxy, one proxy, a one-member pool, or a jar named through `cookie_jar`
+  are unchanged and share one session, so the common cases run today's code path exactly.
+  `ClientBuilder::proxy_isolation` states either choice at the call site, and
+  `ProxyIsolation::PerProxy { max_routes }` caps how many exits hold state — 32 by default,
+  dropping the least recently used past that so a new exit starts fresh rather than borrowing
+  another's.
+
+  The default is per-exit because the two failure modes are not symmetric: sharing a session
+  the caller wanted split is silent, while splitting one they wanted shared logs them out on
+  the first run and is fixed in one line.
+
+  **What is deliberately still shared, and why.** HSTS, because it is a policy about the
+  origin rather than the client, and because the upgrade happens before a route is chosen —
+  splitting it would send the first request through each new exit in plaintext, a downgrade
+  rather than an isolation win. Adaptive concurrency, because it is learned from status codes
+  and never sent. An HTTP cache cannot be shared safely here and is refused at build time
+  with `Error::Config` rather than quietly shared.
+
+  **A leak this does not close:** TLS session tickets are bound into one `rustls` client
+  configuration, so a resumed handshake through one exit can present a ticket the origin
+  issued to another, linking them below HTTP before any cookie is sent. This is stated in
+  `ProxyIsolation`'s own documentation rather than left to be found.
+
+  The lookup costs 3.4 ns per request on the shared path and 23.5 ns with eight live exits
+  (Apple M1 Pro, best of seven over 1M calls, n=3). Allocations per steady-state request are
+  unchanged at 48.
+
 - **The TLS backend seam now carries the connection, and its signature changed to do it
   without cost.** `TlsBackend` existed as public API but had zero production callers:
   `chromulate-http` held a concrete `TlsEngine` and called its inherent `connect`, so the
