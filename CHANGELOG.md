@@ -7,6 +7,69 @@ that breaking changes may land in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **`chromulate-concurrency`, a new crate holding the two per-origin control laws.**
+  `AdaptiveConcurrency`, `FixedConcurrency`, `Ceiling`, `ConcurrencyConfig`, `Signal`,
+  `Permit`, `OriginSnapshot`, `retry_after_delay`, `DEFAULT_ORIGIN_CAPACITY` and
+  `DEFAULT_FIXED_CAPACITY` all moved here from `chromulate-http` unchanged — same
+  behaviour, same defaults, same tests, new paths. The dependency runs one way only:
+  this crate depends on `chromulate-http` for the trait, and `chromulate-http` depends
+  on it in no form, dev-dependencies included. That is what makes "the engine holds no
+  policy" checkable rather than asserted.
+
+- **`chromulate_http::concurrency::Unlimited`**, a controller that grants every lease on
+  the first poll and learns nothing from any outcome. Behaviourally identical to
+  installing no controller at all — and *not* the cheaper of the two, because an
+  installed controller pays the seam's erasure of one boxed future and one boxed lease
+  per hop. It exists for a configuration that picks a controller at run time and would
+  otherwise thread an `Option` through every layer to say "none", and as the thing a
+  delegating third-party controller wraps when its own policy is switched off. A caller
+  who simply wants no concurrency control should still install nothing.
+
+### Changed
+
+- **The `adaptive-concurrency` feature is gone from `chromulate-http` (breaking).**
+  It gated the `ConcurrencyController` seam *and* the laws behind it with one switch, so
+  the trait a third-party controller implements existed only when a feature nobody else
+  in the build had turned on. The seam — `ConcurrencyController`, `Lease`, `Outcome`,
+  `acquire_from`, `complete_from`, `authority_of`, `Unlimited`, and
+  `EngineBuilder::concurrency` — is now always compiled.
+
+  A manifest naming `chromulate-http/adaptive-concurrency` fails to resolve and should
+  drop the feature. Code reaching `chromulate_http::adaptive::*` or
+  `chromulate_http::concurrency::{Ceiling, FixedConcurrency, FixedLease,
+  DEFAULT_FIXED_CAPACITY}` moves to `chromulate_concurrency::*`; everything else in
+  `chromulate_http::concurrency` keeps its path.
+
+  Compiling the seam unconditionally is free for a caller who installs nothing.
+  Measured with `cargo run --release -p chromulate-bench --bin allocs`, three runs
+  before and three after: 48 allocations per pooled request in all six, and 48 was also
+  the figure when the module was gated away entirely. The erasure is charged per
+  installed controller, not per build.
+
+- **`authority_of` moved from `chromulate_http::adaptive` to
+  `chromulate_http::concurrency` (breaking).** It is the key convention the trait offers
+  every implementation, so it stayed with the trait rather than leaving with the laws —
+  a third-party controller that wants the same key must not have to depend on somebody
+  else's policy crate to get it. `chromulate_concurrency::adaptive::authority_of`
+  re-exports it, so callers of the old path change only the crate name.
+
+- **`chromulate`'s `adaptive-concurrency` feature now pulls in `chromulate-concurrency`**
+  rather than forwarding to `chromulate-http`, and re-exports it as
+  `chromulate::concurrency`. What it gates changed: `ClientBuilder::concurrency` and the
+  seam types are now available with the feature *off*, so a caller can install a
+  controller of their own without enabling anything. The feature buys the two shipped
+  laws and nothing else. Enabling it still changes no behaviour on its own — a
+  controller has to be installed.
+
+- **The concurrency suite now runs in a default `cargo test --workspace`.** It sat behind
+  an off-by-default feature, so the ordinary test command never compiled it; the new
+  crate is an unconditional workspace member. Default-feature run: 846 tests before,
+  930 after. The `--all-features` total went 1,148 to 1,154, and every one of those six
+  is new rather than moved — two doctests on the new crate root and on `Unlimited`, and
+  four tests covering `Unlimited` and the no-controller default path.
+
 ### Documentation
 
 - **Two documents said HTTP/2 regular header order was unreachable. It has been reproduced

@@ -1,16 +1,17 @@
 //! The concurrency seam, driven through the real engine.
 //!
-//! `chromulate_http::adaptive` is one control law. These tests are about the
-//! boundary it sits behind: whether a caller who disagrees with that law can
-//! supply their own, whether the engine actually obeys it, and whether anything
-//! installed through the seam can get out from under a rate limit the caller
-//! configured.
+//! This crate ships no control law at all — the two published ones live in
+//! `chromulate-concurrency`, which depends on this crate and cannot be reached
+//! from it. These tests are about the boundary itself: whether a caller can
+//! supply a controller of their own, whether the engine actually obeys it, and
+//! whether anything installed through the seam can get out from under a rate
+//! limit the caller configured.
 //!
 //! The controller below is written here, in a test, outside the crate, using
 //! only what the public API offers. That is the point — if it needed anything
-//! `pub(crate)` the seam would not be a seam.
-
-#![cfg(feature = "adaptive-concurrency")]
+//! `pub(crate)` the seam would not be a seam. Nothing here is behind a feature
+//! either, which is the other half of the point: a trait that exists only when a
+//! feature is on is a trait an implementor cannot rely on.
 
 mod common;
 
@@ -20,8 +21,9 @@ use std::time::{Duration, Instant};
 
 use chromulate_core::{Body, BoxFuture, Middleware, Request, Response};
 use chromulate_dns::StaticResolver;
-use chromulate_http::adaptive::{AdaptiveConcurrency, authority_of};
-use chromulate_http::concurrency::{Ceiling, ConcurrencyController, Lease, Outcome};
+use chromulate_http::concurrency::{
+    ConcurrencyController, Lease, Outcome, Unlimited, authority_of,
+};
 use chromulate_http::{Engine, EngineBuilder, EngineConfig, RateLimit, RateLimiter};
 use chromulate_profile::Profile;
 use common::{Reply, TestServer};
@@ -422,67 +424,123 @@ async fn a_permissive_third_party_controller_cannot_outrun_the_callers_rate_limi
 }
 
 // ---------------------------------------------------------------------------
-// The default path: a caller who names no controller of their own.
+// `Unlimited`: the absence of a law, written down.
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
-async fn the_built_in_law_is_what_an_engine_gets_when_it_names_no_other_controller() {
-    let server = TestServer::always(Reply::text("body")).await;
-    let controller = Arc::new(AdaptiveConcurrency::new(Ceiling::Unlimited));
-    let engine = engine_for(
-        &server,
-        Arc::clone(&controller) as Arc<dyn ConcurrencyController>,
-    );
-    let url = server.url_for(HOST, "/default");
-
-    for _ in 0..3 {
-        let response = engine.send(get(&url)).await.expect("the request must send");
-        drain(response).await;
-    }
-
-    let seen = controller
-        .snapshot(&authority(&url))
-        .expect("the origin was visited");
-    assert_eq!(
-        seen.limit, 1,
-        "a new origin still starts at one and still needs the whole run of clean \
-         probes to move"
-    );
-    assert_eq!(seen.in_flight, 0, "every lease came back");
-    assert_eq!(
-        seen.ceiling, 6,
-        "and the ceiling is still the default maximum"
-    );
+/// Polls a future exactly once. See `chromulate-concurrency`'s
+/// `adaptive_concurrency.rs` for why this is hand-written rather than taken from
+/// `futures-util`.
+fn poll_once<F: Future>(future: std::pin::Pin<&mut F>) -> std::task::Poll<F::Output> {
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    future.poll(&mut context)
 }
 
 #[tokio::test]
-async fn the_built_in_law_still_ratchets_and_pauses_on_a_429_through_the_seam() {
-    let server = TestServer::always(Reply::new(429).with_header("retry-after", "60")).await;
-    let controller = Arc::new(AdaptiveConcurrency::new(Ceiling::Unlimited));
-    let engine = engine_for(
-        &server,
-        Arc::clone(&controller) as Arc<dyn ConcurrencyController>,
-    );
-    let url = server.url_for(HOST, "/refused");
+async fn unlimited_grants_every_lease_on_the_first_poll_however_many_are_outstanding() {
+    let url = Url::parse("https://example.com/a").expect("a valid url");
 
-    let response = engine.send(get(&url)).await.expect("the request must send");
-    drain(response).await;
+    // Held rather than dropped: a controller with any bound at all would start
+    // returning `Pending` somewhere in this loop.
+    let mut held: Vec<Box<dyn Lease>> = Vec::new();
+    for taken in 0..64 {
+        let mut acquiring = Box::pin(Unlimited.acquire(&url));
+        match poll_once(acquiring.as_mut()) {
+            std::task::Poll::Ready(lease) => held.push(lease),
+            std::task::Poll::Pending => {
+                panic!("Unlimited made a caller wait with {taken} leases outstanding")
+            }
+        }
+    }
+    assert_eq!(held.len(), 64);
+}
 
-    let seen = controller
-        .snapshot(&authority(&url))
-        .expect("the origin was visited");
-    assert_eq!(seen.ceiling, 1, "the ratchet still falls");
+#[tokio::test]
+async fn nothing_reported_to_unlimited_changes_what_it_grants_next() {
+    let url = Url::parse("https://example.com/a").expect("a valid url");
+    let mut headers = http::HeaderMap::new();
+    headers.insert("retry-after", "3600".parse().expect("a valid value"));
+
+    // Every answer a law would read something into: a refusal, backpressure with
+    // an hour's `Retry-After`, a server error, and no answer at all.
+    for status in [403u16, 429, 503, 500, 200] {
+        let lease = Unlimited.acquire(&url).await;
+        let status = http::StatusCode::from_u16(status).expect("a valid status");
+        lease.complete(&Outcome::answered(status, &headers));
+
+        let mut next = Box::pin(Unlimited.acquire(&url));
+        assert!(
+            poll_once(next.as_mut()).is_ready(),
+            "{status} taught Unlimited something, which makes it a law"
+        );
+    }
+
+    Unlimited.acquire(&url).await.complete(&Outcome::failed());
+    let mut next = Box::pin(Unlimited.acquire(&url));
+    assert!(poll_once(next.as_mut()).is_ready());
+}
+
+#[tokio::test]
+async fn an_engine_under_unlimited_holds_nothing_back() {
+    // The same server and the same three concurrent requests as the serialising
+    // test above, so the two differ only in the controller. There, the origin saw
+    // them one at a time on one connection; here it must see all three at once.
+    let server = TestServer::always(Reply::text("body").delayed(Duration::from_millis(60))).await;
+    let engine = engine_for(&server, Arc::new(Unlimited));
+    let url = server.url_for(HOST, "/unlimited");
+
+    let mut tasks = Vec::new();
+    for _ in 0..3 {
+        let engine = engine.clone();
+        let url = url.clone();
+        tasks.push(tokio::spawn(async move {
+            let response = engine.send(get(&url)).await.expect("the request must send");
+            drain(response).await;
+        }));
+    }
+    for task in tasks {
+        task.await.expect("every request task must finish");
+    }
+
+    assert_eq!(server.request_count(), 3);
     assert_eq!(
-        seen.retry_after_requested,
-        Some(Duration::from_secs(60)),
-        "and the header is still read on the way through the seam"
+        server.accepts(),
+        3,
+        "three requests overlapped, so the pool had to open three connections — \
+         a controller that queued them would have let one connection serve all \
+         three"
     );
-    // The real clock is running here, so the pause left is a shade under the
-    // minute that was asked for rather than exactly it.
-    let left = seen.paused_for.expect("the origin is paused");
-    assert!(
-        left > Duration::from_secs(59) && left <= Duration::from_secs(60),
-        "the pause the header asked for is what is being waited: {left:?}"
+}
+
+// ---------------------------------------------------------------------------
+// The default path: a caller who installs no controller at all.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn an_engine_that_installs_no_controller_sends_exactly_as_it_always_did() {
+    // The path every ordinary caller takes, and the one the seam must not have
+    // changed the cost or the behaviour of: `acquire_from(None, ..)` on the way
+    // in and `complete_from(None, ..)` on the way out.
+    let server = TestServer::always(Reply::text("body").delayed(Duration::from_millis(60))).await;
+    let engine = engine_built(&server, |builder| builder);
+    let url = server.url_for(HOST, "/none");
+
+    let mut tasks = Vec::new();
+    for _ in 0..3 {
+        let engine = engine.clone();
+        let url = url.clone();
+        tasks.push(tokio::spawn(async move {
+            let response = engine.send(get(&url)).await.expect("the request must send");
+            drain(response).await;
+        }));
+    }
+    for task in tasks {
+        task.await.expect("every request task must finish");
+    }
+
+    assert_eq!(server.request_count(), 3);
+    assert_eq!(
+        server.accepts(),
+        3,
+        "an engine with no controller must hold nothing back either"
     );
-    assert_eq!(seen.refusals, 1);
 }

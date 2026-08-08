@@ -1,0 +1,33 @@
+[package]
+name = "chromulate-concurrency"
+description = "Per-origin concurrency control laws for Chromulate: an adaptive controller that learns what an origin tolerates, and a fixed one."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+chromulate-core.workspace = true
+# The seam, not a policy: `ConcurrencyController`, `Lease` and `Outcome` live in
+# the engine so that a build wanting none of this still has the trait, and this
+# crate is one implementation behind it. The dependency points this way and only
+# this way — `chromulate-http` must never depend on this crate, dev-dependencies
+# included, or the trait and its implementations become a cycle.
+chromulate-http.workspace = true
+
+http.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+url.workspace = true
+
+[dev-dependencies]
+chromulate-dns.workspace = true
+chromulate-profile.workspace = true
+# `test-util` for the paused clock, `full` for the multi-threaded runtime the
+# engine tests need.
+tokio = { workspace = true, features = ["full", "test-util"] }
+
+[lints]
+workspace = true

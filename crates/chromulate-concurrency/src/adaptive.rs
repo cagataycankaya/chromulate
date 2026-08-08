@@ -73,8 +73,9 @@
 //!   project's scope. [`AdaptiveConcurrency::forget`] is how a caller who has
 //!   dealt with a refusal says so;
 //! - anything else — a different signal, a different ramp, no learning at all —
-//!   is a [`crate::concurrency::ConcurrencyController`] of the caller's own.
-//!   That trait is the seam, and this module is one implementation behind it.
+//!   is a [`ConcurrencyController`] of the caller's own. That trait is the seam,
+//!   it lives in `chromulate-http` rather than here, and this module is one
+//!   implementation behind it.
 //!
 //! # A new origin
 //!
@@ -106,18 +107,25 @@ use chromulate_core::BoxFuture;
 use http::header::{DATE, RETRY_AFTER};
 use http::{HeaderMap, StatusCode};
 use tokio::sync::Notify;
-use url::{Position, Url};
+use url::Url;
 
-pub use crate::concurrency::Ceiling;
-use crate::concurrency::{ConcurrencyController, Lease, Outcome};
-use crate::time::TimeSource;
+use chromulate_http::concurrency::{ConcurrencyController, Lease, Outcome};
+use chromulate_http::time::TimeSource;
+
+pub use crate::Ceiling;
+/// The key this law uses, re-exported from the seam it belongs to.
+///
+/// It is `chromulate_http::concurrency::authority_of`: the engine offers it to
+/// every controller, not only to this one, so it stayed with the trait rather
+/// than moving here with the law.
+pub use chromulate_http::concurrency::authority_of;
 
 /// How many origins a controller remembers before evicting.
 ///
 /// The key is an authority chosen by the servers a crawl visits rather than by
 /// the caller, so this pairs a capacity with an eviction policy exactly as
-/// [`crate::hsts::HstsStore`], [`crate::validators::ValidatorStore`] and the
-/// `AltSvcCache` do. 4,096 matches `ValidatorStore` rather than `HstsStore`'s
+/// `chromulate_http`'s `HstsStore`, its `ValidatorStore` and its `AltSvcCache`
+/// do. 4,096 matches `ValidatorStore` rather than `HstsStore`'s
 /// 10,000 because an entry here is fatter — it carries the latency state — and
 /// because a single crawl talking to four thousand distinct authorities at once
 /// is already extraordinary.
@@ -155,7 +163,8 @@ const DEGRADATION_FLOOR: Duration = Duration::from_millis(5);
 /// permission to send sixty-four.
 ///
 /// The fields are public and the struct is exhaustive, matching
-/// [`crate::middleware::RetryPolicy`] and [`crate::middleware::RateLimit`]: a
+/// [`chromulate_http::middleware::RetryPolicy`] and
+/// [`chromulate_http::middleware::RateLimit`]: a
 /// caller writes `ConcurrencyConfig { max: 2, ..Default::default() }`. Public
 /// fields mean values reach the controller without passing any constructor, so
 /// [`ConcurrencyConfig::sanitised`] is the one funnel every configuration goes
@@ -304,7 +313,7 @@ impl Signal {
     /// The mapping from a status code, with no headers to read.
     ///
     /// ```
-    /// use chromulate_http::adaptive::Signal;
+    /// use chromulate_concurrency::adaptive::Signal;
     /// use http::StatusCode;
     ///
     /// assert_eq!(Signal::from_status(StatusCode::OK), Signal::Healthy);
@@ -566,14 +575,14 @@ fn scale(duration: Duration, factor: f64) -> Duration {
 /// [`Duration::ZERO`] rather than an error, which is what a server that is
 /// already ready to be talked to again is saying.
 ///
-/// [`crate::middleware::retry::parse_retry_after`] deliberately reads only the
+/// [`chromulate_http::middleware::retry::parse_retry_after`] deliberately reads only the
 /// delta-seconds form, because it has no `Date` header to hand and refuses to
 /// trust one clock against another. Having one, this does not have that problem.
 ///
 /// ```
 /// use std::time::{Duration, SystemTime};
 ///
-/// use chromulate_http::adaptive::retry_after_delay;
+/// use chromulate_concurrency::adaptive::retry_after_delay;
 /// use http::HeaderMap;
 ///
 /// let mut headers = HeaderMap::new();
@@ -617,11 +626,12 @@ use date::http_date;
 /// This and [`complete_from`] are the concrete pair, for a caller driving
 /// *this* controller: one line before the request and one after, the same two
 /// lines whether or not a controller is configured, and no boxing either side.
-/// The engine wires in [`crate::concurrency::acquire_from`] instead, because it
-/// holds whatever controller the caller installed rather than this one.
+/// The engine wires in [`chromulate_http::concurrency::acquire_from`] instead,
+/// because it holds whatever controller the caller installed rather than this
+/// one.
 ///
 /// ```
-/// use chromulate_http::adaptive::{self, AdaptiveConcurrency, Ceiling};
+/// use chromulate_concurrency::adaptive::{self, AdaptiveConcurrency, Ceiling};
 /// use url::Url;
 ///
 /// # async fn run() {
@@ -1067,28 +1077,6 @@ impl Store {
     }
 }
 
-/// The authority a controller keys an origin by: `host` or `host:port`.
-///
-/// The server's address rather than the web origin, because a server's capacity
-/// is not per-scheme — `http://example.com` and `https://example.com` are one
-/// machine with one budget. Userinfo is excluded, so a URL carrying credentials
-/// does not put a password in a map key or in `Debug` output.
-///
-/// ```
-/// use chromulate_http::adaptive::authority_of;
-/// use url::Url;
-///
-/// let url = Url::parse("https://user:secret@example.com/a/b?c=d").unwrap();
-/// assert_eq!(authority_of(&url), "example.com");
-///
-/// let url = Url::parse("https://example.com:8443/").unwrap();
-/// assert_eq!(authority_of(&url), "example.com:8443");
-/// ```
-#[must_use]
-pub fn authority_of(url: &Url) -> &str {
-    &url[Position::BeforeHost..Position::BeforePath]
-}
-
 /// A per-origin concurrency controller.
 ///
 /// # Increase rule
@@ -1132,7 +1120,7 @@ pub fn authority_of(url: &Url) -> &str {
 /// # Example
 ///
 /// ```
-/// use chromulate_http::adaptive::{AdaptiveConcurrency, Ceiling, Signal};
+/// use chromulate_concurrency::adaptive::{AdaptiveConcurrency, Ceiling, Signal};
 /// use url::Url;
 ///
 /// # async fn run() {
@@ -1217,7 +1205,7 @@ impl AdaptiveConcurrency {
     /// ```
     /// use std::time::Duration;
     ///
-    /// use chromulate_http::adaptive::{AdaptiveConcurrency, Ceiling};
+    /// use chromulate_concurrency::adaptive::{AdaptiveConcurrency, Ceiling};
     ///
     /// let controller = AdaptiveConcurrency::new(Ceiling::Unlimited)
     ///     .with_ceiling_recovery(Duration::from_secs(600));

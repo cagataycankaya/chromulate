@@ -142,6 +142,27 @@ pub mod engine {
     };
 }
 
+/// Per-origin concurrency: the seam, and the two laws behind it.
+///
+/// `ConcurrencyController`, `Lease`, `Outcome` and `Unlimited` are always here —
+/// they are the trait
+/// [`ClientBuilder::concurrency`](crate::ClientBuilder::concurrency) takes, and a
+/// caller writing a controller of their own needs nothing else. The two shipped
+/// laws — `AdaptiveConcurrency`, `FixedConcurrency`, and the `Ceiling` they take
+/// — arrive with the `adaptive-concurrency` feature, which pulls in
+/// `chromulate-concurrency`.
+pub mod concurrency {
+    #[cfg(feature = "adaptive-concurrency")]
+    pub use chromulate_concurrency::{
+        AdaptiveConcurrency, Ceiling, ConcurrencyConfig, DEFAULT_FIXED_CAPACITY,
+        DEFAULT_ORIGIN_CAPACITY, FixedConcurrency, FixedLease, OriginSnapshot, Permit, Signal,
+        adaptive, fixed,
+    };
+    pub use chromulate_http::concurrency::{
+        ConcurrencyController, Lease, Outcome, Unlimited, authority_of,
+    };
+}
+
 /// Proxy configuration and rotation.
 pub mod proxy {
     pub use chromulate_proxy::{

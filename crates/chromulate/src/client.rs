@@ -230,7 +230,6 @@ pub struct ClientBuilder {
     proxies: Option<Arc<dyn ProxyProvider>>,
     routes: ProxyRoutes,
     isolation: Option<ProxyIsolation>,
-    #[cfg(feature = "adaptive-concurrency")]
     concurrency: Option<Arc<dyn chromulate_http::concurrency::ConcurrencyController>>,
     middleware: Vec<Arc<dyn Middleware>>,
     retry: Option<Retry>,
@@ -293,7 +292,6 @@ impl ClientBuilder {
             proxies: None,
             routes: ProxyRoutes::Direct,
             isolation: None,
-            #[cfg(feature = "adaptive-concurrency")]
             concurrency: None,
             middleware: Vec::new(),
             retry: None,
@@ -516,12 +514,15 @@ impl ClientBuilder {
 
     /// Installs a per-origin concurrency controller.
     ///
-    /// Nothing adapts without one: enabling the feature adds the machinery, and
-    /// this is what puts a policy behind it. Two are shipped —
-    /// [`AdaptiveConcurrency`] learns what an origin tolerates, and
-    /// [`FixedConcurrency`] holds a number you chose — and
-    /// [`ConcurrencyController`] is a trait, so a caller whose system has limits
-    /// it already knows can write its own law rather than tune someone else's.
+    /// Nothing paces itself without one. [`ConcurrencyController`] is a trait
+    /// and this crate ships no law behind it, so a caller whose system has
+    /// limits it already knows can write their own rather than tune someone
+    /// else's — and needs no feature switched on to do it.
+    ///
+    /// Two laws are published under the `adaptive-concurrency` feature, in the
+    /// [`concurrency`](crate::concurrency) module: `AdaptiveConcurrency`, which
+    /// learns what an origin tolerates, and `FixedConcurrency`, which holds a
+    /// number you chose.
     ///
     /// A controller can only ever make a request wait. It runs below the
     /// middleware chain, so a [`RateLimiter`](chromulate_http::RateLimiter) has
@@ -529,10 +530,7 @@ impl ClientBuilder {
     /// through this seam to send a request the caller's own limit has not
     /// released.
     ///
-    /// [`AdaptiveConcurrency`]: chromulate_http::adaptive::AdaptiveConcurrency
-    /// [`FixedConcurrency`]: chromulate_http::concurrency::FixedConcurrency
     /// [`ConcurrencyController`]: chromulate_http::concurrency::ConcurrencyController
-    #[cfg(feature = "adaptive-concurrency")]
     #[must_use]
     pub fn concurrency(
         mut self,
@@ -712,7 +710,6 @@ impl ClientBuilder {
                 }),
             );
         }
-        #[cfg(feature = "adaptive-concurrency")]
         if let Some(controller) = self.concurrency {
             builder = builder.concurrency(controller);
         }

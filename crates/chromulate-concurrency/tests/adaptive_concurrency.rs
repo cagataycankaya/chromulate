@@ -6,21 +6,19 @@
 //! and a test suite that did it would be worse, because it would do it on every
 //! CI run.
 //!
-//! The clock below implements the crate's public [`Clock`] and [`Sleeper`]
-//! traits rather than reaching for `crate::time::testing::ManualTime`, which is
-//! `pub(crate)`. That it can be written from outside the crate at all is part of
-//! what these tests check.
-
-#![cfg(feature = "adaptive-concurrency")]
+//! The clock below implements `chromulate-http`'s public [`Clock`] and
+//! [`Sleeper`] traits rather than reaching for its `pub(crate)`
+//! `time::testing::ManualTime`. That it can be written from outside both crates
+//! at all is part of what these tests check.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
-use chromulate_core::BoxFuture;
-use chromulate_http::adaptive::{
+use chromulate_concurrency::adaptive::{
     self, AdaptiveConcurrency, Ceiling, ConcurrencyConfig, OriginSnapshot, Permit, Signal,
     authority_of, retry_after_delay,
 };
+use chromulate_core::BoxFuture;
 use chromulate_http::{Clock, RateLimit, RateLimiter, Sleeper, TimeSource};
 use http::{HeaderMap, StatusCode};
 use url::Url;
