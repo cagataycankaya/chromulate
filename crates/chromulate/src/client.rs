@@ -14,6 +14,8 @@ use chromulate_http::{
 };
 use chromulate_profile::Profile;
 use chromulate_proxy::{Proxy, ProxyProvider, ProxyUrl, RoundRobin, Single};
+use chromulate_tls::ActiveBackend;
+#[cfg(doc)]
 use chromulate_tls::TlsEngine;
 use http::Method;
 use http::header::{HeaderMap, HeaderName, USER_AGENT};
@@ -237,7 +239,7 @@ pub struct ClientBuilder {
     max_response_size: u64,
     pool: PoolConfig,
     decompression: ExpansionGuard,
-    tls: Option<TlsEngine>,
+    tls: Option<ActiveBackend>,
     shared_jar: Option<Arc<Jar>>,
 }
 
@@ -637,10 +639,17 @@ impl ClientBuilder {
         self
     }
 
-    /// Uses a TLS engine other than the one the profile would build, for a
+    /// Uses a TLS backend other than the one the profile would build, for a
     /// custom trust store or a shared session cache.
+    ///
+    /// The parameter is [`chromulate_tls::ActiveBackend`], the alias for
+    /// whichever backend this build links, rather than the concrete
+    /// [`TlsEngine`]. In the default build the two are the same type, so this
+    /// signature is unchanged for every caller; naming the concrete type here
+    /// is what stopped this crate compiling at all when the alias pointed
+    /// somewhere else.
     #[must_use]
-    pub fn tls(mut self, tls: TlsEngine) -> Self {
+    pub fn tls(mut self, tls: ActiveBackend) -> Self {
         self.tls = Some(tls);
         self
     }

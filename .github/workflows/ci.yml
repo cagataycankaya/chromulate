@@ -138,10 +138,16 @@ jobs:
       # additive and `--all-features` would switch this one on, which would mean
       # every other job believing it exercised TLS while linking a backend that
       # encrypts nothing.
-      - run: cargo clippy -p chromulate-tls -p chromulate-http --all-targets -- -D warnings
+      #
+      # `-p chromulate` is in this list because leaving it out is what let the
+      # facade stop compiling under the flag without anything noticing: it named
+      # the concrete `TlsEngine` where `chromulate-http` takes `ActiveBackend`,
+      # so the crate that is this project's public face was the one crate the
+      # seam's own job never built.
+      - run: cargo clippy -p chromulate-tls -p chromulate-http -p chromulate --all-targets -- -D warnings
         env:
           RUSTFLAGS: --cfg chromulate_mock_backend
-      - run: cargo test -p chromulate-tls -p chromulate-http
+      - run: cargo test -p chromulate-tls -p chromulate-http -p chromulate
         env:
           RUSTFLAGS: --cfg chromulate_mock_backend
 

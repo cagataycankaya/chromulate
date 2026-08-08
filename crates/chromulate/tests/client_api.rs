@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime};
 
 use chromulate::cookie::Jar;
 use chromulate::dns::StaticResolver;
+use chromulate::tls::TlsBackendConfig;
 use chromulate::{Client, Error, Profile, RedirectPolicy};
 #[cfg(feature = "early-stop")]
 use chromulate::{Stop, StopReason};
@@ -811,7 +812,7 @@ async fn the_client_exposes_the_identity_it_presents_and_the_gap_to_it() {
 
     assert_eq!(client.profile().name, "chrome");
     assert_eq!(
-        client.engine().tls().target_identity().ja4,
+        TlsBackendConfig::target_identity(client.engine().tls()).ja4,
         Profile::chrome_stable().ja4()
     );
     assert!(

@@ -16,6 +16,7 @@
 
 #![cfg(feature = "network-tests")]
 
+use chromulate::tls::TlsBackendConfig;
 use chromulate::{Client, Profile, RequestOptions};
 use serde_json::Value;
 
@@ -114,7 +115,7 @@ async fn the_handshake_does_not_reach_the_profiles_ja4_and_the_client_says_so() 
         .expect("the endpoint reports JA4");
 
     let client = Client::chrome().expect("the client must build");
-    let target = &client.engine().tls().target_identity().ja4;
+    let target = &TlsBackendConfig::target_identity(client.engine().tls()).ja4;
 
     assert_ne!(
         ja4, target,
@@ -133,7 +134,7 @@ async fn the_handshake_does_not_reach_the_profiles_ja4_and_the_client_says_so() 
 
     // The gap is reported rather than discovered: the crate already knows.
     assert!(
-        !client.engine().tls().fidelity().all_primitives_available(),
+        !TlsBackendConfig::fidelity(client.engine().tls()).all_primitives_available(),
         "the ring provider drops some of the profile's primitives, and says so"
     );
 }

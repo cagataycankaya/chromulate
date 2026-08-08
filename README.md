@@ -324,7 +324,10 @@ the backend a given build links. `chromulate-http` no longer names `rustls` anyw
 alternative backend is a trait implementation rather than a rewrite of how connections are
 opened. That is checked rather than asserted: a second implementation exists behind
 `--cfg chromulate_mock_backend`, sharing no code or types with rustls, and CI builds and
-tests both crates against it.
+tests `chromulate-tls`, `chromulate-http` and the `chromulate` facade against it. The
+facade joined that list on 2026-08-08, after it was found not to compile under the flag at
+all — its builder named the concrete rustls type where the engine takes the alias, and the
+job that exists to prove the seam holds had never built the crate users depend on.
 
 There is also an acceptance harness for the backend that does not exist yet:
 `recording::RecordingBackend` flattens a profile into the wire code points a TLS library

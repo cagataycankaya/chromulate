@@ -74,7 +74,10 @@ needs a different TLS implementation. The seam that would accept one is in place
 `chromulate-http` opens every TLS connection through the `TlsBackend` trait and derives its
 stream type from the linked backend, so the string `rustls` does not appear anywhere in
 `crates/chromulate-http/src/` outside one explanatory comment. Two further implementations
-exist behind `--cfg chromulate_mock_backend`, and a CI job builds and tests against them.
+exist behind `--cfg chromulate_mock_backend`, and a CI job builds and tests
+`chromulate-tls`, `chromulate-http` and the `chromulate` facade against them. The facade
+was added to that job on 2026-08-08 because it had stopped compiling under the flag — the
+seam held everywhere the job looked, and the crate it did not look at was the public one.
 
 They answer two different questions, and neither is the question this document asks:
 
