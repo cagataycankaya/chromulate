@@ -309,7 +309,7 @@ fn run_fingerprint(args: &FingerprintArgs) -> u8 {
                 "group_coverage": tls.fidelity().group_coverage(),
                 "alpn": tls.fidelity().alpn,
                 "all_primitives_available": tls.fidelity().all_primitives_available(),
-                "tls_structural_limits": chromulate::tls::STRUCTURAL_LIMITS,
+                "tls_structural_limits": tls.fidelity().structural_limits,
                 "http2_settings_applied": http2
                     .applied
                     .iter()
@@ -361,10 +361,18 @@ fn run_fingerprint(args: &FingerprintArgs) -> u8 {
     println!("  named groups     {groups} of {groups_total} offered");
     println!("  ALPN             {}", tls.fidelity().alpn.join(", "));
     println!();
-    println!("  The ClientHello above is a target, not a measurement. rustls builds its");
-    println!("  own ClientHello and takes no instruction on its shape:");
-    for limit in chromulate::tls::STRUCTURAL_LIMITS {
-        println!("    - {limit}");
+    // Reads the linked backend's own list rather than the rustls constant, so
+    // this stays true of whichever backend the build actually links.
+    let limits = tls.fidelity().structural_limits;
+    if limits.is_empty() {
+        println!("  The ClientHello above is what this backend emits: it reports no");
+        println!("  structural departures from the profile.");
+    } else {
+        println!("  The ClientHello above is a target, not a measurement. This backend");
+        println!("  builds its own ClientHello and takes no instruction on its shape:");
+        for limit in limits {
+            println!("    - {limit}");
+        }
     }
     println!();
     println!("  HTTP/2 settings applied to hyper:");

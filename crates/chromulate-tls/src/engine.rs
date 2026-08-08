@@ -423,6 +423,7 @@ impl TlsEngineBuilder {
             dropped_versions: selected.dropped_versions,
             alpn,
             target: TargetIdentity::of(&self.spec),
+            structural_limits: crate::STRUCTURAL_LIMITS,
         };
         tracing::debug!(fidelity = %fidelity, trust = %trust, "built a TLS engine");
 

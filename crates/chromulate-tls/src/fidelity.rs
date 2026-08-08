@@ -110,6 +110,22 @@ pub struct Fidelity {
     pub alpn: Vec<String>,
     /// The fingerprints of the ClientHello the profile describes.
     pub target: TargetIdentity,
+    /// The ways this backend's encoder departs from the profile, whatever
+    /// backend it is.
+    ///
+    /// [`STRUCTURAL_LIMITS`] is the rustls engine's answer and was, until
+    /// 2026-08-08, the only one: it is a module constant, and [`fmt::Display`]
+    /// read its length directly. That made the field
+    /// [`TlsBackendConfig::fidelity`](crate::TlsBackendConfig::fidelity) exists
+    /// to publish unpublishable by any other backend — a BoringSSL
+    /// implementation closing every one of the six would still have printed
+    /// "6 structural limits", and one with a different limit could not have
+    /// named it.
+    ///
+    /// An empty slice is the honest value for a backend that departs from the
+    /// profile in no way at all, and [`Display`](fmt::Display) says so rather
+    /// than printing a count of zero.
+    pub structural_limits: &'static [&'static str],
 }
 
 impl Fidelity {
@@ -156,15 +172,24 @@ impl fmt::Display for Fidelity {
         write!(
             f,
             "provider={} suites={suites}/{suites_total} groups={groups}/{groups_total} \
-             alpn={} target={} dropped_suites=[{}] dropped_groups=[{}] \
-             (the emitted ClientHello is not byte-exact: {} structural limits)",
+             alpn={} target={} dropped_suites=[{}] dropped_groups=[{}] ",
             self.provider,
             self.alpn.join(","),
             self.target,
             hex_list(&self.dropped_cipher_suites),
             hex_list(&self.dropped_groups),
-            STRUCTURAL_LIMITS.len(),
-        )
+        )?;
+        // Reads the backend's own list rather than `STRUCTURAL_LIMITS`, which
+        // describes rustls. A backend that has closed all of them says so.
+        if self.structural_limits.is_empty() {
+            f.write_str("(the emitted ClientHello has no known structural departures)")
+        } else {
+            write!(
+                f,
+                "(the emitted ClientHello is not byte-exact: {} structural limits)",
+                self.structural_limits.len(),
+            )
+        }
     }
 }
 
@@ -204,5 +229,48 @@ mod tests {
             "0x002f"
         );
         assert_eq!(hex_list::<CipherSuite>(&[]), "");
+    }
+
+    /// Builds a `Fidelity` that differs from the rustls engine's only in the
+    /// limits it declares.
+    fn fidelity_declaring(limits: &'static [&'static str]) -> Fidelity {
+        let profile = Profile::chrome_stable();
+        Fidelity {
+            provider: "test",
+            offered_cipher_suites: profile.client_hello.cipher_suites.clone(),
+            dropped_cipher_suites: Vec::new(),
+            offered_groups: profile.client_hello.supported_groups.clone(),
+            dropped_groups: Vec::new(),
+            dropped_versions: Vec::new(),
+            alpn: profile.client_hello.alpn.clone(),
+            target: target_identity(&profile),
+            structural_limits: limits,
+        }
+    }
+
+    #[test]
+    fn a_backend_reports_its_own_structural_limits_rather_than_the_rustls_list() {
+        // Until 2026-08-08 `Display` read `STRUCTURAL_LIMITS.len()` directly, so
+        // every backend printed six however many it actually had. Two limits
+        // here, and six in the constant, so the numbers cannot coincide.
+        let fidelity = fidelity_declaring(&["one thing", "another thing"]);
+        assert_eq!(STRUCTURAL_LIMITS.len(), 6);
+        assert!(
+            fidelity.to_string().contains("2 structural limits"),
+            "a backend declaring two limits must print two, got: {fidelity}"
+        );
+    }
+
+    #[test]
+    fn a_backend_with_no_structural_limits_says_so_instead_of_counting_zero() {
+        // The claim a byte-exact backend gets to make. "0 structural limits"
+        // would be arithmetically right and would read as a bug.
+        let fidelity = fidelity_declaring(&[]);
+        let rendered = fidelity.to_string();
+        assert!(
+            rendered.contains("no known structural departures"),
+            "got: {rendered}"
+        );
+        assert!(!rendered.contains("0 structural limits"), "got: {rendered}");
     }
 }

@@ -303,6 +303,7 @@ impl RecordingBackend {
                 dropped_versions: Vec::new(),
                 alpn: profile.client_hello.alpn.clone(),
                 target: target_identity(profile),
+                structural_limits: RECORDING_STRUCTURAL_LIMITS,
             },
             recorded,
         })
@@ -314,6 +315,17 @@ impl RecordingBackend {
         &self.recorded
     }
 }
+
+/// What this backend does not reproduce.
+///
+/// It loses nothing at the configuration boundary — that is the property its
+/// round-trip test asserts — and it emits nothing either, so the honest
+/// statement is about which of the two questions it answers.
+const RECORDING_STRUCTURAL_LIMITS: &[&str] = &[
+    "no ClientHello reaches a socket: this backend flattens a profile into the wire code \
+     points a TLS library accepts and rebuilds a specification from that alone, which \
+     measures configuration fidelity rather than wire fidelity",
+];
 
 impl TlsBackendConfig for RecordingBackend {
     fn from_profile(profile: &Profile) -> Result<Self> {

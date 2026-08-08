@@ -86,10 +86,23 @@ impl MockBackend {
                 dropped_versions: Vec::new(),
                 alpn: profile.client_hello.alpn.clone(),
                 target: target_identity(profile),
+                // The rustls list would be a lie in both directions here, and
+                // this backend's real departure is larger than any of it.
+                structural_limits: MOCK_STRUCTURAL_LIMITS,
             },
         })
     }
 }
+
+/// What this backend does not reproduce, which is everything.
+///
+/// Stated rather than left empty: an empty list means "no known departures",
+/// which is the claim a byte-exact backend makes, and it is the opposite of
+/// what is true of a backend that never writes a ClientHello at all.
+const MOCK_STRUCTURAL_LIMITS: &[&str] = &[
+    "no ClientHello is emitted and no encryption is performed: this backend exists to prove \
+     the seam admits an implementation that is not rustls, and it moves bytes through unchanged",
+];
 
 impl<IO> TlsBackend<IO> for MockBackend
 where
