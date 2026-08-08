@@ -118,6 +118,32 @@ jobs:
       # here rather than changing what a server sees.
       - run: cargo run --release -p chromulate-cli -- verify
 
+  boring-backend:
+    name: The BoringSSL backend emits the captured ClientHello
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # A job of its own because this is the only one that compiles BoringSSL,
+      # which needs cmake and a C toolchain and takes about a minute and a half
+      # from cold. The GitHub-hosted runners ship cmake and go already.
+      #
+      # `--features boring` compiles the backend; `--cfg chromulate_boring_backend`
+      # would additionally point `ActiveBackend` at it. The tests here do not set
+      # the cfg: they drive `BoringBackend` through the `TlsBackend` trait
+      # directly and decode what it writes to a socket, which is the claim worth
+      # checking. Setting the cfg as well would swap the backend under every
+      # other test in the crate, including the ones asserting what rustls emits.
+      - run: cargo clippy -p chromulate-tls -p chromulate-boring-ffi --features chromulate-tls/boring --all-targets -- -D warnings
+      - run: cargo test -p chromulate-tls --features boring
+      # The facade must be able to turn the feature on. `adaptive-concurrency`
+      # shipped in 0.2.0 with no forwarding at all, so a caller depending on the
+      # crate the README names could not reach it; this is that check.
+      - run: cargo check -p chromulate --features boring
+
   backend-seam:
     name: The TLS seam admits a second backend
     runs-on: ubuntu-latest

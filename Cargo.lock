@@ -607,6 +607,7 @@ name = "chromulate-tls"
 version = "0.3.0"
 dependencies = [
  "boring",
+ "brotli",
  "chromulate-boring-ffi",
  "chromulate-core",
  "chromulate-fingerprint",
@@ -1126,8 +1127,6 @@ checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 [[package]]
 name = "h2"
 version = "0.4.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155"
 dependencies = [
  "atomic-waker",
  "bytes",

@@ -12,6 +12,7 @@ authors.workspace = true
 [dependencies]
 boring = { workspace = true, optional = true }
 tokio-boring = { workspace = true, optional = true }
+brotli = { workspace = true, optional = true }
 chromulate-boring-ffi = { workspace = true, optional = true }
 chromulate-core = { workspace = true }
 chromulate-fingerprint = { workspace = true }
@@ -35,7 +36,7 @@ tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-th
 # dependency graph, so a feature that repointed the alias would silently change
 # which TLS implementation an `--all-features` build links, including the tests
 # that assert what rustls emits. Pulls a C toolchain and cmake into the build.
-boring = ["dep:boring", "dep:tokio-boring", "dep:chromulate-boring-ffi"]
+boring = ["dep:boring", "dep:tokio-boring", "dep:chromulate-boring-ffi", "dep:brotli"]
 default = ["cert-compression"]
 
 # Offer `compress_certificate` with brotli, which is what the Chrome capture offers.

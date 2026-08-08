@@ -12,7 +12,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chromulate::engine::UnsupportedSetting;
+// The backend trait, not the rustls type's inherent methods. `tls().fidelity()`
+// resolves only when `ActiveBackend` is `TlsEngine`; naming the trait is what
+// keeps this binary compiling whichever backend the build links.
 use chromulate::header::{HeaderName, HeaderValue};
+use chromulate::tls::TlsBackendConfig;
 use chromulate::{Client, Method, Profile, ProfileRegistry, RedirectPolicy, RequestOptions};
 use clap::{Args, Parser, Subcommand};
 
@@ -304,12 +308,12 @@ fn run_fingerprint(args: &FingerprintArgs) -> u8 {
                     chromulate::fingerprint::akamai_http2_hash(&profile.akamai_http2()),
             },
             "emitted": {
-                "tls_provider": tls.fidelity().provider,
-                "cipher_coverage": tls.fidelity().cipher_coverage(),
-                "group_coverage": tls.fidelity().group_coverage(),
-                "alpn": tls.fidelity().alpn,
-                "all_primitives_available": tls.fidelity().all_primitives_available(),
-                "tls_structural_limits": tls.fidelity().structural_limits,
+                "tls_provider": TlsBackendConfig::fidelity(tls).provider,
+                "cipher_coverage": TlsBackendConfig::fidelity(tls).cipher_coverage(),
+                "group_coverage": TlsBackendConfig::fidelity(tls).group_coverage(),
+                "alpn": TlsBackendConfig::fidelity(tls).alpn,
+                "all_primitives_available": TlsBackendConfig::fidelity(tls).all_primitives_available(),
+                "tls_structural_limits": TlsBackendConfig::fidelity(tls).structural_limits,
                 "http2_settings_applied": http2
                     .applied
                     .iter()
@@ -353,17 +357,23 @@ fn run_fingerprint(args: &FingerprintArgs) -> u8 {
     println!("    JA3 text              {}", profile.ja3());
     println!();
     println!("What this build actually emits");
-    println!("  TLS provider     {}", tls.fidelity().provider);
+    println!(
+        "  TLS provider     {}",
+        TlsBackendConfig::fidelity(tls).provider
+    );
 
-    let (suites, suites_total) = tls.fidelity().cipher_coverage();
-    let (groups, groups_total) = tls.fidelity().group_coverage();
+    let (suites, suites_total) = TlsBackendConfig::fidelity(tls).cipher_coverage();
+    let (groups, groups_total) = TlsBackendConfig::fidelity(tls).group_coverage();
     println!("  cipher suites    {suites} of {suites_total} offered");
     println!("  named groups     {groups} of {groups_total} offered");
-    println!("  ALPN             {}", tls.fidelity().alpn.join(", "));
+    println!(
+        "  ALPN             {}",
+        TlsBackendConfig::fidelity(tls).alpn.join(", ")
+    );
     println!();
     // Reads the linked backend's own list rather than the rustls constant, so
     // this stays true of whichever backend the build actually links.
-    let limits = tls.fidelity().structural_limits;
+    let limits = TlsBackendConfig::fidelity(tls).structural_limits;
     if limits.is_empty() {
         println!("  The ClientHello above is what this backend emits: it reports no");
         println!("  structural departures from the profile.");
@@ -462,7 +472,10 @@ async fn run_get(args: GetArgs) -> u8 {
 
     if args.verbose && !args.json {
         eprintln!("> {method} {}", args.url);
-        eprintln!("> identity {}", client.engine().tls().target_identity());
+        eprintln!(
+            "> identity {}",
+            TlsBackendConfig::target_identity(client.engine().tls())
+        );
     }
 
     let started = Instant::now();

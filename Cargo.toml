@@ -46,6 +46,10 @@ boring = { version = "5.1", default-features = false, features = ["pq-experiment
 boring-sys = { version = "5.1" }
 tokio-boring = { version = "5.0", default-features = false }
 foreign-types-shared = "0.3"
+# Certificate decompression for the BoringSSL backend. Advertising
+# compress_certificate without being able to decompress fails the handshake
+# against every origin that uses it, which includes Cloudflare.
+brotli = { version = "8", default-features = false, features = ["std"] }
 chromulate-core = { version = "0.3.0", path = "crates/chromulate-core" }
 chromulate-fingerprint = { version = "0.3.0", path = "crates/chromulate-fingerprint" }
 chromulate-profile = { version = "0.3.0", path = "crates/chromulate-profile" }
@@ -125,3 +129,20 @@ codegen-units = 1
 [profile.bench]
 lto = "thin"
 codegen-units = 1
+
+# MEASUREMENT ONLY — this branch is not shippable and must never reach `main`.
+#
+# A library cannot ship `[patch.crates-io]`; it applies to the workspace that is
+# the build root and is ignored for anyone depending on this crate. It is here
+# to answer one question — what happens on the wire, and to a real origin, when
+# the HTTP/2 pseudo-header order and the HEADERS priority flag match Chrome —
+# without first paying for the ~109-line upstream patch or the ~300-700-line
+# adapter onto the published `http2` fork.
+#
+# The vendored tree carries three edits, each marked `CHROMULATE MEASUREMENT
+# PATCH`: the pseudo order in `Iter::next`, a `stream_dep` on every request
+# HEADERS, and the five priority bytes plus the flag in `Headers::encode`. The
+# values are hard-coded to Chrome's rather than configured, because configuring
+# them is exactly the plumbing this measurement exists to decide about.
+[patch.crates-io]
+h2 = { path = "/private/tmp/claude-501/-Users-cagatay-Desktop-projects-chromulate/c427fcf0-abcb-4c9e-9d3c-7159177d9f30/scratchpad/h2-patched" }

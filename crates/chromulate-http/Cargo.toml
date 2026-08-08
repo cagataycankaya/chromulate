@@ -51,6 +51,10 @@ rustls-pki-types.workspace = true
 tokio-rustls.workspace = true
 
 [features]
+# Forwards `chromulate-tls`'s BoringSSL backend so a caller who depends on the
+# engine can reach it. Selecting it still needs `--cfg chromulate_boring_backend`;
+# this only makes the type available and pulls the C toolchain into the build.
+boring = ["chromulate-tls/boring"]
 default = []
 # `Response::bytes_until`: read only the front of a body and stop at a marker, a
 # predicate or a byte budget.

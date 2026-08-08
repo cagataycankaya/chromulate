@@ -84,31 +84,39 @@ impl std::fmt::Debug for BoringBackend {
     }
 }
 
-/// Certificate compression the profile advertises but this build does not run.
+/// Brotli certificate decompression, which Chrome offers and origins use.
 ///
-/// Chrome offers brotli in `compress_certificate`, and offering it is what the
-/// fingerprint records. Decompression is a separate capability: this backend
-/// does not link brotli, so it reports the failure rather than handing back an
-/// empty certificate chain, which would fail later and further away.
+/// Chrome advertises brotli in `compress_certificate`, and advertising it is
+/// what the fingerprint records — but advertising is a promise. An earlier draft
+/// of this backend returned an error from `decompress` on the reasoning that
+/// offering the extension was the part that mattered for the fingerprint. Every
+/// handshake against an origin that takes the offer then failed, which is how it
+/// was found: two Cloudflare-fronted sites that rustls fetched fine returned
+/// `TLS handshake failed` here and nowhere else.
+///
+/// Only decompression is implemented. A client compresses nothing during a
+/// handshake — the extension asks the *server* to compress its chain — so
+/// `CAN_COMPRESS` is false and `compress` is unreachable.
 #[derive(Default, Debug)]
-struct AdvertisedBrotli;
+struct BrotliCertificates;
 
-impl CertificateCompressor for AdvertisedBrotli {
+impl CertificateCompressor for BrotliCertificates {
     const ALGORITHM: CertificateCompressionAlgorithm = CertificateCompressionAlgorithm::BROTLI;
     const CAN_COMPRESS: bool = false;
     const CAN_DECOMPRESS: bool = true;
 
     fn compress<W: std::io::Write>(&self, _input: &[u8], _output: &mut W) -> std::io::Result<()> {
         Err(std::io::Error::other(
-            "this backend advertises brotli certificate compression but does not implement it",
+            "a TLS client does not compress certificates; compress_certificate asks the server to",
         ))
     }
 
-    fn decompress<W: std::io::Write>(&self, _input: &[u8], _output: &mut W) -> std::io::Result<()> {
-        Err(std::io::Error::other(
-            "this backend advertises brotli certificate compression but cannot decompress; the \
-             server compressed its certificate chain",
-        ))
+    fn decompress<W: std::io::Write>(&self, input: &[u8], output: &mut W) -> std::io::Result<()> {
+        // BoringSSL has already checked the decompressed length against the
+        // value the server declared, and rejects a chain that does not match,
+        // so this does not need its own expansion guard.
+        let mut reader = brotli::Decompressor::new(input, 4096);
+        std::io::copy(&mut reader, output).map(|_| ())
     }
 }
 
@@ -268,7 +276,7 @@ impl BoringBackend {
             .map_err(|e| Error::config(format!("signature algorithms: {e}")))?;
 
         builder
-            .add_certificate_compression_algorithm(AdvertisedBrotli)
+            .add_certificate_compression_algorithm(BrotliCertificates)
             .map_err(|e| Error::config(format!("certificate compression: {e}")))?;
 
         // The two calls `boring` 5.1.0 does not wrap. See

@@ -25,6 +25,11 @@ that breaking changes may land in a minor release.
   reports both that and the AES-hardware cipher-order caveat through
   `Fidelity::structural_limits`, so the gap stays published rather than glossed.
 
+  The feature is forwarded through `chromulate-http` to the facade, so a caller who
+  depends on the crate the README names can turn it on — `adaptive-concurrency` shipped in
+  0.2.0 with no forwarding at all and was unreachable from there, and a CI step now checks
+  this one.
+
   The feature compiles the backend; it does not select it. `--cfg
   chromulate_boring_backend` points `ActiveBackend` at it, and a `compile_error!` catches
   each half-configured combination. The split is not taste: a cargo feature is additive

@@ -51,6 +51,10 @@ serde_json.workspace = true
 tokio = { workspace = true, features = ["full", "test-util"] }
 
 [features]
+# Forwards the BoringSSL backend all the way to the crate the README tells people
+# to depend on. Without this the backend exists and no facade user can enable it,
+# which is exactly how `adaptive-concurrency` shipped unreachable in 0.2.0.
+boring = ["chromulate-http/boring"]
 default = ["json"]
 # `RequestBuilder::json` and `Response::json`.
 json = ["dep:serde", "dep:serde_json"]

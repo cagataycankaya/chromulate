@@ -361,18 +361,18 @@ async fn the_emitted_http2_preface_matches_the_profile() {
     // The two known divergences, asserted rather than described, so that a
     // future `h2` release closing either one fails this test and the fidelity
     // documentation gets corrected instead of quietly going stale.
+    // MEASUREMENT BRANCH: the vendored h2 now sends it, which is the point.
     assert!(
-        !observed.headers_priority_flag,
-        "h2 has started sending HEADERS with the PRIORITY flag; docs/fidelity.md says it does \
-         not, and the Akamai fingerprint's priority field is affected"
+        observed.headers_priority_flag,
+        "the patched h2 must send HEADERS with the PRIORITY flag"
     );
+    // MEASUREMENT BRANCH: Chrome's order, which is what the patch produces.
     assert_eq!(
         observed.pseudo_order,
-        vec![":method", ":scheme", ":authority", ":path"],
-        "the emitted pseudo-header order is fixed by h2's frame::headers::Pseudo. Chrome sends \
-         m,a,s,p; if this assertion fails h2 has changed it and docs/fidelity.md must be updated"
+        vec![":method", ":authority", ":scheme", ":path"],
+        "the patched h2 must emit Chrome's pseudo-header order"
     );
-    assert_ne!(
+    assert_eq!(
         observed.pseudo_order,
         profile
             .http2

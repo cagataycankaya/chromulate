@@ -54,6 +54,30 @@ remembers to call `purge_expired` does not count — that is a cap the caller ca
 A capacity of zero is raised to one everywhere here, because a store that cannot hold the
 entry it was just handed is a silently disabled feature rather than a small one.
 
+### A seam's vocabulary carries observations, not conclusions
+
+`concurrency::Outcome` carries the status code and the response headers and nothing
+concluded from them. A pre-classified verdict is one law's reading — `503` is
+backpressure to the built-in law and an ordinary error to an origin mid-deploy — and
+putting a reading into the type every implementation speaks shapes the seam around the
+implementation that came first. Mapping to `Signal` happens inside `adaptive`, whose
+opinion it is. Two corollaries: `ConcurrencyConfig` is exhaustive by design, so a new
+field there is a source break — new knobs are builder methods (`with_ceiling_recovery`
+is the precedent); and the `403` freeze is deliberately not configurable, because "keep
+ramping against an origin that has refused you" is the scope boundary at the bottom of
+this file.
+
+### Server-taught state is keyed by the proxy exit it was taught through
+
+Cookies, `Accept-CH` grants, and stored validators change what later requests send, so
+sharing them across rotating proxy exits tells the origin the exits are one client —
+worse than not rotating, and silent. HSTS, the DNS cache, and the connection pool stay
+shared deliberately (`ProxyIsolation`'s docs say why), and the response cache is refused
+alongside isolation rather than shared or split. A new store must pick a side explicitly:
+split per exit if an origin's response can shape a later request through it, shared only
+with a written reason. TLS session tickets are still shared across exits — a documented
+gap, not an oversight to fix in passing.
+
 ### Correctness constraints that are easy to get wrong
 
 - Chrome randomises ClientHello extension **order** on every connection, so JA3 is not
@@ -61,8 +85,13 @@ entry it was just handed is a silently disabled feature rather than a small one.
   across connections — but **not across machines**. BoringSSL orders the TLS 1.3 suites on
   `EVP_has_aes_hardware()`, so ChaCha20 leads on a host without AES-NI and trails on one
   with it. A captured cipher order is therefore a capture *for that device class*, and
-  Chrome's JA4 `_b` component is two strings rather than one. `aes_hw_override` is what
-  pins it if a profile must be replayed on the other class.
+  Chrome's JA4 `_b` component is two strings rather than one. **Nothing in this workspace
+  pins the device class today.** This paragraph named an `aes_hw_override` switch until
+  2026-08-08; it never existed in code, entering in commit `ac6c149` as this prose and
+  nothing else, which is the drift the release rule below exists to catch — in the file
+  that states that rule. There is also no capture of the non-AES-hardware order, so
+  replaying it would need both a mechanism and a capture. Treat it as an open requirement
+  for any backend that controls cipher order, not as a switch to call.
   Profiles model the extension set plus its permutation rules, not one frozen order.
 - GREASE values must be drawn from the reserved `0x?A?A` set and placed where the real
   browser places them. The Chrome 151 capture records **six** positions: first cipher,
