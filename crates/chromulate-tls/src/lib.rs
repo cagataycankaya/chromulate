@@ -119,6 +119,8 @@
 #![warn(missing_docs)]
 
 pub mod backend;
+#[cfg(feature = "boring")]
+pub mod boring;
 pub mod engine;
 pub mod fidelity;
 #[cfg(any(test, chromulate_mock_backend))]
@@ -183,8 +185,32 @@ pub type TlsStream<IO> = tokio_rustls::client::TlsStream<IO>;
 /// BoringSSL backend has to clear, and it is a *configuration* bar — sending
 /// what you were configured with is a separate claim that only decoding real
 /// bytes can settle.
-#[cfg(not(chromulate_mock_backend))]
+#[cfg(all(not(chromulate_mock_backend), not(chromulate_boring_backend)))]
 pub type ActiveBackend = TlsEngine;
+
+/// The TLS backend this build links — here, BoringSSL, because
+/// `--cfg chromulate_boring_backend` is set.
+///
+/// Unlike the other two flagged backends this one is a real TLS
+/// implementation, and it is the one that closes most of
+/// [`STRUCTURAL_LIMITS`]. See [`boring`] for what it does not close.
+#[cfg(chromulate_boring_backend)]
+pub type ActiveBackend = boring::BoringBackend;
+
+// A cfg cannot pull in a cargo dependency, so the flag and the feature have to
+// be set together. Saying so here costs one line and turns an unresolved-name
+// error deep in a type alias into a sentence.
+#[cfg(all(chromulate_boring_backend, not(feature = "boring")))]
+compile_error!(
+    "--cfg chromulate_boring_backend selects the BoringSSL backend, which the `boring` feature \
+     compiles. Enable chromulate-tls's `boring` feature as well."
+);
+
+#[cfg(all(chromulate_boring_backend, chromulate_mock_backend))]
+compile_error!(
+    "--cfg chromulate_boring_backend and --cfg chromulate_mock_backend both point ActiveBackend \
+     at a different type. Set at most one."
+);
 
 /// The TLS backend this build links — here, the mock, because the
 /// `--cfg chromulate_mock_backend` is set.

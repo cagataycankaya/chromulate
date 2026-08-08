@@ -7,6 +7,7 @@ members = [
     "crates/chromulate-profile",
     "crates/chromulate-header",
     "crates/chromulate-cookie",
+    "crates/chromulate-boring-ffi",
     "crates/chromulate-cache",
     "crates/chromulate-compression",
     "crates/chromulate-dns",
@@ -35,11 +36,22 @@ keywords = ["http", "client", "tls", "browser", "networking"]
 categories = ["network-programming", "web-programming::http-client"]
 
 [workspace.dependencies]
+# BoringSSL, behind `chromulate-tls`'s off-by-default `boring` feature. Pulls a
+# C toolchain and cmake into the build, which is why it is opt-in. `boring` over
+# `boring2`: the latter wraps three more calls safely and can order the TLS 1.3
+# suites, but its crates.io line has been frozen since 2025-08-14 with
+# development moved to a renamed repository, and it vendors the pre-relicense
+# OpenSSL/SSLeay mix. Measured 2026-08-08; see docs/architecture/03-roadmap.md.
+boring = { version = "5.1", default-features = false, features = ["pq-experimental"] }
+boring-sys = { version = "5.1" }
+tokio-boring = { version = "5.0", default-features = false }
+foreign-types-shared = "0.3"
 chromulate-core = { version = "0.3.0", path = "crates/chromulate-core" }
 chromulate-fingerprint = { version = "0.3.0", path = "crates/chromulate-fingerprint" }
 chromulate-profile = { version = "0.3.0", path = "crates/chromulate-profile" }
 chromulate-header = { version = "0.3.0", path = "crates/chromulate-header" }
 chromulate-cookie = { version = "0.3.0", path = "crates/chromulate-cookie" }
+chromulate-boring-ffi = { version = "0.3.0", path = "crates/chromulate-boring-ffi" }
 chromulate-cache = { version = "0.3.0", path = "crates/chromulate-cache" }
 chromulate-compression = { version = "0.3.0", path = "crates/chromulate-compression" }
 chromulate-dns = { version = "0.3.0", path = "crates/chromulate-dns" }
@@ -97,7 +109,7 @@ unsafe_code = "forbid"
 # additive, `--all-features` would enable it, and a CI run that thought it was
 # exercising TLS while linking a backend that encrypts nothing is a worse
 # outcome than not checking the seam at all.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(chromulate_mock_backend)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(chromulate_mock_backend)', 'cfg(chromulate_boring_backend)'] }
 missing_debug_implementations = "warn"
 unreachable_pub = "warn"
 

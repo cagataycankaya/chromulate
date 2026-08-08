@@ -1,0 +1,32 @@
+[package]
+name = "chromulate-boring-ffi"
+description = "The three BoringSSL calls the `boring` crate does not wrap safely, wrapped safely for Chromulate's TLS backend. Nothing else lives here."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+boring.workspace = true
+boring-sys.workspace = true
+foreign-types-shared.workspace = true
+
+# Deliberately NOT `[lints] workspace = true`.
+#
+# The workspace sets `unsafe_code = "forbid"`, and `forbid` cannot be relaxed at
+# a call site — that is the point of it. This crate exists so that the exception
+# is one small crate with three functions in it rather than a hole in
+# `chromulate-tls`, which stays `forbid(unsafe_code)` and is the crate that
+# handles keys. Every function here is `unsafe` for one reason only: it calls a
+# C function `boring` 5.1.0 does not expose. See the crate documentation for why
+# the calls cannot be avoided and what would remove the need for this crate.
+[lints.rust]
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+todo = "warn"
+dbg_macro = "warn"

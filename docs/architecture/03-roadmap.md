@@ -332,6 +332,41 @@ rustls-asserting test meaning what it means today under `--all-features` — and
 `--cfg chromulate_boring_backend` selects it, with a `compile_error!` for the
 half-configured combination.
 
+### The last three code points are reachable, and were not taken
+
+The sigalg gap above is not a law of nature, and saying so precisely matters more than
+leaving it as "BoringSSL refuses". Measured 2026-08-08: BoringSSL refuses the three code
+points in one place, a validation loop that checks each requested algorithm against a
+table of ones it implements. Removing that check puts them on the wire in Chrome's
+position and **the emitted JA4 becomes `t13d1516h2_8daaf6152771_806a8c22fdea`, the
+capture's value exactly.** It was reproduced against both binding families, and the
+patch survived a major version bump of one of them without edits.
+
+It was not taken, for three reasons that compound.
+
+**It deletes a check rather than adding three entries.** The same probe asked for
+`0xdead` and for a GREASE value after patching, and both reached the wire where both had
+been refused. This file records that Chrome sends no GREASE in `signature_algorithms`;
+after the patch, nothing but profile data enforces that, and a mistyped code point in a
+future profile would ship silently. Buying fidelity by removing the check that would
+catch a fidelity error is a poor trade.
+
+**Carrying it means owning a TLS library's security updates.** The two workable routes are
+forking `boring-sys` or building BoringSSL out of tree and pointing at it with
+`BORING_BSSL_PATH`. The first is the exact risk `boring2` was rejected for, and worse,
+because the fork would be ours. The second moves a C build onto every user.
+
+**It is a bridge, and the far bank is visible.** Upstream BoringSSL already implements
+these algorithms in its TLS layer; `boring-sys` vendors a revision from before that. The
+durable fix is a version bump landing upstream, which costs nothing to wait for and
+removes the patch rather than maintaining it — the same reasoning Phase 6 applies to h2.
+
+So the position is: the gap is closable, the cost is written down, and the trigger to
+revisit is a `boring-sys` release vendoring a BoringSSL that carries the algorithms. The
+probe, its patches and its raw output are kept in
+`.superpowers/preflight/2026-08-08-sigalg-probe-report.md` so that revisiting means
+re-measuring rather than rediscovering.
+
 **Two things block the work and are independent of it:** three of the six GREASE positions
 have no generator in the workspace and the shared-slot rule has no test at all; and ten keys
 of the capture are dropped silently by serde, the extension *set* being parsed but several

@@ -7,6 +7,40 @@ that breaking changes may land in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **A BoringSSL backend, behind `chromulate-tls`'s off-by-default `boring` feature.** It
+  closes five of the six entries in `STRUCTURAL_LIMITS`, which is to say most of the gap
+  this project has published since 0.1.0: GREASE reaches the wire in all six positions the
+  profile marks, the extension permutation is BoringSSL's GREASE-bracketed one,
+  `signed_certificate_timestamp` and ALPS and `encrypted_client_hello` are sent,
+  `renegotiation_info` is the extension rather than the SCSV cipher, and the key-share
+  count is the profile's rather than the library's.
+
+  What it does not close, measured rather than assumed: Chrome sends three signature
+  algorithms first — `0x0904`, `0x0905`, `0x0906` — that BoringSSL refuses by name, refuses
+  as raw code points, and does not carry in its bindings. Substituting only those three
+  into an otherwise identical hello produces the capture's JA4 exactly, so they are the
+  entire remaining difference and it lands in JA4's third component. `BoringBackend`
+  reports both that and the AES-hardware cipher-order caveat through
+  `Fidelity::structural_limits`, so the gap stays published rather than glossed.
+
+  The feature compiles the backend; it does not select it. `--cfg
+  chromulate_boring_backend` points `ActiveBackend` at it, and a `compile_error!` catches
+  each half-configured combination. The split is not taste: a cargo feature is additive
+  across a dependency graph, so a feature that repointed the alias would silently change
+  which TLS implementation every `--all-features` build links, including the tests that
+  assert what rustls emits.
+
+- **`chromulate-boring-ffi`**, a crate containing three functions and no state. `boring`
+  5.1.0 wraps neither OCSP stapling nor either ALPS call, and a connector built through its
+  safe API alone emits 14 of the profile's 16 extensions. Those three calls are `unsafe`
+  because they take raw pointers, and they are here rather than in `chromulate-tls` so that
+  the crate handling keys keeps `#![forbid(unsafe_code)]` — `forbid` cannot be relaxed at a
+  call site, which is the reason to use it. `boring2` wraps all three safely; the crate
+  documentation records why this workspace does not depend on it, and deleting this crate
+  is what happens if that changes.
+
 ## [0.3.0] — 2026-08-08
 
 ### Added

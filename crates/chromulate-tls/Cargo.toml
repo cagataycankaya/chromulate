@@ -10,6 +10,9 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
+boring = { workspace = true, optional = true }
+tokio-boring = { workspace = true, optional = true }
+chromulate-boring-ffi = { workspace = true, optional = true }
 chromulate-core = { workspace = true }
 chromulate-fingerprint = { workspace = true }
 chromulate-profile = { workspace = true }
@@ -26,6 +29,13 @@ rustls-native-certs = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 
 [features]
+# The BoringSSL backend. Additive: it compiles `boring::BoringBackend` and does
+# NOT select it — pointing `ActiveBackend` at it additionally needs
+# `--cfg chromulate_boring_backend`. A cargo feature is additive across a
+# dependency graph, so a feature that repointed the alias would silently change
+# which TLS implementation an `--all-features` build links, including the tests
+# that assert what rustls emits. Pulls a C toolchain and cmake into the build.
+boring = ["dep:boring", "dep:tokio-boring", "dep:chromulate-boring-ffi"]
 default = ["cert-compression"]
 
 # Offer `compress_certificate` with brotli, which is what the Chrome capture offers.
