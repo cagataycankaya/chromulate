@@ -281,6 +281,64 @@ shows a backend *could* be handed everything the profile specifies; whether it *
 what `tests/emitted_client_hello.rs` decodes real bytes for, and what rustls fails. Only a
 real second TLS implementation closes that.
 
+### A BoringSSL backend, measured 2026-08-08
+
+A probe built against both published binding families — `boring` 5.1.0 with `tokio-boring`
+5.0.0, and `boring2`/`boring-sys2` 4.15.15 — put a real ClientHello on a socket and decoded
+it back. Both reproduce what rustls cannot: the cipher list **15 of 15 in wire order**, the
+extension set 16 of 16, the groups and key shares including `X25519MLKEM768`, and **GREASE
+in all six positions**, with the group and key-share values drawn from one slot as
+BoringSSL's own generator requires — confirmed equal across eight connections.
+
+**And it still does not reach the captured JA4, for a reason worth recording.** The probe's
+JA4 was `t13d1516h2_8daaf6152771_d8a2da3f94cd` against the target's
+`t13d1516h2_8daaf6152771_806a8c22fdea`: the first two components byte-identical, the third
+not. Substituting *only* the capture's signature-algorithm list into the decoded hello
+produces the target exactly, which attributes the entire remaining gap to three code points
+— `0x0904`, `0x0905`, `0x0906` — that Chrome sends first and no BoringSSL will emit. They
+were rejected by name, rejected as raw values by `SSL_CTX_set_verify_algorithm_prefs`, and
+are absent from the generated bindings. The capture records them as `unknown_0x0904`; what
+they *are* is unestablished and does not matter, since the wire form is what a server sees.
+
+So the definition of done below cannot be "the Phase 4 diff is empty". A BoringSSL backend
+closes GREASE, ALPS, SCT, ECH, the extension set, the key shares and the cipher order, and
+leaves a three-code-point difference in `signature_algorithms` and therefore in JA4's `_c`
+component. That is the measured ceiling for this route, and shipping the backend should
+publish it rather than describe the phase as complete.
+
+**Acceptance cannot be JA4 equality alone**, which a second probe settled: with GREASE
+disabled entirely, with the TLS 1.3 cipher block reversed, with one key share instead of
+two, and with the supported-group list truncated to a single entry, the JA4 does not move —
+it sorts its inputs and filters GREASE before hashing. Those four are precisely the settings
+a new backend exists to control, so a JA4-only test could not fail for any of the reasons
+the work is being done. The bar is JA4 equality plus assertions on cipher order, all six
+GREASE positions, the shared group/key-share slot, the key-share list, the group list, the
+absence of GREASE in `signature_algorithms`, and `pre_shared_key` last.
+
+**Crate choice: `boring` 5.1.0**, accepting two costs. It needs three `unsafe` FFI calls —
+`SSL_CTX_enable_ocsp_stapling` and the two ALPS setters — which `boring2` exposes safely,
+and it does not let the caller order the TLS 1.3 suites, which `boring2` allows because its
+patch set removes BoringSSL's hardware-dependent ordering entirely. Against that:
+`boring2`'s crates.io line has been frozen since 2025-08-14 with development moved to a
+renamed repository, and it vendors the pre-relicense OpenSSL/SSLeay/ISC mix where `boring`
+5.1.0 vendors the Apache-2.0 snapshot. A TLS dependency that stops receiving security fixes
+is the worse of the two risks, and the cipher-order loss is invisible to JA4 by the
+measurement above.
+
+**How it is selected.** A `--cfg` flag cannot pull in a cargo dependency, so the mock
+backend's pattern does not transfer. The backend arrives as an additive `boring` feature
+that makes the type available without repointing `ActiveBackend` — which keeps every
+rustls-asserting test meaning what it means today under `--all-features` — and a separate
+`--cfg chromulate_boring_backend` selects it, with a `compile_error!` for the
+half-configured combination.
+
+**Three things block the work and are independent of it:** `Fidelity` cannot express a
+backend with a different set of structural limits, because `STRUCTURAL_LIMITS` is a module
+constant describing rustls and `Display` hard-codes its length; three of the six GREASE
+positions have no generator in the workspace and the shared-slot rule has no test at all;
+and ten keys of the capture are dropped silently by serde, the extension *set* being parsed
+but several payload details not.
+
 **A custom ClientHello encoder in front of rustls.** Assessed in the design document as
 not recommended: the ClientHello is part of a transcript both sides hash, and splicing a
 hand-built one in front of a state machine that believes it built a different one produces

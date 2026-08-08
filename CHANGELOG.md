@@ -70,6 +70,33 @@ that breaking changes may land in a minor release.
   is new rather than moved — two doctests on the new crate root and on `Unlimited`, and
   four tests covering `Unlimited` and the no-controller default path.
 
+### Fixed
+
+- **`chromulate` did not compile when `ActiveBackend` named anything but rustls.**
+  `ClientBuilder::tls` took the concrete `TlsEngine` where `chromulate-http`'s builder
+  takes the alias, so `--cfg chromulate_mock_backend` produced `E0308` in the facade. It
+  now takes `ActiveBackend`, which *is* `TlsEngine` in a default build, so no caller's
+  source changes. The `backend-seam` CI job ran `-p chromulate-tls -p chromulate-http`
+  only, which is why the one crate a user adds to their manifest was the one crate the
+  seam's own proof never built; it now includes `-p chromulate`.
+
+  Three documents claimed more than that job checked — `chromulate-tls`'s crate docs said
+  "the workspace still compiles and its tests still pass", and the README and
+  `docs/fidelity.md` said CI builds and tests against the second backend. Two crates did.
+  Each now names the three.
+
+- **The TLS backend seam was unreachable from the facade.** `TlsBackend`,
+  `TlsBackendConfig` and `ActiveBackend` were not exported from `chromulate::tls` at all,
+  so a caller could not bring the trait into scope without depending on `chromulate-tls`
+  directly — and the trait is how a backend is used. All three are now exported.
+
+  Relatedly, call sites reading `engine.tls().fidelity()` were relying on `TlsEngine`'s
+  *inherent* methods, which shadow the identically named trait methods and resolve only
+  for that one backend. They now read `TlsBackendConfig::fidelity(...)`. Importing the
+  trait alone does not fix this: the inherent method still wins and `-D warnings` then
+  rejects the import as unused. Both halves are needed, which is why each site says so in
+  a comment.
+
 ### Documentation
 
 - **Two documents said HTTP/2 regular header order was unreachable. It has been reproduced

@@ -98,6 +98,24 @@ document measures *wire* fidelity: what a server actually receives. They are dif
 claims, and a build can pass the first while failing the second — which is exactly what
 happens today, because rustls is still the only backend that opens a socket.
 
+**A BoringSSL backend would clear almost all of it, and a measurement from 2026-08-08 says
+where it stops.** A probe against both published binding families put a real ClientHello on
+a socket and decoded it: 15 of 15 cipher suites in wire order, 16 of 16 extensions, the
+groups and key shares including `X25519MLKEM768`, and GREASE in all six positions with the
+group and key-share values drawn from one slot, as Chrome's generator requires. Its JA4 was
+`t13d1516h2_8daaf6152771_d8a2da3f94cd` against the target's
+`t13d1516h2_8daaf6152771_806a8c22fdea` — the first two components byte-identical.
+
+The whole remaining difference was attributed by substituting only the capture's
+signature-algorithm list into the decoded hello, which lands on the target exactly. Chrome
+sends three code points first — `0x0904`, `0x0905`, `0x0906` — that no BoringSSL will emit:
+rejected by name, rejected as raw values, absent from the generated bindings. The capture
+records them as `unknown_0x0904`, so what they are is not established here; what matters is
+that the wire form cannot be reproduced. **A BoringSSL backend therefore closes GREASE,
+ALPS, SCT, ECH, the extension set, the key shares and the cipher order, and leaves JA4's
+third component different.** That is the ceiling for that route, measured rather than
+predicted.
+
 So the harness is a bar for work that has not been done, not evidence about work that has.
 A BoringSSL backend would have to clear it, and clearing it would still not be enough on its
 own: `tests/emitted_client_hello.rs` decodes the bytes a real connection writes, and that is
