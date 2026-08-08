@@ -303,12 +303,45 @@ Three of the four Akamai fingerprint components are reachable with stock h2: the
 list, the connection window increment, and the empty priority field. The fourth is not.
 h2 emits pseudo-headers as `:method, :scheme, :authority, :path`
 (h2 0.4.15, `src/frame/headers.rs:704-731`) where Chrome sends
-`:method, :authority, :scheme, :path` (`chrome-151-macos.json:127`). Regular header order
-is equally out of reach, because h2 encodes fields by iterating the `HeaderMap`.
+`:method, :authority, :scheme, :path` (`chrome-151-macos.json:127`).
 
-Two routes: upstream support in h2 for a caller-specified pseudo-header order and a
-caller-specified field order, or a Chromulate-owned HPACK encoding path. The first is
-cheaper and slower; the second is a significant amount of protocol code to own.
+Regular header order is *not* in the same position, and this document said it was until
+2026-08-08. h2 encodes fields by iterating the `HeaderMap`, which is exactly what makes the
+order controllable: the engine rebuilds the map in the profile's order and h2 writes it out
+that way. Section 8.5 of the design document has the detail and the guard test.
+
+### What the routes cost, measured 2026-08-08
+
+The earlier text weighed two routes qualitatively — "the first is cheaper and slower; the
+second is a significant amount of protocol code to own" — which is not a basis for choosing.
+These are counted rather than estimated:
+
+| Route | Measured cost |
+|---|---|
+| Upstream setter in h2 | **~90–110 lines.** A config value reaches the send path through 13 sites in 5 files, measured by tracing `initial_max_send_streams`; pseudo-header order needs that path plus a rewrite of the `Iter::next` chain, and HEADERS priority needs it plus five bytes and a flag in `Headers::encode`. |
+| Renamed fork, published | The same ~100 lines, **plus re-owning hyper's HTTP/2 glue**. `[patch.crates-io]` cannot be shipped by a library — verified by experiment — so `chromulate-http` would have to stop using `hyper::client::conn::http2`. |
+| Chromulate-owned HPACK path | Not re-costed. The route above dominates it and no longer needs deciding first. |
+
+**The glue is the expensive half, and it cannot be taken in part.** Of hyper's 2,388 lines of
+h2 glue, roughly 676 are unreachable for this crate — `ping.rs`'s BDP and keep-alive
+machinery is behind `is_enabled()`, which is false when neither adaptive window nor
+keep-alive is set, so 248 of its 515 lines never construct; CONNECT upgrade support is about
+83; and 15 of `client/conn/http2.rs`'s 27 public functions are setters nothing here calls.
+That leaves ~1,712 genuinely needed. But `proto/h2/client.rs` reaches into nine internal
+hyper modules across fourteen imports — `dispatch`, `body`, `common`, `upgrade`, `rt::bounds`
+among them — so the reachable part does not lift out cleanly.
+
+The empirical check agrees: `wreq`, a maintained browser-fingerprinting client, took exactly
+this route and carries `http2` (a renamed h2 fork, 27,238 lines against h2's 26,161) plus
+`wreq-proto`, a fork of hyper's whole protocol layer at 10,836 lines, of which the h2 glue is
+2,412 — within a percent of hyper's 2,388. It re-owned the glue nearly line for line and
+keeps hyper only as a dev-dependency. **Plan against ~10,800, not ~1,700.**
+
+**Try upstream first.** h2 has already accepted a fingerprint-motivated knob: issue #637,
+asking for a `header_table_size` setter for exactly this purpose, closed as completed, and
+this crate calls that setter today. hyper's #3170 closed `not_planned`, but on the
+architectural ground that hyper has no TLS rather than any objection to the goal. A rejected
+PR costs the ~60 lines it took to write; an unnecessary fork costs the glue forever.
 
 **Definition of done.** The Phase 4 HTTP/2 diff is empty, and `akamai_http2` computed from
 the emitted frames equals `52d84b11737d980aef856699f885ca86`.

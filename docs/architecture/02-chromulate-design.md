@@ -1423,16 +1423,23 @@ fourth field would therefore read `m,s,a,p` where the capture has `m,a,s,p`
 (`:24`), so the captured hash `52d84b11737d980aef856699f885ca86` is not reproducible with
 stock h2 even though three of its four components are.
 
-**Regular header order is not reachable through h2 either.** h2 encodes header fields by
-iterating the `HeaderMap` (`src/frame/headers.rs:735-737`), and `http::HeaderMap` iterates
-in an arbitrary order that the crate explicitly refuses to guarantee
-(http 1.5.0, `src/header/map.rs:914` and `:39-41`). Carrying an explicit order from the
-profile — which section 4.3 requires — therefore has no effect on the HTTP/2 wire unless
-Chromulate controls the HPACK encoding.
+**Regular header order, by contrast, is reachable — and this section said the opposite until
+2026-08-08.** The premise was right and the conclusion was wrong. h2 does encode header
+fields by iterating the `HeaderMap` (`src/frame/headers.rs:735-737`), and `http::HeaderMap`
+does decline to document an iteration order (http 1.5.0, `src/header/map.rs:914`). But
+iterating the map is precisely what makes the order controllable: the engine rebuilds the
+outgoing map by appending in the profile's order (`crates/chromulate-http/src/engine.rs:1146`)
+and h2 then writes it out in that order.
 
-For HTTP/1.1 the situation is better, because the request head is a byte string Chromulate
-can write itself rather than delegate. Header order fidelity on HTTP/1.1 is achievable
-within the current stack; on HTTP/2 it is not.
+This rests on an undocumented property, so it is not left to trust. The assumption has its
+own guard test — `a_rebuilt_header_map_iterates_in_the_order_it_was_appended`
+(`engine.rs:1362`) — which fails if a future `http` release reorders, and the result is
+asserted on the wire against the capture by `crates/chromulate/tests/live_identity.rs`. That
+is the whole difference between depending on an undocumented property and being at its mercy.
+
+So header order fidelity is achieved on both protocols, and `docs/fidelity.md` records it as
+an exact match rather than an aspiration. HTTP/1.1 is the easier of the two only because the
+request head is a byte string Chromulate writes itself.
 
 ### 8.6 What would have to change
 
