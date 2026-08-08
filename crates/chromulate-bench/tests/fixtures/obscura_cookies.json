@@ -1,0 +1,32 @@
+[
+  {
+    "name": "cf_clearance",
+    "value": "Xk9F3jz7q2VvY8pR-example-not-a-real-token",
+    "domain": "example.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": true,
+    "sameSite": "None",
+    "expires": 4070908800
+  },
+  {
+    "name": "_cfuvid",
+    "value": "abc123def456",
+    "domain": "example.com",
+    "path": "/",
+    "secure": true,
+    "httpOnly": true,
+    "sameSite": "Lax",
+    "expires": null
+  },
+  {
+    "name": "session_pref",
+    "value": "dark-mode",
+    "domain": "example.com",
+    "path": "/app",
+    "secure": false,
+    "httpOnly": false,
+    "sameSite": "Strict",
+    "expires": 4083955200
+  }
+]

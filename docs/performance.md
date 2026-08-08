@@ -18,12 +18,34 @@ is inferred or unmeasured, it says so.
 | Throughput vs reqwest, paired medians, c=1–256 | 0.79–0.88x | **0.93–1.09x** | `--bin e2e` |
 | Heap allocations per steady-state request | 127 (2.59x reqwest) | **48 (0.98x)** | `--bin allocs` |
 | Allocations, first request (connect) | 156 | **78** | `--bin allocs` |
-| Bytes allocated per request | 22,333 | **20,855** | `--bin allocs` |
+| Bytes allocated per request | 22,333 | **20,895** | `--bin allocs` |
 | `HeaderEngine::apply`, per request | 80 allocs / 4.38 µs | **8 allocs / 1.46 µs** | `cargo bench -p chromulate-header` |
 | Cookie `store` into a full default jar | 21.9–22.7 µs | **1.32–1.85 µs** | `cargo bench -p chromulate-cookie` |
 | `Body::collect`, 16 MiB, length declared | 1.62 ms | **492 µs (31.7 GiB/s)** | `cargo bench -p chromulate-core` |
 | 512 pooled connections after 4 MiB bodies, with the 16 KiB buffer cap | ~381 MiB | **~217 MiB** | `BENCH_POOL_BODY=4194304 BENCH_H1_MAX_BUF=16384 --bin memory -- pool 512`; the baseline is the same command without `BENCH_H1_MAX_BUF` |
 | Streaming a 256 MiB body, peak RSS delta | +1.45 MiB | **+1.39 MiB** | `--bin memory -- stream` |
+
+**The byte figure has moved twice, and the row above only ever tracked one of them.**
+Re-measured on 2026-08-08, three runs, byte-identical each time:
+
+| tree | allocs | bytes |
+|---|---:|---:|
+| what this table published until 2026-08-08 | 48 | 20,855 |
+| `9cf0d05`, measured | 48 | 20,807 |
+| after the challenge layer's two `ResponseInfo` fields | 48 | **20,895** |
+
+So the published figure was already 48 bytes stale before this change touched anything —
+found only because someone re-measured the baseline instead of trusting the row, which is
+the release rule in this project's `CLAUDE.md` doing its job on the document that records
+performance claims.
+
+The +88 the challenge layer adds decomposes as +32 and +56, and the split is the useful
+part: `http::Extensions` boxes its values, so the one `ResponseInfo` box grows by two
+`Option<Arc<…>>`; and `Engine::exchange` boxes `run()`'s future, so the two new locals grow
+that frame. A variant that boxes the chain recovers 16 of the 56 and buys them with an extra
+allocation on the redirect path, so it was rejected. **The allocation count does not move**
+— 48 before and after, which is the figure `README.md`, this table and section 10 of the
+design document all publish, and the metric this project treats as the published one.
 
 Two honesty notes. The throughput confirmation runs were taken on a noisier machine than
 the baseline day; the paired-median design absorbs that, and two independent runs agree,

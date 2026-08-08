@@ -1,0 +1,28 @@
+[package]
+name = "chromulate-challenge"
+description = "Bot-challenge detectors for Chromulate: the laws behind the engine's detection seam."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+chromulate-core.workspace = true
+# The seam, not a policy: `ChallengeDetector`, `Observation`, `Detection` and
+# `Challenge` live in the engine so that a build wanting none of this still has
+# the trait, and this crate is one implementation behind it. The dependency
+# points this way and only this way — `chromulate-http` must never depend on
+# this crate, dev-dependencies included, or the trait and its implementation
+# become a cycle.
+chromulate-http.workspace = true
+
+http.workspace = true
+
+[dev-dependencies]
+url.workspace = true
+
+[lints]
+workspace = true

@@ -2153,6 +2153,52 @@ toward an unverifiable goal produces a codebase where nobody can tell whether a 
 things better or worse. The project's scope boundary (`CLAUDE.md:167-172`) says the same in
 one paragraph.
 
+#### 13.4.1 Where the challenge layer sits, and why it is not an exception
+
+The challenge detection and browser-handoff layer (`chromulate-http`'s `challenge` module,
+`ChallengeHandoff`, and the detectors in `chromulate-challenge`) looks at first like it
+crosses the line this section draws. It does not, and the distinction is worth stating
+precisely rather than asserting, because a future contributor will reach for this paragraph
+to justify something that *does* cross it.
+
+**What the layer does is detect, stop, and delegate.** When a response carries the evidence
+of a bot challenge, an installed `ChallengeDetector` says so; a `BrowserFallback` that the
+caller chose and installed is handed the target, the profile's user agent, the proxy exit
+and the cookies for that route; and whatever it returns is applied and the request re-run.
+Chromulate solves nothing. It reports that it cannot proceed, which is the honest thing for
+a library whose section 1.2 says a page requiring script execution is permanently out of
+reach.
+
+Three reasons this stays inside the boundary:
+
+1. **Detection is testable, in exactly the sense this section demands.** "Did this response
+   carry `cf-mitigated: challenge`?" has a verdict a local test produces, and the shipped
+   detector's tests produce it. That is the whole of what Chromulate concludes.
+2. **The signal is the vendor's own.** Cloudflare documents `cf-mitigated: challenge` as the
+   header a client reads to detect a challenge page, documents `challenge` as its only valid
+   value, and documents the retry loop this layer implements. Reading a header a vendor
+   publishes for the purpose is not evasion.
+3. **The solving happens in a real browser the user installed**, under their control, on
+   their decision. Chromulate gains no browser, no dependency on one, and no knowledge of
+   how one works.
+
+**What remains excluded, and this list is the boundary rather than a disclaimer:** no solver
+in this repository — no CAPTCHA service integration, no token minting, no challenge-platform
+script reimplemented or shimmed; no bundled browser; no `stealth` flag on Chromulate's own
+API and no randomisation knob aimed at a classifier; no detector rule arrived at by trial
+against a live classifier — a rule cites a documented signal or a captured response, on the
+same standard section 5 applies to fingerprint constants; and no claim, anywhere, that any
+of this makes a request undetectable. The layer's honest description is that it *stops* when
+challenged.
+
+The shipped `CloudflareDetector` illustrates the standard rather than merely obeying it. It
+carries no body-matching rules — not because they would not work, but because no capture of
+a challenge page exists in this repository to write them against, and the crate's own
+documentation says so where a reader will find it. And it reports
+`ChallengeKind::Unknown` for every detection, because `cf-mitigated` says a challenge
+happened and says nothing about which kind, and guessing the kind would be inventing the
+observation.
+
 ---
 
 ## 14. Engineering review

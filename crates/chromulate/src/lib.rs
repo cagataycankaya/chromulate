@@ -139,10 +139,95 @@ pub mod cookie {
 
 /// Connection pooling, retries, and rate limiting.
 pub mod engine {
+    /// Also [`crate::challenge::Hop`], and deliberately in both places: `Hop` is
+    /// defined beside the detection vocabulary, but the reason a caller needs to
+    /// *name* it is [`ResponseInfo::hops`], which is here. A type you can only
+    /// reach through the module you were not looking in is a type callers
+    /// re-declare.
+    pub use chromulate_http::challenge::Hop;
+    /// The challenge middleware and its cleared-origin callback.
+    ///
+    /// Here rather than in [`crate::challenge`] because this is where the other
+    /// middleware live, and installing one is the same call site as installing
+    /// [`Retry`] or [`RateLimiter`].
+    pub use chromulate_http::middleware::{ChallengeHandoff, Cleared};
     pub use chromulate_http::{
         ConnectionIdentity, Engine, EngineBuilder, EngineConfig, HstsStore, Http2Fidelity, Pool,
         PoolConfig, PoolKey, Protocol, RateLimit, RateLimiter, RequestUrl, ResponseInfo, Retry,
-        RetryOn, RetryPolicy, SessionFactory, UnsupportedSetting,
+        RetryOn, RetryPolicy, RouteSession, SessionFactory, UnsupportedSetting,
+    };
+}
+
+/// Detecting a bot challenge, and handing the page to a browser you installed.
+///
+/// The whole seam is always here — [`ChallengeDetector`](challenge::ChallengeDetector)
+/// and [`BrowserFallback`](challenge::BrowserFallback), the
+/// [`Observation`](challenge::Observation) a detector reads, and the
+/// [`Handoff`](challenge::Handoff) / [`Handback`](challenge::Handback) pair a
+/// fallback speaks. Writing either half against a browser this project has never
+/// heard of needs no feature. `CloudflareDetector`, the one shipped detector,
+/// arrives with the `challenge-detectors` feature, which pulls in
+/// `chromulate-challenge`.
+///
+/// # This does not clear challenges by itself
+///
+/// Chromulate cannot execute JavaScript and does not pretend to. What the seam
+/// does is notice a challenge, name it precisely, and hand it to something the
+/// caller chose — a real browser, a service, a queue a person works through. No
+/// solver ships here, no browser is bundled, and there is no flag that makes a
+/// request undetectable. A client with a detector installed and no fallback
+/// stops at the challenge, which is the honest outcome and a supported one.
+///
+/// # Installing it
+///
+/// By hand, as a middleware, for this release. There is deliberately no
+/// `ClientBuilder::challenge(...)`: a builder method is permanent public surface
+/// and the measurement that would say what its arguments should be has not been
+/// run. See [`crate::engine::ChallengeHandoff`].
+///
+/// # Writing a detector without enabling anything
+///
+/// This example is compiled under the crate's **default** features, which do not
+/// include `challenge-detectors`. That is the point of it: if the seam ever stops
+/// being reachable without the feature, this stops compiling.
+///
+/// ```
+/// use chromulate::challenge::{
+///     Challenge, ChallengeDetector, ChallengeKind, Detection, Evidence, Observation,
+/// };
+///
+/// /// One header the vendor documents, and no conclusion it did not state.
+/// #[derive(Debug)]
+/// struct Mitigated;
+///
+/// impl ChallengeDetector for Mitigated {
+///     fn inspect(&self, observation: &Observation<'_>) -> Detection {
+///         if observation.headers().get("cf-mitigated").map(|v| v.as_bytes())
+///             != Some(b"challenge".as_slice())
+///         {
+///             return Detection::Clear;
+///         }
+///         Detection::Challenged(Challenge::new(
+///             ChallengeKind::Unknown,
+///             observation.origin().clone(),
+///             Evidence::from_signal("cf-mitigated: challenge"),
+///         ))
+///     }
+/// }
+/// ```
+///
+/// Note what is *not* in that example: no `Origin::of`, and so no error branch
+/// for a URL that cannot have one. The origin arrives with the observation. Note
+/// also [`ChallengeKind::Unknown`](challenge::ChallengeKind::Unknown) rather than
+/// a guess — `cf-mitigated: challenge` proves a challenge happened and says
+/// nothing about which kind, and inventing the kind would be inventing a fact.
+pub mod challenge {
+    #[cfg(feature = "challenge-detectors")]
+    pub use chromulate_challenge::{CloudflareDetector, cloudflare};
+    pub use chromulate_http::challenge::{
+        BrowserFallback, Challenge, ChallengeDetector, ChallengeKind, ChallengeKinds, Content,
+        DeclineReason, Detection, Evidence, FallbackIdentity, Handback, Handoff, HandoffPolicy,
+        Hop, Observation, ProxyExit,
     };
 }
 

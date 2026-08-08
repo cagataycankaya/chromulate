@@ -236,6 +236,61 @@ QUIC.
 This is itself observable: modern Chrome upgrades to HTTP/3 on origins that advertise it
 via `Alt-Svc`, and Chromulate stays on HTTP/2.
 
+## The browser handoff, and what it does to the identity
+
+The challenge layer hands a request to a browser the caller installed and applies what
+comes back. Four things about that are worth stating here rather than leaving to be
+discovered, because they are properties of the *identity* and this is the document that
+tracks those.
+
+**A handed-off session is discontinuous, and only on one of the two paths.**
+`Handback::Session` returns cookies minted by the fallback's TLS and JavaScript surface,
+which Chromulate then presents over its own. Those are two different browsers sharing one
+session. The user agent is forced to agree — `Handoff` carries the profile's, and a
+fallback that ignores it is a broken implementation — but nothing else is: the fallback's
+ClientHello, its JA3 and JA4, its HTTP/2 preface and its script-visible surface are its
+own. `Handback::Content` has no such gap: the page was fetched by the browser and is
+returned as the browser's, nothing is replayed across identities, and the arm exists partly
+for that reason.
+
+This narrows but does not close if the BoringSSL work in roadmap Phase 5 lands and a caller
+picks a fallback emulating the same Chrome build. It is not closed by anything in this
+wave.
+
+**`Accept-CH` grants and stored validators are not handed over**, in either direction. The
+fallback learns hints Chromulate will not send; Chromulate holds grants the fallback never
+sees.
+
+**TLS session tickets remain shared across proxy exits.** That was already true and is
+documented on `ProxyIsolation`; it is repeated here because a reader reasoning about
+linkability across a handoff will want it in view. Cookies and client-hint grants *are*
+split per exit, and a handback is applied to the route's session rather than to a jar, so
+the split holds through the handoff by construction.
+
+**The detector's coverage is exactly its rule list, and no more.** `CloudflareDetector`
+reads `cf-mitigated: challenge`, a header Cloudflare documents for this purpose, and
+corroborates with `cf-ray` and the status code. It ships **no body-matching rules**, because
+no capture of a challenge page exists in this repository to write them against — the same
+standard section 5 of the design document applies to fingerprint constants. It reports
+`ChallengeKind::Unknown` for every detection, because the header says a challenge happened
+and says nothing about which kind. This is not a general bot-wall detector and must not be
+described as one.
+
+**With a rotating proxy provider, the retry may not leave through the exit that earned the
+clearance.** `Connector::route` selects a proxy per hop and nothing in a request can pin
+one, so under `RoundRobin` the re-run after a successful handoff can go out a different
+exit, find no clearance in that exit's jar, and be challenged again — the handoff performed
+correctly and the budget spent for nothing. `Single`, no proxy, and any sticky provider are
+unaffected. This is recorded as an open requirement in roadmap Phase 9 rather than as a
+defect to be discovered, and `ChallengeHandoff`'s own documentation says it where someone
+configuring a pool will read it.
+
+**Nothing here has been measured against a live challenge.** The probe that would answer
+whether a clearance survives replay under Chromulate's TLS identity
+(`chromulate-bench --bin challenge_probe`) is written and has never run, because no
+fallback browser is installed on the machine this was developed on. Its three questions are
+labelled UNMEASURED in the roadmap and they are unmeasured here too.
+
 ## What this crate is for, and is not
 
 Chromulate reproduces standards-compliant browser networking behaviour so that crawlers,
