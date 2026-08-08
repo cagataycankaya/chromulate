@@ -4,8 +4,10 @@
 //! cannot be — see its module documentation for why, and
 //! [`crate::EngineBuilder::retry`] for how it is installed instead.
 
+pub mod challenge;
 pub mod rate_limit;
 pub mod retry;
 
+pub use challenge::{ChallengeHandoff, Cleared};
 pub use rate_limit::{RateLimit, RateLimiter, middleware_error};
 pub use retry::{Retry, RetryOn, RetryPolicy, Retrying};

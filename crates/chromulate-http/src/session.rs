@@ -237,6 +237,71 @@ impl fmt::Debug for Session {
     }
 }
 
+/// One route's server-taught state, as much of it as a caller outside this
+/// crate may reach.
+///
+/// This is what [`crate::Engine::with_session`] hands its closure. It borrows,
+/// so it cannot be stored, cloned into a task, or held across an `.await`.
+///
+/// # Why a view rather than the engine's own `Session`
+///
+/// `Session` is crate-private, and deliberately — it is named here without a
+/// doc link because linking a public item's documentation to a private one is
+/// a `cargo doc` error under `-D warnings`, which this project treats as a
+/// pre-push check.
+///
+/// It is the engine's own working type. Its accessors are shaped for the
+/// request path, one of them exists only under the `validator-store` feature,
+/// and exporting it would make that cargo feature part of this crate's public
+/// API — a caller's code would compile or not depending on a feature someone
+/// else enabled. It is also the type the per-route map stores, so publishing it
+/// would freeze the map's element type. A view exposes what an outside caller
+/// has a reason to touch and grows one method at a time.
+///
+/// # Why it borrows
+///
+/// `Sessions::for_route` returns an owned handle today, so nothing here is
+/// holding a lock. That is an implementation detail this type deliberately does
+/// not promise: a borrow that cannot escape the closure means `for_route` may
+/// go back to returning a guard without the change being visible to callers. A
+/// returned guard is a lock a caller can hold across an `.await`, at which point
+/// the worker stops answering so completely that a `tokio::time::timeout`
+/// around the request never fires — the failure that reshaped
+/// [`crate::Engine::with_hsts`] into a closure. Keeping the shape means never
+/// having to discover it twice.
+pub struct RouteSession<'a> {
+    session: &'a Session,
+}
+
+impl<'a> RouteSession<'a> {
+    pub(crate) fn new(session: &'a Session) -> Self {
+        Self { session }
+    }
+
+    /// The cookies this route has been taught, or `None` for an engine that
+    /// keeps none.
+    ///
+    /// This is the store the origin's `Set-Cookie` headers went into for this
+    /// exit, which is what makes it the only correct destination for session
+    /// state earned through the same exit by something other than this engine —
+    /// a clearance cookie a browser obtained, say. Putting that in another
+    /// route's jar tells the origin the two exits are one client, which is
+    /// worse than not rotating at all and silent when it happens; see
+    /// [`ProxyIsolation`].
+    #[must_use]
+    pub fn cookies(&self) -> Option<&'a Arc<dyn CookieStore>> {
+        self.session.cookies.as_ref()
+    }
+}
+
+impl fmt::Debug for RouteSession<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RouteSession")
+            .field("cookies", &self.session.cookies.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 /// A session borrowed from the engine, or one taken out of the per-route map.
 ///
 /// The borrowed arm is the common case by a wide margin — every request of an
@@ -331,6 +396,20 @@ impl Isolated {
         );
         self.evict(&mut routes);
         session
+    }
+
+    /// The session already filed under `proxy`, or `None`, without inserting.
+    ///
+    /// The hit still ticks `last_use_seq`. Looking at a route *is* a use, and a
+    /// caller inspecting one exit should not find it evicted next because
+    /// inspection did not count — the same reasoning `ValidatorStore` and the
+    /// cookie jar apply when they record a hit under a read lock.
+    fn existing(&self, proxy: &Arc<str>) -> Option<Arc<Session>> {
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        let routes = self.read();
+        let entry = routes.get(proxy.as_ref())?;
+        entry.last_use_seq.store(seq, Ordering::Relaxed);
+        Some(Arc::clone(&entry.session))
     }
 
     fn mint(&self) -> Session {
@@ -467,6 +546,27 @@ impl Sessions {
             return SessionRef::Base(&self.base);
         };
         SessionRef::Route(isolated.session_for(proxy))
+    }
+
+    /// The session already filed under `proxy`, if there is one, without
+    /// creating it.
+    ///
+    /// The counterpart to [`Sessions::for_route`], which mints. Three cases,
+    /// and the middle one is the reason this exists:
+    ///
+    /// - `proxy` is `None` — always `Some`. The unproxied session is not filed
+    ///   under a label; it is the one the engine was built with.
+    /// - a label under [`ProxyIsolation::Shared`] — always `None`. Nothing is
+    ///   filed under a label at all, so answering with the shared session would
+    ///   be telling a caller that the exit they named has state of its own.
+    /// - a label under [`ProxyIsolation::PerProxy`] — `Some` only if that exit
+    ///   has been served, or seeded, and has not been evicted since.
+    pub(crate) fn existing_route(&self, proxy: Option<&Arc<str>>) -> Option<SessionRef<'_>> {
+        let Some(proxy) = proxy else {
+            return Some(SessionRef::Base(&self.base));
+        };
+        let isolated = self.isolated.as_ref()?;
+        isolated.existing(proxy).map(SessionRef::Route)
     }
 
     pub(crate) fn isolation(&self) -> ProxyIsolation {

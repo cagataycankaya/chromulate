@@ -7,6 +7,107 @@ that breaking changes may land in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **A challenge detection and browser-handoff layer.** When a response carries the evidence
+  of a bot challenge, an installed detector says so, a browser the caller chose is handed
+  the work, and whatever session state it earns is applied before the request is re-run.
+  Chromulate solves nothing itself and gains no browser: it detects, stops, and delegates.
+  Section 13.4.1 of the design document argues why that is inside the project's scope
+  boundary and lists what stays out.
+
+  The seam is `chromulate_http::challenge` and is **always compiled** — a caller writing
+  their own `ChallengeDetector` or `BrowserFallback` needs no feature flag, the same way
+  `ConcurrencyController` works. It carries `Observation` (what a response was, with no
+  conclusion drawn), `Detection` (`Clear` / `Suspect` / `Challenged`), `Challenge`,
+  `ChallengeKind`, `Handoff`, `Handback`, `HandoffPolicy` and `Hop`. `ChallengeHandoff` is
+  the middleware; install it with `ClientBuilder::middleware`. There is deliberately no
+  `ClientBuilder::challenge()` yet — see the roadmap's Phase 9 for what has to be measured
+  first.
+
+  `Detection` has three arms rather than two so that body inspection stays off the default
+  path: header-only detection settles Cloudflare's documented case at zero body bytes, and
+  only `Suspect` buys a bounded read. `Handback` is an enum rather than a struct of
+  options, because `Session` (state acquired, request re-run) and `Content` (the browser
+  fetched the page, nothing replayed across identities) have different contracts and a
+  caller must not be able to mistake one for the other.
+
+- **`chromulate-challenge`, a new crate holding the detectors.** `CloudflareDetector` reads
+  `cf-mitigated: challenge`, corroborates with `cf-ray` and the status code, and matches
+  body markers taken from captured responses. It reports `ChallengeKind::Unknown` for every
+  detection, because nothing it reads says which kind. Behind the facade's off-by-default
+  `challenge-detectors` feature. The dependency runs one way only, as with
+  `chromulate-concurrency`: this crate depends on `chromulate-http` for the seam and
+  `chromulate-http` depends on it in no form.
+
+  **The body rules exist because the header rule was measured and found insufficient**, and
+  the sequence is worth recording rather than smoothing over. The crate first shipped with
+  the header rule alone and no body rules at all, on the correct-at-the-time ground that no
+  capture existed to write them against. Three origins were then fetched live:
+  `incehesap.com` serves the Cloudflare JavaScript interstitial as a **200 with no
+  `cf-mitigated` header**, which the header-only detector reported as `Clear` — missing the
+  exact case the layer is for, and missing it silently. The rule had come from Cloudflare's
+  documentation rather than from an observed response.
+
+  **A block is not a challenge**, and the detector now distinguishes them. `n11.com` returns
+  a Cloudflare WAF block — `Attention Required!`, "Sorry, you have been blocked" — which no
+  browser can clear, because the client has been refused rather than tested; handing one to
+  a fallback would launch a browser and spend the handoff budget for nothing. The block
+  check runs first and unconditionally, so a later body rule cannot broaden into it.
+
+  Both responses are captured in `crates/chromulate-challenge/tests/data/` with provenance,
+  and the rules are tested against those bytes rather than against invented strings.
+
+- **`ResponseInfo::hops` and `ResponseInfo::exit`**, with `Response::hops()` and
+  `Response::exit()` on the facade. A caller can now see the redirect chain a request
+  actually took and which proxy exit answered. `exit()` returns the `Arc<str>` the engine
+  filed the session under, so it composes with `Client::with_session` without anything
+  built in between; deriving the label by any other route is how a caller reaches the
+  wrong session.
+
+- **`Engine::with_session` / `Client::with_session`** (read, never mints, `#[must_use]`) and
+  **`Engine::seed_session` / `Client::seed_session`** (mints, and may evict at the
+  `max_routes` ceiling). Under `ProxyIsolation::PerProxy`, `Client::cookies()` returns the
+  jar used by unproxied requests — which on a fully proxied client is none of them — so
+  until now a caller running a proxy pool had no way to inspect or seed the cookies their
+  routes actually use. Split into two methods because a read that silently mints is a read
+  that can evict a live session on a typo.
+
+- **`chromulate-bench --bin challenge_probe`**, a harness for the three questions the layer
+  is gated on: whether a browser fallback clears a non-interactive challenge, whether the
+  clearance still works when Chromulate replays it, and what a solve costs. **It has never
+  run** — no fallback browser was installed on the development machine — so all three are
+  `UNMEASURED`. It refuses a proxy URL on argv (credentials would be visible in `ps`) and
+  aborts rather than measuring if it cannot prove the proxy took effect.
+
+- **Roadmap Phase 9**, status `Speculative`, recording what shipped and what the probe has
+  to answer before the phase can complete.
+
+### Changed
+
+- **`ResponseInfo` gains two public fields and `#[non_exhaustive]` (breaking).** Code
+  constructing it by struct literal will no longer compile; nothing in this workspace did,
+  and the type is produced by the engine rather than by callers. It is `#[non_exhaustive]`
+  now so the next field is not a third break.
+
+  **Allocation count is unmoved at 48 per steady-state request**, which is the figure
+  `README.md`, `docs/performance.md` and section 10 of the design document publish. Bytes
+  per request go from 20,807 to **20,895** (+88), measured three runs each, byte-identical:
+  +32 because `http::Extensions` boxes its values and the one `ResponseInfo` box grows by
+  two `Option<Arc<…>>`, and +56 because `Engine::exchange` boxes `run()`'s future and the
+  two new locals grow that frame. A variant boxing the chain recovers 16 of the 56 at the
+  cost of an allocation on the redirect path, and was rejected.
+
+- **`docs/performance.md` published 20,855 bytes per request and the real figure at
+  `9cf0d05` was 20,807.** The table was 48 bytes stale before any of the above touched it,
+  found only because the baseline was re-measured rather than trusted. Corrected, with all
+  three trees tabulated.
+
+- **`Response` no longer discards `ResponseInfo`.** It previously removed the extension and
+  kept only `url` and `timings`, with a comment claiming the facade was the extension's one
+  consumer. That was true when written and stopped being true the moment the two fields
+  above were added; `into_inner()` could not recover them either.
+
 ## [0.3.0] — 2026-08-08
 
 ### Added

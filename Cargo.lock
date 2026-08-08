@@ -290,6 +290,7 @@ version = "0.3.0"
 dependencies = [
  "base64 0.23.0",
  "bytes",
+ "chromulate-challenge",
  "chromulate-compression",
  "chromulate-concurrency",
  "chromulate-cookie",
@@ -352,6 +353,16 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "url",
+]
+
+[[package]]
+name = "chromulate-challenge"
+version = "0.3.0"
+dependencies = [
+ "chromulate-core",
+ "chromulate-http",
+ "http",
  "url",
 ]
 

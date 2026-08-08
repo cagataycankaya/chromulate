@@ -13,6 +13,7 @@ members = [
     "crates/chromulate-proxy",
     "crates/chromulate-tls",
     "crates/chromulate-http",
+    "crates/chromulate-challenge",
     "crates/chromulate-concurrency",
     "crates/chromulate-h3",
     "crates/chromulate-cli",
@@ -46,6 +47,7 @@ chromulate-dns = { version = "0.3.0", path = "crates/chromulate-dns" }
 chromulate-proxy = { version = "0.3.0", path = "crates/chromulate-proxy" }
 chromulate-tls = { version = "0.3.0", path = "crates/chromulate-tls" }
 chromulate-http = { version = "0.3.0", path = "crates/chromulate-http" }
+chromulate-challenge = { version = "0.3.0", path = "crates/chromulate-challenge" }
 chromulate-concurrency = { version = "0.3.0", path = "crates/chromulate-concurrency" }
 chromulate = { version = "0.3.0", path = "crates/chromulate", default-features = false }
 

@@ -13,6 +13,7 @@ categories.workspace = true
 readme = "../../README.md"
 
 [dependencies]
+chromulate-challenge = { workspace = true, optional = true }
 chromulate-compression.workspace = true
 chromulate-concurrency = { workspace = true, optional = true }
 chromulate-cookie.workspace = true
@@ -83,6 +84,29 @@ early-stop = ["chromulate-http/early-stop"]
 # with a controller of the caller's own whether or not this is on. The name is
 # kept for callers who already wrote it in a manifest.
 adaptive-concurrency = ["dep:chromulate-concurrency"]
+# The shipped challenge detectors in `chromulate-challenge`, re-exported as part
+# of `chromulate::challenge`. Off by default, and enabling it changes nothing on
+# its own: a detector still has to be installed, and no middleware is installed
+# for you.
+#
+# Named for what it gates. `adaptive-concurrency` above is the cautionary tale:
+# its own comment records that the name no longer describes what it does and is
+# kept only because callers had already written it in a manifest. This one was
+# `challenge` for exactly as long as it took to notice the same defect being
+# minted a second time, which was before any caller could depend on it.
+#
+# What it does **not** gate is the seam. `ChallengeDetector`, `BrowserFallback`,
+# `Observation`, `Handoff` and `Handback` come from `chromulate-http` and are
+# always present, exactly as `ConcurrencyController` is — so a caller writing
+# their own detector, or their own fallback against a browser this project has
+# never heard of, needs no feature at all. Turning this on buys the detectors
+# someone else already wrote, and nothing else.
+#
+# There is deliberately no `ClientBuilder::challenge(...)`: the middleware is
+# installed by hand for this release. A builder method is permanent public
+# surface, and the measurement that would tell us what its arguments should be
+# has not been run.
+challenge-detectors = ["dep:chromulate-challenge"]
 # Tests that reach the public internet. Off by default so `cargo test
 # --workspace` stays hermetic.
 network-tests = []

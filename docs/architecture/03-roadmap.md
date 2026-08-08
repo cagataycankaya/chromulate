@@ -1,6 +1,6 @@
 # Chromulate Roadmap
 
-Revision of 2026-08-04. Companion to
+Revision of 2026-08-08. Companion to
 [`02-chromulate-design.md`](02-chromulate-design.md).
 
 This roadmap describes what exists, what is being built right now, what comes next, and
@@ -26,6 +26,7 @@ dependency, and each is small enough to finish.
 - [Phase 6: HTTP/2 wire fidelity](#phase-6-http2-wire-fidelity)
 - [Phase 7: Performance](#phase-7-performance)
 - [Phase 8: Ecosystem and long term](#phase-8-ecosystem-and-long-term)
+- [Phase 9: Challenge detection and browser handoff](#phase-9-challenge-detection-and-browser-handoff)
 - [What is deliberately not on this roadmap](#what-is-deliberately-not-on-this-roadmap)
 
 ---
@@ -510,6 +511,211 @@ for the percentage.
 
 ---
 
+## Phase 9: Challenge detection and browser handoff
+
+**Status: Speculative — and the thing it depends on has not been measured.**
+
+Speculative here does not mean unwritten. The seam, the middleware, one detector, the
+facade wiring and the measurement harness are all in the repository and tested. What is
+speculative is whether the *interesting half* of the design can work at all, and the
+experiment that would settle it has never been run: it needs a browser automation tool
+installed on the machine, and none is. `which obscura` finds nothing, checked while writing
+this section on 2026-08-08.
+
+So the honest reading of this phase is the one Phase 5 gives of the TLS ceiling. Phase 5
+publishes the three signature-algorithm code points no BoringSSL build emits, rather than
+describing a full JA4 match it cannot deliver. This phase publishes the equivalent: a
+question marked `UNMEASURED`, and a design that already survives either answer.
+
+### What shipped
+
+- **The seam**, in `chromulate-http`'s `challenge` module
+  (`crates/chromulate-http/src/challenge.rs`, `lib.rs:62`). `ChallengeDetector` and
+  `BrowserFallback`, the `Observation` a detector reads, and the `Handoff`/`Handback` pair a
+  fallback speaks. Always compiled, no feature gate, on the `ConcurrencyController`
+  precedent: a trait that exists only when a feature is on is one a third-party implementor
+  cannot rely on.
+- **The middleware.** `ChallengeHandoff` (`crates/chromulate-http/src/middleware/challenge.rs:302`,
+  `impl Middleware` at `:597`) and the `Cleared` callback (`:137`). `Cleared` is the answer to
+  a `403` challenge freezing an origin's adaptive concurrency permanently: the `403` freeze is
+  deliberately not configurable and `AdaptiveConcurrency::forget` is the documented way out
+  (`crates/chromulate-concurrency/src/adaptive.rs:71-74`), so the layer calls back rather than
+  teaching the controller what a challenge is. It fires only after session state was applied
+  and the re-run came back clear — never on a browser-fetched page, where the origin is still
+  refusing this client.
+- **One detector.** `CloudflareDetector` in `chromulate-challenge`
+  (`crates/chromulate-challenge/src/cloudflare.rs:144`), reading `cf-mitigated: challenge`,
+  a header the vendor documents for the purpose.
+- **The facade.** `chromulate::challenge` (`crates/chromulate/src/lib.rs:224`), with the seam
+  unconditional and the shipped detector behind the off-by-default `challenge-detectors`
+  feature (`crates/chromulate/Cargo.toml:109`). The feature gates the detectors, not the
+  seam: writing a detector or a fallback of one's own needs no feature.
+- **Two engine facts a middleware could not previously reach.** `ResponseInfo` gained
+  `hops` and `exit` (`crates/chromulate-http/src/engine.rs:154`, `:170`), and the struct is
+  now `#[non_exhaustive]` (`:132`) so the next fact it learns to report is not a source
+  break. `exit` matters more than it looks: it is the same label the per-route session map is
+  keyed by, so a clearance earned through one proxy exit lands in that exit's jar and no
+  other — the rule in `CLAUDE.md` about server-taught state, holding by construction rather
+  than by being remembered.
+- **Reaching that state.** `Engine::with_session` (`engine.rs:1142`) and
+  `Client::with_session` (`crates/chromulate/src/client.rs:209`), in the closure shape
+  `with_hsts` established so that no guard escapes across an await.
+- **The measurement harness**, `crates/chromulate-bench/src/bin/challenge_probe.rs`. It is a
+  harness, not a measurement, and says so in its own first lines (`:16-21`): with no browser
+  tool reachable it prints `UNMEASURED` for all three questions and exits cleanly rather than
+  inventing numbers. What it does verify without one is its own JSON-to-`CookieRecord`
+  mapping, against a shape read from the vendor's source rather than guessed from its docs.
+
+### The open question, which decides whether this phase can ever complete
+
+**Q2 of the probe (`challenge_probe.rs:9-11`): is a clearance cookie bound to the TLS
+identity that earned it, or only to the address and the user agent?**
+
+A clearance is minted in the fallback's browser — its TLS fingerprint, its HTTP/2 settings,
+its script environment — and replayed under Chromulate's rustls identity. The handoff carries
+the exit and mandates the user agent, so those two match. The TLS identity cannot be made to
+match, and no amount of design work here changes that.
+
+If the answer is "address and user agent", `Handback::Session`
+(`crates/chromulate-http/src/challenge.rs:1050`) works: the browser earns a cookie, Chromulate
+applies it to the right route, and the original request is re-run through the normal engine.
+**If the answer is "the TLS identity too", that arm is dead** and only `Handback::Content`
+(`:1071`) survives — the browser fetched the page, Chromulate returns it, and nothing is
+replayed, resumed or mixed.
+
+The two-arm split exists because of this question rather than in spite of it. An earlier draft
+carried the page as an `Option` beside the cookies, which ranked them the wrong way round: the
+session path is the one gated on an unmeasured question and the content path is the one that
+cannot fail. Split, the layer is useful whichever way Q2 lands, and the identity
+discontinuity is scoped to the arm that has it — which is why `Handback::Session` carries a
+`FallbackIdentity` recording who minted the cookies, at the point where the mismatch is
+created rather than only in a document.
+
+### The first live observation, 2026-08-08, and what it cost
+
+The layer shipped before anything real had been looked at. Three Turkish e-commerce
+origins were then fetched, one `GET` each through `chromulate get`, and the result
+corrected the detector rather than confirming it.
+
+| origin | status | `cf-mitigated` | body | what the shipped detector said |
+|---|---|---|---|---|
+| `incehesap.com` | **200** | absent | `<title>Just a moment...</title>` | **`Clear` — missed it** |
+| `n11.com` | 403 | absent | `Attention Required! \| Cloudflare` | `Suspect`, then `Clear` |
+| `teknosa.com` | 200 | absent | 385 KB of real content | `Clear`, correctly |
+
+**The first row is the finding.** `incehesap.com` serves the Cloudflare JavaScript
+interstitial — the precise case this phase exists for — as a **200 with no `cf-mitigated`
+header**. The detector's primary rule came from Cloudflare's documentation, which states
+the header is set for all Challenge Page types; the wire disagrees for this deployment.
+The `Suspect` rule then required a 403 or 503, so a 200 interstitial never reached a body
+read at all. The failure was silent: a caller receives a 200 whose body is the challenge
+page and nothing indicates it.
+
+**The second row is a different thing that must not be confused with the first.**
+`n11.com` returns a Cloudflare **WAF block**, not a challenge. A browser cannot clear it;
+Cloudflare has refused the client and executing script does not change that. Handing it to
+a fallback would launch a browser and spend the budget for nothing, so a detector that
+cannot tell a block from a challenge is worse than one that detects neither.
+
+Both responses are now captured in `crates/chromulate-challenge/tests/data/`, with
+provenance, and the detector's rules are written against them rather than against
+documentation. That is the standard section 5 of the design document applies to fingerprint
+constants, and it should have applied here from the start: **the detector was shipped
+unverified, and calling its rule "documented" concealed that no response had ever been
+observed.**
+
+The general form, worth carrying past this phase: a vendor's documentation describes the
+intended behaviour of a service that changes without notice, and is a hypothesis about the
+wire. This project already knows that — Phase 5 records a feasibility verdict read out of a
+vendored header that was exactly backwards. The same mistake, in a different file, one
+phase later.
+
+### An open requirement found while building: nothing pins the retry to the exit
+
+Gap B of the design plan said server-taught state must be keyed by the exit it was taught
+through, and named two halves: the browser must leave through the same proxy, and the
+cookie must land in that exit's jar. Both shipped. **A third half was missed, and it is not
+closed.**
+
+`Connector::route` takes an origin and nothing else (`crates/chromulate-http/src/connect.rs:168-181`),
+calls `ProxyProvider::next()` once per hop, and no request can pin an exit. So with
+`RoundRobin` — the rotating provider this workspace ships, and the configuration
+`ProxyIsolation::PerProxy` exists to serve — the sequence is: the request leaves through
+exit A and is challenged; the browser is correctly handed exit A and earns a clearance for
+A's address; the clearance is correctly filed in A's jar; and then **the retry calls
+`next()` again, leaves through exit B, finds no clearance there, and is challenged again**.
+The handoff was performed correctly and the budget was spent for nothing.
+
+It was found the way such things should be: the exit test needed a `PinnedExits` provider
+written for it, because with `RoundRobin` the test would have been measuring the provider.
+A test that has to replace a shipped component to observe a property is saying the property
+does not hold with the shipped component.
+
+Two candidate fixes, and choosing between them is what makes this an open requirement
+rather than an oversight. A request extension the connector honours — "use this exit, do
+not select" — is the smaller change, but it needs answers for whether a pinned exit
+bypasses `no_proxy` and what happens when the pinned exit has left the pool. A sticky
+per-origin provider is the other, and it is `chromulate-proxy`'s decision rather than this
+crate's. Neither is a one-line adjustment and neither was made.
+
+It does not bite a caller using `Single`, no proxy at all, or any sticky provider of their
+own. `ChallengeHandoff`'s documentation states the limitation where someone configuring a
+proxy pool will read it.
+
+### Definition of done
+
+This phase is **Done** when all of the following hold, and not before. Each is checkable
+without asking the author what they meant.
+
+0. **The retry leaves through the exit that earned the clearance**, by whichever of the two
+   fixes above is chosen, with a test that observes it using the *shipped* rotating
+   provider rather than a stand-in.
+
+1. **Q1, Q2 and Q3 have run** against a real browser tool, with the numbers and the run
+   counts written into this document — n ≥ 10 for the clearance rate, n ≥ 3 for wall clock
+   and peak RSS. `UNMEASURED` is removed only by measurement, not by confidence.
+2. **Q2's answer is recorded either way**, including the outcome where `Handback::Session`
+   is dead. That outcome completes this phase; it does not fail it. What would fail it is
+   shipping the arm without knowing.
+3. **The hermetic suite covers the properties in the design plan's test section** — no
+   fallback installed is a byte-identical no-op; a `403` that is not a challenge does not
+   hand off; no proxy means no exit path; both `ProxyIsolation` modes; a clearance earned on
+   exit B lands in exit B's jar and leaves exit A's untouched; ten concurrent challenged
+   requests launch one browser; an always-challenging origin performs exactly *N* handoffs
+   and stops; a streaming POST is not handed off. Verify with `cargo test -p chromulate-http
+   --test challenge_layer` and `cargo test -p chromulate-http --lib challenge`.
+4. **Detection and handoff go red independently.** Reverting the detector alone fails a
+   test, and reverting the handoff alone fails a different one — the rate-limiter lesson in
+   `CLAUDE.md`, where a two-layer fix stayed green under either single revert because one
+   layer was untested and the other unreachable.
+5. **The allocation count has not moved** on a request that is not challenged and does not
+   redirect: `cargo run --release -p chromulate-bench --bin allocs`. `ResponseInfo::hops` is
+   an `Option<Arc<[Hop]>>` and is `None` rather than an empty slice precisely so this holds.
+
+As of 2026-08-08, criterion 5 is the engine change's own gate and criteria 3 and 4 are being
+written; 1 and 2 are blocked on a machine with a browser tool on it.
+
+### Deliberately not in this phase
+
+- **No adapter for any specific browser tool.** Writing one before the probe reports would
+  invert the order this phase exists to protect: the adapter's shape depends on Q2's answer,
+  and building it first would mean discovering the answer by finding out the code was wrong.
+- **No CDP route.** Driving a long-lived browser over the Chrome DevTools Protocol would
+  amortise startup across solves, which matters only if solves are frequent enough to notice
+  — a question Q3 answers and nothing else does.
+- **No body-matching detection rules.** `CloudflareDetector` reads headers only. Not because
+  a `<title>Just a moment…` rule would not work, but because no capture of a challenge page
+  exists in this repository to write one against, and a detection rule is held to the
+  standard Phase 1 holds a fingerprint constant to: captured, never invented. The seam already
+  carries the mechanism — `Detection::Suspect` buys a bounded body read — so adding rules
+  later needs a capture, not a redesign.
+
+This phase is inside the scope boundary rather than an exception to it, for reasons the design
+document sets out at [§13.4.1](02-chromulate-design.md). The short form: the layer detects,
+stops, and delegates to a browser the caller installed. It solves nothing.
+
+---
+
 ## What is deliberately not on this roadmap
 
 A JavaScript engine, a DOM, or any form of rendering. These are permanent exclusions, not
@@ -518,6 +724,16 @@ unscheduled work.
 Anything whose purpose is to avoid detection. The design document's section 13.4 gives the
 engineering argument: fidelity to a capture is testable and undetectability is not, so
 building toward the latter produces a codebase where nobody can tell whether a change helped.
+
+[Phase 9](#phase-9-challenge-detection-and-browser-handoff) is not an exception to that
+sentence, and the sentence is not weakened by it. Noticing a challenge is a testable claim —
+"did this response carry `cf-mitigated: challenge`?" has a verdict a local test produces —
+and noticing is the whole of what Chromulate concludes. The solving happens in a browser the
+caller installed, on their decision. What stays excluded is unchanged and is listed as a
+boundary rather than a disclaimer in the design document's
+[§13.4.1](02-chromulate-design.md): no solver here, no bundled browser, no `stealth` flag, no
+detection rule arrived at by trial against a live classifier, and no claim anywhere that any
+of this makes a request undetectable.
 
 Benchmark comparisons against other HTTP clients. They will not appear in any document
 until someone has run them, and when they do appear they will name the harness, the

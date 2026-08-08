@@ -4,22 +4,27 @@ use std::fmt;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use std::sync::Arc;
+
 use bytes::Bytes;
 use chromulate_core::{
     Body, Error, Result, Timings,
     reexport::{HeaderMap, StatusCode, Url, Version},
 };
-use chromulate_http::ResponseInfo;
+use chromulate_http::{ResponseInfo, challenge::Hop};
 use futures_core::Stream;
 
 #[cfg(feature = "early-stop")]
 pub use chromulate_http::{Prefix, Stop, StopReason};
 
-/// A response, with the URL that produced it and what it cost.
+/// A response, with the URL that produced it, how it got there, and what it
+/// cost.
 pub struct Response {
     inner: chromulate_core::Response,
     url: Url,
     timings: Option<Timings>,
+    hops: Option<Arc<[Hop]>>,
+    exit: Option<Arc<str>>,
     max_size: u64,
 }
 
@@ -29,27 +34,44 @@ impl fmt::Debug for Response {
             .field("status", &self.inner.status())
             .field("version", &self.inner.version())
             // The path and query are omitted: a query string routinely carries
-            // tokens, and `Debug` output ends up in logs.
+            // tokens, and `Debug` output ends up in logs. That is also why the
+            // redirect chain appears as a count rather than as its URLs, and
+            // why the exit may appear in full — a proxy label is redacted by
+            // the time the engine reports it.
             .field("host", &self.url.host_str().unwrap_or_default())
+            .field(
+                "redirects",
+                &self.hops.as_ref().map_or(0, |hops| hops.len()),
+            )
+            .field("exit", &self.exit)
             .finish_non_exhaustive()
     }
 }
 
 impl Response {
     pub(crate) fn new(mut inner: chromulate_core::Response, requested: Url, max_size: u64) -> Self {
-        // The engine records which URL actually answered, which after a
-        // redirect chain is not the one the caller asked for, and how long each
-        // phase took. Taken by value: this facade is the extension's one
-        // consumer.
+        // Everything the engine recorded about how this response was obtained,
+        // taken by value because this facade is the extension's one consumer
+        // and nothing below needs it again.
+        //
+        // Every field is kept. An earlier version destructured out `url` and
+        // `timings` and dropped the rest, which was invisible while those were
+        // the only two — and then `hops` and `exit` were added to the engine
+        // and were silently unreachable from this crate, which is the whole
+        // API for anyone not holding an `Engine`. A field added to
+        // `ResponseInfo` has to be added here too; there is no way to make that
+        // automatic while `url` needs a fallback the others do not have.
         let info = inner.extensions_mut().remove::<ResponseInfo>();
-        let (url, timings) = match info {
-            Some(info) => (info.url, Some(info.timings)),
-            None => (requested, None),
+        let (url, timings, hops, exit) = match info {
+            Some(info) => (info.url, Some(info.timings), info.hops, info.exit),
+            None => (requested, None, None, None),
         };
         Self {
             inner,
             url,
             timings,
+            hops,
+            exit,
             max_size,
         }
     }
@@ -106,6 +128,67 @@ impl Response {
     #[must_use]
     pub fn timings(&self) -> Option<Timings> {
         self.timings
+    }
+
+    /// The redirects that led here, oldest first, or `None` when this response
+    /// was answered without one.
+    ///
+    /// `None` rather than an empty slice, and the difference is load-bearing:
+    /// the engine builds no collection at all for a request that does not
+    /// redirect, so `None` is "there was no chain" rather than "the chain is
+    /// empty". Do not read `Some(&[])` as "not populated yet" — it does not
+    /// occur.
+    ///
+    /// [`Response::url`] is the URL that finally answered and is not repeated
+    /// here, so the whole journey is `hops()` followed by `url()`.
+    ///
+    /// ```no_run
+    /// # async fn run() -> Result<(), chromulate::Error> {
+    /// let client = chromulate::Client::chrome()?;
+    /// let response = client.get("https://example.com/").send().await?;
+    ///
+    /// for hop in response.hops().unwrap_or_default() {
+    ///     println!("{} -> {}", hop.status(), hop.url());
+    /// }
+    /// println!("landed on {}", response.url());
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn hops(&self) -> Option<&[Hop]> {
+        self.hops.as_deref()
+    }
+
+    /// The proxy exit this request went out through, or `None` for a direct
+    /// request.
+    ///
+    /// Credentials are already redacted — this is the label the connection pool
+    /// and the session map are keyed by, not the configured proxy URL — so it is
+    /// safe to log.
+    ///
+    /// It is also the *same* `Arc<str>` those maps use, which is what makes it
+    /// worth returning by reference: handing it straight to
+    /// [`Client::with_session`](crate::Client::with_session) reaches the session
+    /// that learned from this very response, with no string built in between
+    /// and nothing to reconstruct incorrectly.
+    ///
+    /// ```no_run
+    /// # async fn run() -> Result<(), chromulate::Error> {
+    /// let client = chromulate::Client::chrome()?;
+    /// let response = client.get("https://example.com/").send().await?;
+    ///
+    /// // The cookies this exit was taught, and no other exit's.
+    /// let jar = client.with_session(response.exit(), |session| session.cookies().cloned());
+    /// # let _ = jar;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// After a redirect chain this is the exit the *last* hop used, which is
+    /// the one whose session the response taught.
+    #[must_use]
+    pub fn exit(&self) -> Option<&Arc<str>> {
+        self.exit.as_ref()
     }
 
     /// Whether the status is in the 2xx range.

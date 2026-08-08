@@ -10,7 +10,8 @@ use chromulate_core::{
     CookieStore, Error, Middleware, RedirectPolicy, Resolve, Result, reexport::HeaderValue,
 };
 use chromulate_http::{
-    Engine, EngineConfig, PoolConfig, ProxyIsolation, Retry, RetryPolicy, SessionFactory,
+    Engine, EngineConfig, PoolConfig, ProxyIsolation, Retry, RetryPolicy, RouteSession,
+    SessionFactory,
 };
 use chromulate_profile::Profile;
 use chromulate_proxy::{Proxy, ProxyProvider, ProxyUrl, RoundRobin, Single};
@@ -138,6 +139,120 @@ impl Client {
     /// store is reached through a closure rather than by handing out its guard.
     pub fn with_hsts<R>(&self, edit: impl FnOnce(&mut chromulate_http::HstsStore) -> R) -> R {
         self.inner.engine.with_hsts(edit)
+    }
+
+    /// Runs `edit` against one route's server-taught state — its cookies today
+    /// — and returns what it returned, or `None` when there is no such route.
+    ///
+    /// [`Client::cookies`] reaches the jar an *unproxied* request uses, which
+    /// under [`ProxyIsolation::PerProxy`] is none of the ones a fully proxied
+    /// client actually sends. This is how the others are reached.
+    ///
+    /// # `None` means there is no such route, and nothing was created
+    ///
+    /// This reads; it never creates. `edit` is not called at all when nothing
+    /// is filed under `exit`:
+    ///
+    /// | `exit` | isolation | result |
+    /// | --- | --- | --- |
+    /// | `None` | either | always `Some` — the session an unproxied request uses, the same jar [`Client::cookies`] returns |
+    /// | `Some(label)` | [`PerProxy`](ProxyIsolation::PerProxy) | `Some` if that exit has been used or seeded and not evicted since; otherwise `None` |
+    /// | `Some(label)` | [`Shared`](ProxyIsolation::Shared) | always `None` — nothing is filed under a label there |
+    ///
+    /// The last row used to hand back the one shared session and ignore the
+    /// label, which was the sharpest way this API could mislead: name exit B,
+    /// receive a session exit A also used, and be told nothing. `None` says it
+    /// instead of a paragraph asking you to check
+    /// [`Client::proxy_isolation`] first — a paragraph only protects the
+    /// readers who read it.
+    ///
+    /// Use [`Client::seed_session`] to create a route rather than read one.
+    ///
+    /// # Naming an exit
+    ///
+    /// The label is the exit's redacted URL, and the engine files a route's
+    /// state under the identical `Arc<str>` it puts on
+    /// [`Response::exit`](crate::Response::exit). Handing that value straight
+    /// back reaches a route that cannot be the wrong one; this is what the
+    /// signature is shaped for. Deriving it instead is possible —
+    /// `Arc::from(proxy.url().to_string())`, since [`ProxyUrl`]'s `Display` is
+    /// what the engine uses and it redacts credentials — but it is a formula,
+    /// and a formula can be applied wrongly. A wrong label now returns `None`
+    /// rather than costing anything.
+    ///
+    /// [`ProxyUrl`]: crate::proxy::ProxyUrl
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// use chromulate::proxy::ProxyUrl;
+    /// use chromulate::{Client, ProxyIsolation};
+    ///
+    /// let client = Client::builder()
+    ///     .proxy_pool(["http://a.example:8080", "http://b.example:8080"])?
+    ///     .build()?;
+    /// assert_eq!(client.proxy_isolation(), ProxyIsolation::per_proxy());
+    ///
+    /// let label: Arc<str> = Arc::from(
+    ///     ProxyUrl::parse("http://a.example:8080")
+    ///         .expect("a valid proxy URL")
+    ///         .to_string(),
+    /// );
+    /// // Nothing has used this exit yet, so there is nothing filed under it.
+    /// assert!(
+    ///     client
+    ///         .with_session(Some(&label), |session| session.cookies().is_some())
+    ///         .is_none()
+    /// );
+    ///
+    /// // Seeding creates it, and then the read finds it.
+    /// let has_jar = client.seed_session(Some(&label), |session| session.cookies().is_some());
+    /// assert!(has_jar, "a seeded route is minted with a jar of its own");
+    /// assert_eq!(
+    ///     client.with_session(Some(&label), |session| session.cookies().is_some()),
+    ///     Some(true),
+    /// );
+    /// # Ok::<(), chromulate::Error>(())
+    /// ```
+    ///
+    /// A closure rather than a returned handle, for the reason
+    /// [`Client::with_hsts`] is one: nothing borrowing engine-owned state
+    /// escapes, so it cannot be held across an `.await`. See
+    /// [`Engine::with_session`](chromulate_http::Engine::with_session).
+    #[must_use = "the `None` says the route does not exist; discarding it turns a \
+                  lookup that found nothing into one that looks like it worked"]
+    pub fn with_session<R>(
+        &self,
+        exit: Option<&Arc<str>>,
+        edit: impl FnOnce(RouteSession<'_>) -> R,
+    ) -> Option<R> {
+        self.inner.engine.with_session(exit, edit)
+    }
+
+    /// Runs `edit` against one route's server-taught state, creating that state
+    /// if this client has not used the route yet.
+    ///
+    /// The counterpart to [`Client::with_session`], for the case where creating
+    /// a session is the point: seeding an exit's jar before its first request,
+    /// or installing session state a browser earned on this client's behalf.
+    /// That is the same use [`Client::with_hsts`] exists for.
+    ///
+    /// **This can evict another exit's session.** Creating a route inserts into
+    /// the per-route map, and inserting runs the
+    /// [`max_routes`](ProxyIsolation::PerProxy) eviction, which drops the least
+    /// recently used route. On a client at its ceiling, seeding one exit
+    /// discards the cookies of whichever exit has gone longest unused. That is
+    /// the cost of a bounded store, and it is why reading is a separate method
+    /// that cannot pay it.
+    ///
+    /// `exit` is `None` for the session unproxied requests use, which always
+    /// exists and so is never created here.
+    pub fn seed_session<R>(
+        &self,
+        exit: Option<&Arc<str>>,
+        edit: impl FnOnce(RouteSession<'_>) -> R,
+    ) -> R {
+        self.inner.engine.seed_session(exit, edit)
     }
 
     /// Starts a request with an explicit method.

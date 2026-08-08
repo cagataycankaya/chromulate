@@ -59,6 +59,7 @@
 #![warn(missing_docs)]
 
 mod body;
+pub mod challenge;
 pub mod concurrency;
 mod connect;
 mod deadline;
@@ -75,6 +76,10 @@ pub mod validators;
 
 #[cfg(feature = "early-stop")]
 pub use body::{Prefix, Stop, StopReason};
+pub use challenge::{
+    BrowserFallback, Challenge, ChallengeDetector, ChallengeKind, Detection, Handback, Handoff,
+    HandoffPolicy, Hop, Observation,
+};
 pub use concurrency::{ConcurrencyController, Lease, Outcome, Unlimited, authority_of};
 pub use engine::{Engine, EngineBuilder, EngineConfig, RequestUrl, ResponseInfo};
 pub use hsts::{DEFAULT_HOST_CAPACITY, HstsStore};
@@ -82,7 +87,7 @@ pub use http2::{DEFAULT_CONNECTION_WINDOW, Http2Fidelity, UnsupportedSetting};
 pub use middleware::{RateLimit, RateLimiter, Retry, RetryOn, RetryPolicy};
 pub use pool::{ConnectionIdentity, Pool, PoolConfig, PoolKey, Protocol};
 pub use redirect::{CREDENTIAL_HEADERS, crosses_origin, is_redirect, method_after};
-pub use session::{ProxyIsolation, SessionFactory};
+pub use session::{ProxyIsolation, RouteSession, SessionFactory};
 pub use time::{Clock, Sleeper, SystemClock, TimeSource, TokioSleeper};
 #[cfg(feature = "validator-store")]
 pub use validators::{DEFAULT_URL_CAPACITY, ValidatorStore, Validators};
