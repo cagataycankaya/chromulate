@@ -24,16 +24,32 @@
 //!   "Cf-Ray"). It says nothing about challenges — it is on ordinary
 //!   Cloudflare-proxied traffic too — which is why it never appears alone in
 //!   this module's answer.
-//! - **status `403` or `503`.** Cloudflare's own status-code documentation
-//!   associates a WAF rule's "challenge or block" action with a `403`
-//!   response
+//! - **status `200`, `403`, or `503`.** `403` is Cloudflare's own status-code
+//!   documentation, associating a WAF rule's "challenge or block" action
+//!   with a `403` response
 //!   (`developers.cloudflare.com/support/troubleshooting/http-status-codes/4xx-client-error/error-403/`).
-//!   `503` has no equivalent citation found for this wave; it is kept
-//!   because Cloudflare serves it for other edge-side holds that share the
-//!   same shape (rate limiting, "I'm Under Attack Mode") and are worth the
-//!   same second look. Neither status implies a challenge without `cf-ray`
-//!   alongside it — see the test that asserts an ordinary `403` with no
-//!   Cloudflare header at all stays [`Detection::Clear`].
+//!   `503` has no equivalent citation; it is kept because Cloudflare serves
+//!   it for other edge-side holds that share the same shape (rate limiting,
+//!   "I'm Under Attack Mode") and are worth the same second look. `200` is
+//!   captured, not documented — `tests/data/cloudflare-js-interstitial-200.html`
+//!   is a live JS interstitial served with an ordinary `200 OK`, so a
+//!   `Suspect` rule that only watched 403/503 would never buy a body read
+//!   for the exact page this crate exists to catch. Neither status implies a
+//!   challenge without `cf-ray` alongside it, and the set is closed to these
+//!   three — see the tests that assert an ordinary `403` with no Cloudflare
+//!   header stays [`Detection::Clear`], and that `cf-ray` with a fourth
+//!   status (`500`) does too.
+//!
+//! **Cost this creates, worth stating plainly:** `cf-ray` is present on
+//! essentially every response any Cloudflare-fronted site serves, so adding
+//! `200` to the corroborating set means a `Suspect` verdict — and the bounded
+//! body read it buys, per `chromulate-http`'s own body-sniffing design — now
+//! fires on **every ordinary `200` from a Cloudflare-fronted origin**, not
+//! only on challenge pages. That is the honest price of catching a
+//! non-error-status interstitial with header-only corroboration; whether a
+//! narrower rule (a content-length ceiling, say — a challenge interstitial
+//! is kilobytes) is worth the risk of an unmeasured threshold is an open
+//! question this wave does not answer. See §6 of the B2b report.
 //!
 //! **`server: cloudflare` was suggested for this list and is deliberately not
 //! implemented.** Checked against three Cloudflare documentation pages —
@@ -48,18 +64,64 @@
 //! `server_cloudflare_header_alone_is_not_treated_as_a_signal` unit test for
 //! what that means for a response that only carries it.
 //!
-//! # What this detector does not, and cannot yet, do
+//! # Body rules — now backed by two captures
 //!
-//! No captured Cloudflare challenge page exists anywhere in this repository
-//! (`rg -i 'cf-mitigated|cf_clearance|challenge'` found nothing before this
-//! wave). `CLAUDE.md`'s rule for fingerprint data — captured, never invented
-//! — applies here on the same terms, so this detector reads **no** body:
-//! no `<title>Just a moment…`, no `/cdn-cgi/challenge-platform/` path, no
-//! marker of any kind. A response whose headers do not settle the question
-//! gets [`Detection::Suspect`] on the terms above and [`Detection::Clear`]
-//! otherwise; it never reads further, because there is no rule here to spend
-//! a body read on. Adding one is future work that starts from a capture, not
-//! from this comment.
+//! This crate shipped with no body rules at first: no capture existed
+//! anywhere in the repository, and `CLAUDE.md`'s rule for fingerprint data —
+//! captured, never invented — applies to a detection rule on the same terms.
+//! That refusal turned out to be the right call given what was known at the
+//! time, and the wrong call to leave standing: shipping the header rule
+//! *alone* as if it settled the question let a real, silent miss reach
+//! production. `incehesap.com` serves its JS interstitial with **no
+//! `cf-mitigated` header at all**, which this crate's header-only release
+//! reported as [`Detection::Clear`] — a crawler trusting that verdict stores
+//! "Just a moment…" as the page. Two live captures now exist
+//! (`tests/data/`, provenance in `tests/data/README.md`), so the rule that
+//! was correctly withheld before can be written the way this project
+//! requires: against an observed response.
+//!
+//! **The rule:** on the second pass — [`Observation::body_prefix`] is
+//! `Some` — a body containing `Just a moment` (the interstitial's
+//! `<title>`) **or** `/cdn-cgi/challenge-platform/` (the path the
+//! interstitial injects a `<script>` at) is [`Detection::Challenged`].
+//! Either marker alone is treated as sufficient, on purpose: they are
+//! observed together in the one capture this crate has, but requiring both
+//! would silently miss a future page variant that kept only one of them,
+//! which is exactly the failure mode that reopened this crate. Evidence:
+//! `tests/data/cloudflare-js-interstitial-200.html:1` (the whole capture is
+//! one minified line).
+//!
+//! **What is still not written:** anything not observed. No `cf_clearance`
+//! cookie shape, no Turnstile widget marker, no other vendor's interstitial.
+//! A rule here traces to one of the two files in `tests/data/` or it does
+//! not exist.
+//!
+//! # The WAF block is not a challenge, and the seam has no arm that says so
+//!
+//! `n11.com` answers some requests with Cloudflare's WAF block page —
+//! `<title>Attention Required! | Cloudflare</title>`, "Sorry, you have been
+//! blocked" (`tests/data/cloudflare-waf-block-403.html:7,35`) — carrying the
+//! same `cf-ray` and `403` this crate treats as challenge corroboration.
+//! **This is not a challenge.** Cloudflare has already decided to refuse the
+//! client; no JavaScript execution changes that decision, and no browser
+//! this layer could hand the page to would come back with anything but the
+//! same refusal. Reporting it as [`Detection::Challenged`] would launch a
+//! `BrowserFallback` and spend its budget for nothing.
+//!
+//! On a body pass, this detector checks for the block page's markers —
+//! `Attention Required! | Cloudflare` or `Sorry, you have been blocked` —
+//! **before** the challenge markers, and returns [`Detection::Clear`] if
+//! either matches, regardless of what else is true of the response.
+//!
+//! **[`Detection`] has no arm meaning "blocked".** `Clear` here does not mean
+//! "nothing happened" the way it does on the default path — it means "this
+//! layer has nothing that can carry what happened". That is a real
+//! difference a caller reading only the enum cannot see, and it is recorded
+//! as an **open requirement, not silently worked around**: whether the seam
+//! needs a fourth [`Detection`] arm — `Blocked`, say, distinct from `Clear`
+//! — is the maintainer's call, not this crate's to make by picking a
+//! variant and hoping it reads correctly. Filed as such in the B2b report
+//! rather than resolved here.
 //!
 //! # Why [`ChallengeKind::Unknown`], not a guess
 //!
@@ -76,6 +138,14 @@
 //! must actually act sends a headless browser to sit forever against a page
 //! it cannot clear, and a caller reading the evidence trusts a claim this
 //! detector never actually established.
+//!
+//! The captured interstitial makes this concrete rather than hypothetical:
+//! its injected script sets `window._cf_chl_opt.cType: 'managed'`
+//! (`tests/data/cloudflare-js-interstitial-200.html:1`) — Cloudflare's own
+//! label for a **managed challenge**, which dynamically escalates from a
+//! non-interactive check to an interactive one depending on a risk score
+//! computed after this page loads. The page does not yet know which kind of
+//! work it is; neither, correctly, does this detector.
 //!
 //! [`ChallengeKind::Unknown`] is exactly what this detector has: a
 //! challenge, and this build does not know what kind of work it needs. Its
@@ -111,6 +181,30 @@ const SIGNAL_CF_MITIGATED: &str = "cf-mitigated: challenge";
 /// A header Cloudflare's own documentation states it adds to every response
 /// its network serves. Corroborating only — see the module documentation.
 const CF_RAY: &str = "cf-ray";
+
+/// The JS interstitial's `<title>`. Captured at
+/// `tests/data/cloudflare-js-interstitial-200.html:1`; see the module
+/// documentation, "Body rules — now backed by two captures".
+const JS_INTERSTITIAL_TITLE: &[u8] = b"Just a moment";
+
+/// The path the JS interstitial injects a `<script>` at to run the actual
+/// challenge. Same capture as [`JS_INTERSTITIAL_TITLE`].
+const JS_INTERSTITIAL_SCRIPT_PATH: &[u8] = b"/cdn-cgi/challenge-platform/";
+
+/// The evidence label for a body-detected challenge. One constant, for the
+/// same reason as [`SIGNAL_CF_MITIGATED`]: the label in [`Evidence`] and the
+/// one anyone greps for should not be able to drift apart.
+const SIGNAL_JS_INTERSTITIAL_BODY: &str =
+    "body: js interstitial title or /cdn-cgi/challenge-platform/ path";
+
+/// The WAF block page's `<title>`. Captured at
+/// `tests/data/cloudflare-waf-block-403.html:7`; see the module
+/// documentation, "The WAF block is not a challenge".
+const WAF_BLOCK_TITLE: &[u8] = b"Attention Required! | Cloudflare";
+
+/// The WAF block page's headline. Same capture as [`WAF_BLOCK_TITLE`],
+/// `:35`.
+const WAF_BLOCK_HEADLINE: &[u8] = b"Sorry, you have been blocked";
 
 /// Detects a Cloudflare Challenge Page from the one response header
 /// Cloudflare documents for the purpose.
@@ -171,11 +265,24 @@ impl ChallengeDetector for CloudflareDetector {
             ));
         }
 
-        if observation.body_prefix().is_some() {
-            // This detector has no body rule to spend a second look on (see
-            // the module documentation). A `Suspect` verdict here would be
-            // the identical header-only answer as the first pass, and the
-            // layer would ask again forever. Say `Clear` and stop.
+        if let Some(body) = observation.body_prefix() {
+            // Second pass: a `Suspect` verdict already spent the one body
+            // read this detector gets, so this either settles the question
+            // or stops — it never asks again. The WAF block check runs
+            // first and unconditionally: see the module documentation, "The
+            // WAF block is not a challenge", for why a block must never
+            // become `Challenged` even if some future body rule broadened
+            // enough to coincidentally match one too.
+            if is_cloudflare_waf_block_body(body) {
+                return Detection::Clear;
+            }
+            if is_cloudflare_js_interstitial_body(body) {
+                return Detection::Challenged(Challenge::new(
+                    ChallengeKind::Unknown,
+                    observation.origin().clone(),
+                    Evidence::from_signal(SIGNAL_JS_INTERSTITIAL_BODY),
+                ));
+            }
             return Detection::Clear;
         }
 
@@ -198,13 +305,37 @@ fn is_cf_mitigated_challenge(headers: &HeaderMap) -> bool {
 
 /// Whether the two corroborating signals — `cf-ray` and a challenge-shaped
 /// status — are both present. See the module documentation for why each one
-/// is here and why `server: cloudflare` is not.
+/// is here, why `200` joined `403`/`503`, and why `server: cloudflare` is
+/// not.
 fn is_corroborated(status: StatusCode, headers: &HeaderMap) -> bool {
     let status_matches = matches!(
         status,
-        StatusCode::FORBIDDEN | StatusCode::SERVICE_UNAVAILABLE
+        StatusCode::OK | StatusCode::FORBIDDEN | StatusCode::SERVICE_UNAVAILABLE
     );
     status_matches && headers.contains_key(CF_RAY)
+}
+
+/// Whether `body` contains either marker of the captured JS interstitial.
+/// See the module documentation, "Body rules — now backed by two captures".
+fn is_cloudflare_js_interstitial_body(body: &[u8]) -> bool {
+    contains_bytes(body, JS_INTERSTITIAL_TITLE) || contains_bytes(body, JS_INTERSTITIAL_SCRIPT_PATH)
+}
+
+/// Whether `body` contains either marker of the captured WAF block page.
+/// See the module documentation, "The WAF block is not a challenge".
+fn is_cloudflare_waf_block_body(body: &[u8]) -> bool {
+    contains_bytes(body, WAF_BLOCK_TITLE) || contains_bytes(body, WAF_BLOCK_HEADLINE)
+}
+
+/// Whether `haystack` contains `needle` as a contiguous byte sequence.
+/// Written over raw bytes rather than `str::contains` so a body this
+/// detector does not otherwise touch never needs UTF-8 validation just to be
+/// checked for a marker.
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
 }
 
 #[cfg(test)]
@@ -219,11 +350,17 @@ mod tests {
         Url::parse(text).expect("test URL should parse")
     }
 
-    /// Every test targets the same URL, so its `Origin` is built once here
+    fn origin_of(target: &Url) -> Origin {
+        Origin::of(target).expect("test URL should have an origin")
+    }
+
+    /// Most tests target the same URL, so its `Origin` is built once here
     /// rather than duplicated at every call site — `Observation::new` takes
     /// it as a separate, infallible argument (see the comment in `inspect`).
+    /// The B2b capture tests target the captured site instead, via
+    /// [`origin_of`] directly.
     fn origin() -> Origin {
-        Origin::of(&url("https://example.com/")).expect("test URL should have an origin")
+        origin_of(&url("https://example.com/"))
     }
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
@@ -326,21 +463,6 @@ mod tests {
         assert_eq!(detection, Detection::Clear);
     }
 
-    /// `cf-ray` alone, on an ordinary `200`, is just Cloudflare-proxied
-    /// traffic — the header is documented as present on every response, not
-    /// only challenged ones. Status must agree too.
-    #[test]
-    fn cf_ray_without_a_challenge_shaped_status_is_clear() {
-        let headers = headers(&[("cf-ray", "83f9a5c1a7b2e1a1-IAD")]);
-        let target = url("https://example.com/");
-        let origin = origin();
-        let observation = Observation::new(StatusCode::OK, &headers, &target, &origin);
-
-        let detection = CloudflareDetector::new().inspect(&observation);
-
-        assert_eq!(detection, Detection::Clear);
-    }
-
     /// `cf-ray` plus `503` is the other half of the corroboration pair.
     #[test]
     fn cf_ray_and_service_unavailable_is_suspect() {
@@ -355,11 +477,11 @@ mod tests {
         assert_eq!(detection, Detection::Suspect);
     }
 
-    /// A `Suspect` returned from an observation that already carries a body
-    /// prefix has nothing left to buy — `Observation`'s own documentation
-    /// says so, and this detector has no body rule to apply regardless. The
-    /// headers here would trigger `Suspect` on a first pass; a second pass
-    /// with a prefix attached must not repeat it, or the layer loops.
+    /// An empty body prefix matches neither body rule, so this settles at
+    /// `Clear` rather than `Suspect` again — the second pass never asks a
+    /// third time regardless of what it found, which is what keeps the
+    /// layer from looping. The headers here would trigger `Suspect` on a
+    /// first pass; this observation simulates the second.
     #[test]
     fn a_suspect_verdict_is_never_repeated_once_a_body_prefix_is_attached() {
         let headers = headers(&[("cf-ray", "83f9a5c1a7b2e1a1-IAD")]);
@@ -367,6 +489,168 @@ mod tests {
         let origin = origin();
         let observation = Observation::new(StatusCode::FORBIDDEN, &headers, &target, &origin)
             .with_body_prefix(&[]);
+
+        let detection = CloudflareDetector::new().inspect(&observation);
+
+        assert_eq!(detection, Detection::Clear);
+    }
+
+    // --- B2b: real captures. See `tests/data/README.md` for provenance. ---
+
+    /// `incehesap.com`, live `GET`, 2026-08-08: `200 OK`, `cf-ray` present,
+    /// no `cf-mitigated`. The body is Cloudflare's JS interstitial. THIS IS
+    /// THE MISSING-CASE TEST: against the detector as first shipped (header
+    /// rule only, `Suspect` gated on 403/503), this returns `Detection::
+    /// Clear` — confirmed red before any fix (see the B2b report for the
+    /// failure output). A crawler that trusts `Clear` here stores "Just a
+    /// moment…" as the page.
+    const INTERSTITIAL_CAPTURE: &[u8] =
+        include_bytes!("../tests/data/cloudflare-js-interstitial-200.html");
+
+    #[test]
+    fn cloudflare_js_interstitial_capture_is_challenged() {
+        let headers = headers(&[
+            ("cf-ray", "a280606e4b43dc96-IAD"),
+            ("server", "cloudflare"),
+            ("content-type", "text/html; charset=UTF-8"),
+        ]);
+        let target = url("https://incehesap.com/");
+        let origin = origin_of(&target);
+        let observation = Observation::new(StatusCode::OK, &headers, &target, &origin)
+            .with_body_prefix(INTERSTITIAL_CAPTURE);
+
+        let detection = CloudflareDetector::new().inspect(&observation);
+
+        assert!(
+            matches!(detection, Detection::Challenged(_)),
+            "expected the real Cloudflare JS interstitial capture to be Challenged, got {detection:?}"
+        );
+    }
+
+    /// Same capture's headers, no body yet: the first pass must return
+    /// `Suspect` so the layer bothers to read one — this is the part of the
+    /// fix that widens `is_corroborated` to include `200`, not only
+    /// `403`/`503`.
+    #[test]
+    fn cloudflare_js_interstitial_headers_alone_are_suspect() {
+        let headers = headers(&[("cf-ray", "a280606e4b43dc96-IAD"), ("server", "cloudflare")]);
+        let target = url("https://incehesap.com/");
+        let origin = origin_of(&target);
+        let observation = Observation::new(StatusCode::OK, &headers, &target, &origin);
+
+        let detection = CloudflareDetector::new().inspect(&observation);
+
+        assert_eq!(detection, Detection::Suspect);
+    }
+
+    /// `n11.com`, live `GET`, 2026-08-08: `403 Forbidden`, `cf-ray` present,
+    /// no `cf-mitigated`. The body is Cloudflare's WAF block page — the
+    /// client has been refused, not challenged, and no browser can change
+    /// that. Must not become `Detection::Challenged`.
+    const WAF_BLOCK_CAPTURE: &[u8] = include_bytes!("../tests/data/cloudflare-waf-block-403.html");
+
+    #[test]
+    fn cloudflare_waf_block_capture_is_not_challenged() {
+        let headers = headers(&[("cf-ray", "a2805fc4ebe3d284-IAD"), ("server", "cloudflare")]);
+        let target = url("https://n11.com/");
+        let origin = origin_of(&target);
+        let observation = Observation::new(StatusCode::FORBIDDEN, &headers, &target, &origin)
+            .with_body_prefix(WAF_BLOCK_CAPTURE);
+
+        let detection = CloudflareDetector::new().inspect(&observation);
+
+        assert_eq!(
+            detection,
+            Detection::Clear,
+            "a WAF block must stay Clear — Cloudflare has already refused this client"
+        );
+    }
+
+    /// The two real captures never overlap, so
+    /// `cloudflare_waf_block_capture_is_not_challenged` alone cannot tell
+    /// "the block check runs and wins" apart from "the challenge markers
+    /// just never matched this body anyway" — both explanations produce the
+    /// same `Clear` for that one file. This body is synthetic, built to
+    /// contain both marker sets at once, specifically to force that
+    /// distinction: if the block check did not exist, or ran after the
+    /// challenge check, this would be `Challenged`.
+    #[test]
+    fn a_body_matching_both_marker_sets_stays_clear() {
+        let mut body = WAF_BLOCK_TITLE.to_vec();
+        body.extend_from_slice(b" ... ");
+        body.extend_from_slice(JS_INTERSTITIAL_TITLE);
+        let headers = headers(&[("cf-ray", "83f9a5c1a7b2e1a1-IAD")]);
+        let target = url("https://example.com/");
+        let origin = origin();
+        let observation = Observation::new(StatusCode::FORBIDDEN, &headers, &target, &origin)
+            .with_body_prefix(&body);
+
+        let detection = CloudflareDetector::new().inspect(&observation);
+
+        assert_eq!(detection, Detection::Clear);
+    }
+
+    /// The module doc claims either challenge marker is independently
+    /// sufficient — deliberately, so a future page keeping only one of them
+    /// is still caught. The one real capture has both together, which
+    /// cannot prove that claim; these two synthetic bodies isolate each
+    /// marker to prove the `||` is load-bearing rather than incidental.
+    #[test]
+    fn the_interstitial_title_alone_is_challenged() {
+        let headers = headers(&[("cf-ray", "83f9a5c1a7b2e1a1-IAD")]);
+        let target = url("https://example.com/");
+        let origin = origin();
+        let observation = Observation::new(StatusCode::OK, &headers, &target, &origin)
+            .with_body_prefix(JS_INTERSTITIAL_TITLE);
+
+        let detection = CloudflareDetector::new().inspect(&observation);
+
+        assert!(matches!(detection, Detection::Challenged(_)));
+    }
+
+    #[test]
+    fn the_challenge_platform_path_alone_is_challenged() {
+        let headers = headers(&[("cf-ray", "83f9a5c1a7b2e1a1-IAD")]);
+        let target = url("https://example.com/");
+        let origin = origin();
+        let observation = Observation::new(StatusCode::OK, &headers, &target, &origin)
+            .with_body_prefix(JS_INTERSTITIAL_SCRIPT_PATH);
+
+        let detection = CloudflareDetector::new().inspect(&observation);
+
+        assert!(matches!(detection, Detection::Challenged(_)));
+    }
+
+    /// An ordinary `200` with no Cloudflare signal at all — the case
+    /// `teknosa.com` exercised live (real content, 385 KB, no `cf-mitigated`,
+    /// no `cf-ray`) — must not become `Suspect`: nothing here suggests
+    /// Cloudflare is even in the path.
+    #[test]
+    fn plain_ok_with_no_cloudflare_signal_is_clear() {
+        let headers = HeaderMap::new();
+        let target = url("https://example.com/");
+        let origin = origin();
+        let observation = Observation::new(StatusCode::OK, &headers, &target, &origin);
+
+        let detection = CloudflareDetector::new().inspect(&observation);
+
+        assert_eq!(detection, Detection::Clear);
+    }
+
+    /// `cf-ray` plus a status outside the corroborating set (`200`, `403`,
+    /// `503`) must still be `Clear` on a headers-only pass — the set is
+    /// bounded, not "any status with `cf-ray`".
+    #[test]
+    fn cf_ray_with_an_uncorroborated_status_is_clear() {
+        let headers = headers(&[("cf-ray", "83f9a5c1a7b2e1a1-IAD")]);
+        let target = url("https://example.com/");
+        let origin = origin();
+        let observation = Observation::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &headers,
+            &target,
+            &origin,
+        );
 
         let detection = CloudflareDetector::new().inspect(&observation);
 

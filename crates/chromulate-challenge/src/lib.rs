@@ -9,8 +9,9 @@
 //! tuned against a live classifier.
 //!
 //! - [`CloudflareDetector`] reads `cf-mitigated`, the header Cloudflare
-//!   documents for exactly this purpose. See its own documentation for the
-//!   citation and for what this crate does **not** yet claim.
+//!   documents for exactly this purpose, plus two body rules written against
+//!   real captured Cloudflare pages. See its own documentation for every
+//!   citation and for what this crate still does **not** claim.
 //!
 //! # Why this is a separate crate
 //!
@@ -43,11 +44,14 @@
 //!
 //! # Scope
 //!
-//! No solver. Nothing here mints a token, reimplements a challenge
-//! platform's script, or reads response bodies — this wave shipped with no
-//! captured Cloudflare challenge page to write a body rule against, so none
-//! exists; see [`CloudflareDetector`]'s documentation for what that means for
-//! [`Detection::Suspect`]. See the scope boundary in `CLAUDE.md`.
+//! No solver. Nothing here mints a token or reimplements a challenge
+//! platform's script. Body reads are bounded and gated behind
+//! [`Detection::Suspect`] — see [`CloudflareDetector`]'s documentation for
+//! exactly which bytes are read for, which two captures back that rule, and
+//! for an open question this crate does not resolve on its own: whether
+//! [`Detection`] needs a fourth arm for "detected, but nothing here can
+//! carry it" (a WAF block, today reported as [`Detection::Clear`]). See the
+//! scope boundary in `CLAUDE.md`.
 
 #![doc(html_root_url = "https://docs.rs/chromulate-challenge/0.3.0")]
 #![forbid(unsafe_code)]

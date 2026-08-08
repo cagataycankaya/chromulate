@@ -591,6 +591,45 @@ discontinuity is scoped to the arm that has it — which is why `Handback::Sessi
 `FallbackIdentity` recording who minted the cookies, at the point where the mismatch is
 created rather than only in a document.
 
+### The first live observation, 2026-08-08, and what it cost
+
+The layer shipped before anything real had been looked at. Three Turkish e-commerce
+origins were then fetched, one `GET` each through `chromulate get`, and the result
+corrected the detector rather than confirming it.
+
+| origin | status | `cf-mitigated` | body | what the shipped detector said |
+|---|---|---|---|---|
+| `incehesap.com` | **200** | absent | `<title>Just a moment...</title>` | **`Clear` — missed it** |
+| `n11.com` | 403 | absent | `Attention Required! \| Cloudflare` | `Suspect`, then `Clear` |
+| `teknosa.com` | 200 | absent | 385 KB of real content | `Clear`, correctly |
+
+**The first row is the finding.** `incehesap.com` serves the Cloudflare JavaScript
+interstitial — the precise case this phase exists for — as a **200 with no `cf-mitigated`
+header**. The detector's primary rule came from Cloudflare's documentation, which states
+the header is set for all Challenge Page types; the wire disagrees for this deployment.
+The `Suspect` rule then required a 403 or 503, so a 200 interstitial never reached a body
+read at all. The failure was silent: a caller receives a 200 whose body is the challenge
+page and nothing indicates it.
+
+**The second row is a different thing that must not be confused with the first.**
+`n11.com` returns a Cloudflare **WAF block**, not a challenge. A browser cannot clear it;
+Cloudflare has refused the client and executing script does not change that. Handing it to
+a fallback would launch a browser and spend the budget for nothing, so a detector that
+cannot tell a block from a challenge is worse than one that detects neither.
+
+Both responses are now captured in `crates/chromulate-challenge/tests/data/`, with
+provenance, and the detector's rules are written against them rather than against
+documentation. That is the standard section 5 of the design document applies to fingerprint
+constants, and it should have applied here from the start: **the detector was shipped
+unverified, and calling its rule "documented" concealed that no response had ever been
+observed.**
+
+The general form, worth carrying past this phase: a vendor's documentation describes the
+intended behaviour of a service that changes without notice, and is a hypothesis about the
+wire. This project already knows that — Phase 5 records a feasibility verdict read out of a
+vendored header that was exactly backwards. The same mistake, in a different file, one
+phase later.
+
 ### An open requirement found while building: nothing pins the retry to the exit
 
 Gap B of the design plan said server-taught state must be keyed by the exit it was taught

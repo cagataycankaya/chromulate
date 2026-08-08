@@ -33,14 +33,30 @@ that breaking changes may land in a minor release.
   caller must not be able to mistake one for the other.
 
 - **`chromulate-challenge`, a new crate holding the detectors.** `CloudflareDetector` reads
-  `cf-mitigated: challenge` — the header Cloudflare documents for exactly this purpose, set
-  on all Challenge Page types — and corroborates with `cf-ray` and the status code. It
-  ships **no body-matching rules**, because no capture of a challenge page exists in this
-  repository to write them against, and it reports `ChallengeKind::Unknown` for every
-  detection, because the header says a challenge happened and says nothing about which
-  kind. Behind the facade's off-by-default `challenge-detectors` feature. The dependency
-  runs one way only, as with `chromulate-concurrency`: this crate depends on
-  `chromulate-http` for the seam and `chromulate-http` depends on it in no form.
+  `cf-mitigated: challenge`, corroborates with `cf-ray` and the status code, and matches
+  body markers taken from captured responses. It reports `ChallengeKind::Unknown` for every
+  detection, because nothing it reads says which kind. Behind the facade's off-by-default
+  `challenge-detectors` feature. The dependency runs one way only, as with
+  `chromulate-concurrency`: this crate depends on `chromulate-http` for the seam and
+  `chromulate-http` depends on it in no form.
+
+  **The body rules exist because the header rule was measured and found insufficient**, and
+  the sequence is worth recording rather than smoothing over. The crate first shipped with
+  the header rule alone and no body rules at all, on the correct-at-the-time ground that no
+  capture existed to write them against. Three origins were then fetched live:
+  `incehesap.com` serves the Cloudflare JavaScript interstitial as a **200 with no
+  `cf-mitigated` header**, which the header-only detector reported as `Clear` — missing the
+  exact case the layer is for, and missing it silently. The rule had come from Cloudflare's
+  documentation rather than from an observed response.
+
+  **A block is not a challenge**, and the detector now distinguishes them. `n11.com` returns
+  a Cloudflare WAF block — `Attention Required!`, "Sorry, you have been blocked" — which no
+  browser can clear, because the client has been refused rather than tested; handing one to
+  a fallback would launch a browser and spend the handoff budget for nothing. The block
+  check runs first and unconditionally, so a later body rule cannot broaden into it.
+
+  Both responses are captured in `crates/chromulate-challenge/tests/data/` with provenance,
+  and the rules are tested against those bytes rather than against invented strings.
 
 - **`ResponseInfo::hops` and `ResponseInfo::exit`**, with `Response::hops()` and
   `Response::exit()` on the facade. A caller can now see the redirect chain a request

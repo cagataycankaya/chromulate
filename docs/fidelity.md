@@ -269,12 +269,24 @@ the split holds through the handoff by construction.
 
 **The detector's coverage is exactly its rule list, and no more.** `CloudflareDetector`
 reads `cf-mitigated: challenge`, a header Cloudflare documents for this purpose, and
-corroborates with `cf-ray` and the status code. It ships **no body-matching rules**, because
-no capture of a challenge page exists in this repository to write them against — the same
-standard section 5 of the design document applies to fingerprint constants. It reports
-`ChallengeKind::Unknown` for every detection, because the header says a challenge happened
-and says nothing about which kind. This is not a general bot-wall detector and must not be
-described as one.
+corroborates with `cf-ray`, the status code, and body markers taken from captured
+responses in `crates/chromulate-challenge/tests/data/`. It reports `ChallengeKind::Unknown`
+for every detection, because nothing it reads says which kind. This is not a general
+bot-wall detector and must not be described as one.
+
+The body rules exist because the header rule alone was measured and found insufficient. On
+2026-08-08 `incehesap.com` was observed serving the Cloudflare JavaScript interstitial as a
+**200 with no `cf-mitigated` header**, which the header-only detector reported as `Clear` —
+missing the exact case the layer is for, and missing it silently. The rule had been written
+from Cloudflare's documentation rather than from an observed response. Roadmap Phase 9
+records the measurement.
+
+**A block is not a challenge, and the detector distinguishes them.** `n11.com` returns a
+Cloudflare WAF block — `Attention Required!`, "Sorry, you have been blocked" — which no
+browser can clear, because the client has been refused rather than tested. Handing one to a
+fallback would launch a browser and spend the handoff budget for nothing. The seam has no
+`Detection` arm meaning "blocked", so the detector reports `Clear` for it, and `Clear` there
+means *not something this layer can carry* rather than *nothing happened*.
 
 **With a rotating proxy provider, the retry may not leave through the exit that earned the
 clearance.** `Connector::route` selects a proxy per hop and nothing in a request can pin
