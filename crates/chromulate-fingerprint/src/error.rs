@@ -102,6 +102,20 @@ pub enum CaptureError {
         value: String,
     },
 
+    /// The capture records GREASE inside `signature_algorithms`.
+    ///
+    /// No browser this project models does that. BoringSSL can be asked to, but
+    /// behind a flag Chromium does not set, so a capture claiming it is either a
+    /// mis-transcription or a client that is not the one the profile names —
+    /// and either way the resulting fingerprint would not be the browser's.
+    ///
+    /// This is an error rather than the silent drop it used to be, and the
+    /// reason is worth stating: nothing else in this workspace enforces the
+    /// rule. It was written in `CLAUDE.md` and in no code, and the loader
+    /// discarded the very flag that would have caught a violation.
+    #[error("capture records GREASE in signature_algorithms, which no modelled browser sends")]
+    GreaseInSignatureAlgorithms,
+
     /// The capture's extension set and its recorded handshake disagree.
     ///
     /// Only raised for a client that does not permute its extension order, where

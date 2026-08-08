@@ -362,7 +362,16 @@ impl Capture {
         let (groups, grease_groups) = resolve(&hello.supported_groups, "supported_groups")?;
         let (key_shares, grease_key_shares) = resolve(&hello.key_share_groups, "key_share_groups")?;
         let (versions, grease_versions) = resolve(&hello.supported_versions, "supported_versions")?;
-        let (signatures, _) = resolve(&hello.signature_algorithms, "signature_algorithms")?;
+        // The flag is checked rather than discarded. `signature_algorithms` is
+        // the one list with no GREASE slot in any browser this project models,
+        // so a capture carrying one describes something else — and dropping it
+        // silently would produce a profile that looks fine and fingerprints
+        // wrong.
+        let (signatures, grease_signatures) =
+            resolve(&hello.signature_algorithms, "signature_algorithms")?;
+        if grease_signatures {
+            return Err(CaptureError::GreaseInSignatureAlgorithms);
+        }
 
         let mut extensions = ExtensionSet::new(
             hello
@@ -545,6 +554,9 @@ fn named<T>(
 mod tests {
     use super::*;
 
+    /// The shipped capture, read from the crate's own test data.
+    const CHROME_CAPTURE: &str = include_str!("../tests/data/chrome-151-macos.json");
+
     #[test]
     fn a_grease_marker_resolves_to_no_code_point() {
         let values = vec![
@@ -554,6 +566,44 @@ mod tests {
         let (resolved, grease) = resolve(&values, "test").expect("GREASE and a number resolve");
         assert_eq!(resolved, vec![4865]);
         assert!(grease);
+    }
+
+    #[test]
+    fn grease_in_signature_algorithms_is_rejected_rather_than_dropped() {
+        // The shipped capture with one GREASE marker spliced into its
+        // signature_algorithms list and nothing else changed. Before
+        // 2026-08-08 this loaded happily: `resolve` returned the flag and the
+        // caller discarded it with `_`, so the profile came out looking correct
+        // and fingerprinting as something no browser sends.
+        let mut document: serde_json::Value =
+            serde_json::from_str(CHROME_CAPTURE).expect("the shipped capture parses");
+        let sigalgs = document["client_hello"]["signature_algorithms"]
+            .as_array_mut()
+            .expect("signature_algorithms is a list");
+        sigalgs.insert(0, serde_json::Value::String("GREASE".to_owned()));
+
+        let spliced = document.to_string();
+        // `parse` is deserialisation; the check lives where the spec is built,
+        // which is `client_hello`. Both are exercised, so a future move of the
+        // check between them still fails this test rather than passing by luck.
+        let capture = Capture::parse(&spliced).expect("the spliced document still deserialises");
+        assert!(
+            matches!(
+                capture.client_hello(),
+                Err(CaptureError::GreaseInSignatureAlgorithms)
+            ),
+            "a capture with GREASE in signature_algorithms must be refused"
+        );
+
+        // And the unmodified document still loads, so the check rejects the
+        // splice rather than the field.
+        assert!(
+            Capture::parse(CHROME_CAPTURE)
+                .expect("the shipped capture deserialises")
+                .client_hello()
+                .is_ok(),
+            "the shipped capture must still load"
+        );
     }
 
     #[test]
