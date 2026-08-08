@@ -108,6 +108,33 @@ that breaking changes may land in a minor release.
   `header_table_size` setter for fingerprinting reasons, closed as completed, and this crate
   calls that setter today.
 
+- **Phase 6 of the roadmap gained a third route: depending on the published `http2` fork
+  rather than owning one.** The `http2` crate (crates.io, MIT, the renamed `h2` fork `wreq`
+  carries) already exposes `headers_pseudo_order`, `headers_stream_dependency` and
+  `settings_order`, and its encode path writes the stream dependency — the line stock `h2`
+  leaves as a no-op. Checked 2026-08-08, version 0.5.20 had merged upstream h2 0.4.15 in
+  full, CONTINUATION-flood protection included. The cost is an adapter — hyper links `h2`,
+  not `http2`, so the HTTP/2 path would drive it directly — estimated at 300–700 lines and
+  UNMEASURED, the one figure in that table that is not counted, plus trusting a single
+  maintainer for security fixes rather than hyperium.
+
+- **A new assessment, `docs/architecture/05-network-events-assessment.md`**, answers
+  whether the concurrency seam's `Outcome` should become a stream of lifecycle events
+  (`Connected`, `TlsHandshakeComplete`, `FirstByteReceived`, …). The recommendation is no
+  to replacing — the two-method seam is what keeps a third-party controller a page of code
+  — and yes to the events as a separate, additive observer seam, absent by default, whose
+  events carry observations and no judgment. Half the proposed events are not per-request
+  facts at all: a pooled connection skips `Connected` and the TLS handshake entirely, and
+  `ConnectionClosed` belongs to a connection's lifetime, not a request's.
+
+- **The design document and README now describe the concurrency layer as it is.** Four
+  sites in the design document still tied the seam to the removed
+  `chromulate-http/adaptive-concurrency` feature and cited engine lines that had moved.
+  The README's client-behaviour table gained the concurrency row it never had, the
+  workspace tables and dependency diagram gained `chromulate-concurrency`, and "What
+  Chromulate does not do" now states the boundary the seam enforces: the engine emits
+  signals — observed status and headers — and the caller decides what they mean.
+
 ## [0.2.0] — 2026-08-05
 
 ### Added
