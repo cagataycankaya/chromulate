@@ -212,8 +212,10 @@ impl BoringBackend {
 
         // GREASE and the permuted extension order are one call each here and
         // are the two things rustls cannot be asked for at all.
-        builder.set_grease_enabled(true);
-        builder.set_permute_extensions(true);
+        // EXPERIMENT SWITCHES — measurement branch only, removed before any merge.
+        let off = |k: &str| std::env::var(format!("CHROMULATE_NO_{k}")).is_ok();
+        builder.set_grease_enabled(!off("GREASE"));
+        builder.set_permute_extensions(!off("PERMUTE"));
         builder.enable_signed_cert_timestamps();
 
         let curves: Vec<&str> = spec
@@ -371,7 +373,7 @@ where
 
             // ALPS is per-connection in BoringSSL, so it is set here rather
             // than on the context. The capture's codepoint is the new one.
-            for protocol in &self.alps {
+            for protocol in if std::env::var("CHROMULATE_NO_ALPS").is_ok() { &[][..] } else { &self.alps[..] } {
                 if !chromulate_boring_ffi::add_application_settings(&mut ssl, protocol.as_bytes()) {
                     return Err(Error::Tls {
                         target: host.clone(),
@@ -384,7 +386,9 @@ where
             if !self.alps.is_empty() {
                 chromulate_boring_ffi::use_new_alps_codepoint(&mut ssl);
             }
-            ssl.set_enable_ech_grease(true);
+            if std::env::var("CHROMULATE_NO_ECH").is_err() {
+                ssl.set_enable_ech_grease(true);
+            }
 
             let stream = tokio_boring::SslStreamBuilder::new(ssl, io)
                 .connect()

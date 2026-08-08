@@ -539,3 +539,17 @@ async fn the_ja4_is_stable_across_connections_while_the_extension_order_is_not()
         );
     }
 }
+
+/// MEASUREMENT ONLY: prints the emitted fingerprints for the current switches.
+#[tokio::test]
+async fn print_emitted_fingerprints_for_the_isolation_experiment() {
+    let hello = capture_hello(&chrome_backend(), "example.com").await;
+    let spec = spec_of(&hello);
+    println!(
+        "VARIANT ja4={} ja3={} ciphers={} extensions={}",
+        ja4(&spec),
+        chromulate_fingerprint::ja3_hash(&chromulate_fingerprint::ja3(&spec)),
+        hello.cipher_suites.len(),
+        hello.extensions.len()
+    );
+}
