@@ -51,9 +51,9 @@ there is already an authoritative answer to what it is trying to produce.
 
 **Status: Done.**
 
-The Cargo workspace exists with fifteen members (`Cargo.toml:3-19`) — the fourteen published
+The Cargo workspace exists with sixteen members (`Cargo.toml:3-20`) — the fifteen published
 crates plus `chromulate-bench`, which is `publish = false` — shared dependency versions, and
-workspace lints including `unsafe_code = "forbid"` (`Cargo.toml:90-93`).
+workspace lints including `unsafe_code = "forbid"` (`Cargo.toml:92-93`).
 
 `chromulate-core` is written: the error hierarchy
 (`crates/chromulate-core/src/error.rs`), the streaming body
@@ -77,7 +77,7 @@ tests, all passing.
 
 **Status: Done.**
 
-`chromulate-fingerprint` and `chromulate-profile` shipped in 0.1.0 (`CHANGELOG.md:144-161`):
+`chromulate-fingerprint` and `chromulate-profile` shipped in 0.1.0 (`CHANGELOG.md:697-720`):
 the ClientHello and HTTP/2 models, the JA3, JA4 and Akamai computations, and the Chrome
 profile populated from the capture at
 `crates/chromulate-fingerprint/tests/data/chrome-151-macos.json`.
@@ -114,10 +114,10 @@ model of Chrome rather than against a tested one.
 **Status: Done.**
 
 Four leaf crates that depend only on core, plus the header engine that depends on the
-profile. All five shipped in 0.1.0 (`CHANGELOG.md:144-161`).
+profile. All five shipped in 0.1.0 (`CHANGELOG.md:697-720`).
 
 `chromulate-cookie` — a browser-grade jar implementing `CookieStore`
-(`crates/chromulate-core/src/traits.rs:71-77`), with the lenient date parser real browsers
+(`crates/chromulate-core/src/traits.rs:73-85`), with the lenient date parser real browsers
 use, public-suffix rejection, `SameSite` handling, and per-domain eviction.
 
 `chromulate-compression` — streaming decoders for the codings a browser advertises, with
@@ -332,12 +332,12 @@ rustls-asserting test meaning what it means today under `--all-features` — and
 `--cfg chromulate_boring_backend` selects it, with a `compile_error!` for the
 half-configured combination.
 
-**Three things block the work and are independent of it:** `Fidelity` cannot express a
-backend with a different set of structural limits, because `STRUCTURAL_LIMITS` is a module
-constant describing rustls and `Display` hard-codes its length; three of the six GREASE
-positions have no generator in the workspace and the shared-slot rule has no test at all;
-and ten keys of the capture are dropped silently by serde, the extension *set* being parsed
-but several payload details not.
+**Two things block the work and are independent of it:** three of the six GREASE positions
+have no generator in the workspace and the shared-slot rule has no test at all; and ten keys
+of the capture are dropped silently by serde, the extension *set* being parsed but several
+payload details not. A third — `Fidelity` being unable to state a backend's own structural
+limits — was closed on 2026-08-08, one commit after this paragraph was written:
+`Fidelity::structural_limits` is a field the backend supplies and `Display` reads it.
 
 **A custom ClientHello encoder in front of rustls.** Assessed in the design document as
 not recommended: the ClientHello is part of a transcript both sides hash, and splicing a
@@ -381,20 +381,22 @@ These are counted rather than estimated:
 | Depend on the published `http2` fork | **~300–700 lines, UNMEASURED** — the one figure in this table that is estimated rather than counted. hyper links `h2`, not `http2`, so the HTTP/2 path would drive `http2` directly while HTTP/1.1 stays on hyper; `h2`'s own client example is 52 lines and is the floor. |
 | Chromulate-owned HPACK path | Not re-costed. The route above dominates it and no longer needs deciding first. |
 
-**The glue is the expensive half, and it cannot be taken in part.** Of hyper's 2,388 lines of
-h2 glue, roughly 676 are unreachable for this crate — `ping.rs`'s BDP and keep-alive
+**The glue is the expensive half, and it cannot be taken in part.** Of hyper's 2,544 lines of
+h2 glue (measured over `hyper-1.11.0/src/proto/h2/*.rs`, the version this workspace locks),
+roughly 676 are unreachable for this crate — `ping.rs`'s BDP and keep-alive
 machinery is behind `is_enabled()`, which is false when neither adaptive window nor
 keep-alive is set, so 248 of its 515 lines never construct; CONNECT upgrade support is about
 83; and 15 of `client/conn/http2.rs`'s 27 public functions are setters nothing here calls.
-That leaves ~1,712 genuinely needed. But `proto/h2/client.rs` reaches into nine internal
+That leaves ~1,868 genuinely needed. But `proto/h2/client.rs` reaches into nine internal
 hyper modules across fourteen imports — `dispatch`, `body`, `common`, `upgrade`, `rt::bounds`
 among them — so the reachable part does not lift out cleanly.
 
 The empirical check agrees: `wreq`, a maintained browser-fingerprinting client, took exactly
-this route and carries `http2` (a renamed h2 fork, 27,238 lines against h2's 26,161) plus
-`wreq-proto`, a fork of hyper's whole protocol layer at 10,836 lines, of which the h2 glue is
-2,412 — within a percent of hyper's 2,388. It re-owned the glue nearly line for line and
-keeps hyper only as a dev-dependency. **Plan against ~10,800, not ~1,700.**
+this route and carries `http2` (a renamed h2 fork, 27,480 lines against h2's 26,161) plus
+`wreq-proto`, a fork of hyper's whole protocol layer at 10,858 lines, of which the h2 glue is
+2,123 — a 17% gap against hyper's 2,544, not the one-percent gap first claimed here. It
+re-owns the whole protocol layer rather than lifting out just the glue, and keeps hyper
+only as a dev-dependency. **Plan against ~10,800, not ~1,900.**
 
 That figure prices *owning* a fork, and there is a third route that does not: depending on
 the fork that is already published. `http2` (crates.io, MIT, the renamed `h2` fork wreq
@@ -498,7 +500,7 @@ MSRV with `cargo +1.88.0` pinned explicitly, because `rust-toolchain.toml` would
 and silently run it on stable (`:62-75`); Miri runs over `chromulate-core` only, for the
 tractability reason above (`:88-105`); and the `network-tests` suite runs in its own job with
 `continue-on-error`, on a nightly cron rather than per push, so an unrelated upstream outage
-does not block a merge (`:8-14`, `:219-229`).
+does not block a merge (`:8-14`, `:225-230`).
 
 **Coverage reporting is the one item still missing**, and it is the one with the least
 obvious payoff: a line-coverage number over a workspace whose hardest properties are checked

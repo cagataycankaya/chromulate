@@ -24,7 +24,7 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -35,19 +35,19 @@ keywords = ["http", "client", "tls", "browser", "networking"]
 categories = ["network-programming", "web-programming::http-client"]
 
 [workspace.dependencies]
-chromulate-core = { version = "0.2.0", path = "crates/chromulate-core" }
-chromulate-fingerprint = { version = "0.2.0", path = "crates/chromulate-fingerprint" }
-chromulate-profile = { version = "0.2.0", path = "crates/chromulate-profile" }
-chromulate-header = { version = "0.2.0", path = "crates/chromulate-header" }
-chromulate-cookie = { version = "0.2.0", path = "crates/chromulate-cookie" }
-chromulate-cache = { version = "0.2.0", path = "crates/chromulate-cache" }
-chromulate-compression = { version = "0.2.0", path = "crates/chromulate-compression" }
-chromulate-dns = { version = "0.2.0", path = "crates/chromulate-dns" }
-chromulate-proxy = { version = "0.2.0", path = "crates/chromulate-proxy" }
-chromulate-tls = { version = "0.2.0", path = "crates/chromulate-tls" }
-chromulate-http = { version = "0.2.0", path = "crates/chromulate-http" }
-chromulate-concurrency = { version = "0.2.0", path = "crates/chromulate-concurrency" }
-chromulate = { version = "0.2.0", path = "crates/chromulate", default-features = false }
+chromulate-core = { version = "0.3.0", path = "crates/chromulate-core" }
+chromulate-fingerprint = { version = "0.3.0", path = "crates/chromulate-fingerprint" }
+chromulate-profile = { version = "0.3.0", path = "crates/chromulate-profile" }
+chromulate-header = { version = "0.3.0", path = "crates/chromulate-header" }
+chromulate-cookie = { version = "0.3.0", path = "crates/chromulate-cookie" }
+chromulate-cache = { version = "0.3.0", path = "crates/chromulate-cache" }
+chromulate-compression = { version = "0.3.0", path = "crates/chromulate-compression" }
+chromulate-dns = { version = "0.3.0", path = "crates/chromulate-dns" }
+chromulate-proxy = { version = "0.3.0", path = "crates/chromulate-proxy" }
+chromulate-tls = { version = "0.3.0", path = "crates/chromulate-tls" }
+chromulate-http = { version = "0.3.0", path = "crates/chromulate-http" }
+chromulate-concurrency = { version = "0.3.0", path = "crates/chromulate-concurrency" }
+chromulate = { version = "0.3.0", path = "crates/chromulate", default-features = false }
 
 bytes = "1.12"
 http = "1.5"

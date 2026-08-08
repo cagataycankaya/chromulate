@@ -7,6 +7,8 @@ that breaking changes may land in a minor release.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-08-08
+
 ### Added
 
 - **`chromulate-concurrency`, a new crate holding the two per-origin control laws.**

@@ -45,7 +45,7 @@
 //!   cookie's *resolved* path rather than requiring a literal `Path` attribute, matching
 //!   Chromium. `__Host-x=1; Secure` set from `/` resolves to `Path=/` and is accepted.
 
-#![doc(html_root_url = "https://docs.rs/chromulate-cookie/0.1.0")]
+#![doc(html_root_url = "https://docs.rs/chromulate-cookie/0.3.0")]
 #![warn(missing_docs)]
 
 mod clock;

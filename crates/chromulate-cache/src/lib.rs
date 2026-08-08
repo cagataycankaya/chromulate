@@ -140,7 +140,7 @@
 //! the connection pool, and a second one in front of every request is what the
 //! sharding exists to avoid.
 
-#![doc(html_root_url = "https://docs.rs/chromulate-cache/0.1.0")]
+#![doc(html_root_url = "https://docs.rs/chromulate-cache/0.3.0")]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 

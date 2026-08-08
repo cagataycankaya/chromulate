@@ -103,7 +103,7 @@
 //! surface a browser would. It is not built to defeat security controls, and
 //! contributions framed around evading a specific defence are out of scope.
 
-#![doc(html_root_url = "https://docs.rs/chromulate/0.1.0")]
+#![doc(html_root_url = "https://docs.rs/chromulate/0.3.0")]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 

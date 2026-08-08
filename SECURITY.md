@@ -40,6 +40,9 @@ hostile input rather than from hostile users of the library:
   connection pool, the cookie jar, or the DNS cache.
 - **Memory safety.** The workspace sets `unsafe_code = "forbid"`, so any memory-safety
   issue implies either a dependency bug or a lint escape, and both are worth reporting.
+  One crate opts out: `chromulate-bench`, whose purpose is a counting global allocator and
+  which cannot be written without `unsafe impl GlobalAlloc`. It is `publish = false` and
+  nothing a user links contains it.
 
 ## What does not count
 

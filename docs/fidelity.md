@@ -1,10 +1,14 @@
 # Fidelity: what a server actually sees
 
 How closely Chromulate's observable network surface matches the browser it models,
-measured rather than claimed. Every figure below comes from one of two places: a live
+measured rather than claimed. Every figure below comes from one of three places: a live
 capture of a real Chrome 151 on macOS
-(`crates/chromulate-fingerprint/tests/data/chrome-151-macos.json`, taken 2026-08-04), and
-what an echo endpoint reported seeing from Chromulate on the same day.
+(`crates/chromulate-fingerprint/tests/data/chrome-151-macos.json`, taken 2026-08-04),
+what an echo endpoint reported seeing from Chromulate on the same day, and — for the
+BoringSSL paragraph alone — a probe recorded in
+`.superpowers/preflight/2026-08-08-boringssl-backend-agent-P1-report.md`. That third source
+is the exception worth flagging: the probe's sources are not in this repository, so its
+figures are the only ones here that a checkout cannot reproduce.
 
 Reproduce it with:
 
@@ -41,6 +45,14 @@ this crate does not meet it, and no configuration of it does.
 | Extensions offered | 16 | 12 |
 | JA3 hash | `a0442bdf…` (varies per connection) | `f23d967d…` |
 
+The Chromulate column is the default build — the `ring` provider with `cert-compression`
+on. It is not the only one: `crates/chromulate-tls/tests/emitted_client_hello.rs` records
+four JA4s, one per (provider, feature) pair, because `--no-default-features` drops the
+extension count to 11 and `aws-lc-rs` changes the hash again. `aws-lc-rs` also raises group
+coverage from three of four to four of four and makes the key shares the capture's exact
+pair, which makes it the one configuration knob in this workspace that narrows the TLS gap
+rather than moving it.
+
 All three JA4 components differ, and so does the `1516` / `1012` prefix that encodes the
 cipher and extension counts — meaning the difference is visible without comparing hashes
 at all.
@@ -73,7 +85,8 @@ Because the gap is a property of rustls rather than of how it is configured, clo
 needs a different TLS implementation. The seam that would accept one is in place:
 `chromulate-http` opens every TLS connection through the `TlsBackend` trait and derives its
 stream type from the linked backend, so the string `rustls` does not appear anywhere in
-`crates/chromulate-http/src/` outside one explanatory comment. Two further implementations
+`crates/chromulate-http/src/` outside three explanatory comments, none of which is a type
+reference. Two further implementations
 exist behind `--cfg chromulate_mock_backend`, and a CI job builds and tests
 `chromulate-tls`, `chromulate-http` and the `chromulate` facade against them. The facade
 was added to that job on 2026-08-08 because it had stopped compiling under the flag — the
@@ -102,7 +115,14 @@ happens today, because rustls is still the only backend that opens a socket.
 where it stops.** A probe against both published binding families put a real ClientHello on
 a socket and decoded it: 15 of 15 cipher suites in wire order, 16 of 16 extensions, the
 groups and key shares including `X25519MLKEM768`, and GREASE in all six positions with the
-group and key-share values drawn from one slot, as Chrome's generator requires. Its JA4 was
+group and key-share values drawn from one slot, as Chrome's generator requires.
+
+On `boring2` all of that comes from the safe API. On `boring` 5.1.0 — the crate Phase 5
+selects — `status_request` and ALPS reach the wire only through three `unsafe` FFI calls,
+without which the probe emitted 14 of the 16 extensions; adding them would need a second
+`#![forbid(unsafe_code)]` exception recorded in `CLAUDE.md`.
+
+The probe's JA4 was
 `t13d1516h2_8daaf6152771_d8a2da3f94cd` against the target's
 `t13d1516h2_8daaf6152771_806a8c22fdea` — the first two components byte-identical.
 
@@ -112,9 +132,13 @@ sends three code points first — `0x0904`, `0x0905`, `0x0906` — that no Borin
 rejected by name, rejected as raw values, absent from the generated bindings. The capture
 records them as `unknown_0x0904`, so what they are is not established here; what matters is
 that the wire form cannot be reproduced. **A BoringSSL backend therefore closes GREASE,
-ALPS, SCT, ECH, the extension set, the key shares and the cipher order, and leaves JA4's
-third component different.** That is the ceiling for that route, measured rather than
-predicted.
+ALPS, SCT, ECH, the extension set and the key shares, and leaves JA4's third component
+different.** The cipher *order* is closed on `boring2`, whose patches delete BoringSSL's
+hardware-dependent TLS 1.3 ordering, but not on `boring` 5.1.0, where the order comes from
+`EVP_has_aes_hardware()` and matched the capture on the AES-NI host it was measured on.
+Behaviour on a host without AES-NI is UNMEASURED, which is the device-class hazard the
+cipher-order note in `CLAUDE.md` describes. That is the ceiling for that route, measured
+rather than predicted.
 
 So the harness is a bar for work that has not been done, not evidence about work that has.
 A BoringSSL backend would have to clear it, and clearing it would still not be enough on its
@@ -197,9 +221,12 @@ Not shipped, and measured rather than guessed. No default build speaks HTTP/3: A
 What does exist is `chromulate-h3` — RFC 7838 `Alt-Svc` parsing and an alternative-service
 cache, which is how a client learns an origin offers HTTP/3 — plus a QUIC spike behind the
 non-default `quic-spike` feature that completes a real HTTP/3 request. The spike is a
-measurement, not a product. The handshake it produces omits five extensions the Chrome
-capture carries, emits no GREASE, and its transport-parameter set cannot be shaped through
-`quinn`'s public API. Since this repository holds no Chrome-over-QUIC capture, the fidelity
+measurement, not a product. The handshake it produces omits six extensions the Chrome
+capture carries — `0x0012`, `0x001b`, `0x0023`, `0x44cd`, `0xfe0d`, `0xff01` — emits no
+GREASE, and its transport-parameter set cannot be shaped through `quinn`'s public API. The
+count difference is five rather than six, because the QUIC hello adds
+`quic_transport_parameters` that the TCP capture does not carry; naming the code points
+avoids the subtraction. Since this repository holds no Chrome-over-QUIC capture, the fidelity
 of an HTTP/3 path is not poor but *unmeasurable*, which is why it is not shipped. See
 [`architecture/04-http3-assessment.md`](architecture/04-http3-assessment.md).
 

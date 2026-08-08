@@ -17,9 +17,10 @@ Hyper + browser networking behaviour        not        a headless browser
 [![CI](https://github.com/cagataycankaya/chromulate/actions/workflows/ci.yml/badge.svg)](https://github.com/cagataycankaya/chromulate/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
-> **Status: 0.2.0, early development.** Everything described below is implemented and
+> **Status: 0.3.0, early development.** Everything described below is implemented and
 > tested — the examples compile, the CLI issues real requests, and every performance and
-> fidelity figure in the documentation was measured rather than estimated. What is early is
+> fidelity figure in the documentation is either measured or carries the label
+> `UNMEASURED`; none is silently estimated. What is early is
 > the surface: this is pre-1.0 and breaking changes will land in minor releases. Read
 > [Honest limitations](#honest-limitations) before depending on it — in particular, **the
 > TLS fingerprint does not match Chrome's** — and [Performance](docs/performance.md) before
@@ -78,8 +79,12 @@ single sample would have hidden:
 Chrome permutes its ClientHello extension order on every connection. The cipher order is
 stable; the extension order is not. So **JA3 is not a stable identifier for a Chrome
 build**, and any profile that freezes one extension order is reproducing an artefact of a
-single sample rather than the browser's actual behaviour. JA4, which sorts before hashing,
-is stable — which is precisely why it was designed that way.
+single sample rather than the browser's actual behaviour. JA4 sorts the extensions before
+hashing, so the permutation that moves JA3 on every connection does not move JA4 at all —
+which is precisely why it was designed that way. The two captures above still differ in
+their full JA4, because the second resumed a session and carried `pre_shared_key`, which
+changes the extension count; the cipher component is identical in both, and that is the
+part the permutation would have disturbed.
 
 Chromulate therefore models a profile's extensions as a set plus its permutation rules —
 GREASE first and last, `pre_shared_key` always last — and generates a fresh order per
@@ -89,7 +94,7 @@ connection, as the browser does.
 
 ```toml
 [dependencies]
-chromulate = "0.2"
+chromulate = "0.3"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -160,12 +165,12 @@ repository; the measured claims behind the fidelity rows are in
 |---|---|
 | HTTP/1.1 and HTTP/2 | Yes, chosen by ALPN, with connection pooling for both |
 | TLS 1.2 and 1.3 | Yes, over `rustls`. Roots come from the Mozilla program compiled in by `webpki-roots`, which is `RootSource::default()` — **not** the platform trust store, so a build behaves the same on every machine. `chromulate-tls`'s `platform-roots` feature switches it, and the facade does not forward that feature today |
-| HTTP/3 and QUIC | **Assessed, not shipped.** `Alt-Svc` parsing and an alternative-service cache exist in `chromulate-h3`, which is how a client learns an origin offers HTTP/3. QUIC itself is behind the non-default `quic-spike` feature and is a measurement, not a product: a real HTTP/3 request succeeds, but the handshake omits five extensions the Chrome capture carries, emits no GREASE, and its transport-parameter set cannot be shaped through `quinn`'s public API. Shipping it would mean claiming a protocol surface nobody has a capture to check — see [docs/architecture/04-http3-assessment.md](docs/architecture/04-http3-assessment.md) |
+| HTTP/3 and QUIC | **Assessed, not shipped.** `Alt-Svc` parsing and an alternative-service cache exist in `chromulate-h3`, which is how a client learns an origin offers HTTP/3. QUIC itself is behind the non-default `quic-spike` feature and is a measurement, not a product: a real HTTP/3 request succeeds, but the handshake omits six extensions the Chrome capture carries — `0x0012`, `0x001b`, `0x0023`, `0x44cd`, `0xfe0d`, `0xff01` — emits no GREASE, and its transport-parameter set cannot be shaped through `quinn`'s public API. Shipping it would mean claiming a protocol surface nobody has a capture to check — see [docs/architecture/04-http3-assessment.md](docs/architecture/04-http3-assessment.md) |
 | Connection pool keyed by profile identity | Yes — two profiles never share a connection, which is what stops a request being observed with another identity's fingerprint |
 | HSTS | Yes. Learned from responses, applied before the request leaves; a header arriving over cleartext is ignored |
 | HSTS preload list | Yes, behind the off-by-default `hsts-preload` feature: Chromium's complete list, 94,628 entries, which protects the first request to an origin. Off by default because it grows a release binary by 1,750,560 bytes (measured — almost all of it the table itself: `__TEXT,__const` grows 1,748,992 and executable code only 960) |
 | Proxies | Yes: HTTP `CONNECT`, SOCKS5 and SOCKS5h, with rotation and `NO_PROXY`. A pool of two or more gives **each exit its own cookie jar, client-hint grant and validator store** by default, so rotating addresses does not present one session from all of them. `ClientBuilder::proxy_isolation` states either choice explicitly. TLS session tickets are still shared and can link exits below HTTP — see `ProxyIsolation`'s documentation |
-| DNS | Yes: caching, with concurrent lookups for one name collapsed into one. **Not TTL-aware** — `lookup_host` does not expose the TTL the server returned, so a fixed 60 s is applied and said so at `caching.rs:33-38` |
+| DNS | Yes: caching, with concurrent lookups for one name collapsed into one. **Not TTL-aware** — `lookup_host` does not expose the TTL the server returned, so a fixed 60 s is applied and said so at `caching.rs:33-40` |
 | Happy Eyeballs (RFC 8305) | **No.** Addresses are tried in the resolver's order; a browser races the families. A latency difference, not an observable one |
 
 ### Browser identity
@@ -195,7 +200,7 @@ repository; the measured claims behind the fidelity rows are in
 | Retry with backoff and jitter | Yes, idempotent methods by default |
 | Rate limiting | Yes |
 | Concurrency control | A seam, not a policy. The engine asks a caller-installed `ConcurrencyController` for a lease before each hop and reports back what was observed — a status code and headers, never a conclusion drawn from them. The default is no controller at all. The two shipped laws, `FixedConcurrency` and `AdaptiveConcurrency`, are equals in the `chromulate-concurrency` crate behind the off-by-default `adaptive-concurrency` feature; a third-party controller needs neither the feature nor that crate |
-| Middleware | Yes — a `Middleware`/`Next` chain, plus six other extension seams |
+| Middleware | Yes — a `Middleware`/`Next` chain, alongside seams for the resolver, the cookie store, the proxy provider, the TLS backend, the concurrency controller, the cache storage and the profile registry |
 | `basic_auth` / `bearer_auth` | Yes, marked sensitive so credentials stay out of logs |
 | JSON, form and query helpers | Yes |
 | `multipart/form-data` | Yes, behind the off-by-default `multipart` feature, and streaming: a `Part::file` goes from disk to socket without being buffered. The encoding follows a recorded capture of Chrome 151 rather than RFC 7578 alone, and the boundary is verified absent from every buffered part before use |
@@ -246,9 +251,9 @@ graph TD
     concurrency --> http
     http --> tls["chromulate-tls"]
     http --> header["chromulate-header"]
-    http --> cookie["chromulate-cookie"]
     http --> compression["chromulate-compression"]
     http --> dns["chromulate-dns"]
+    facade --> cookie["chromulate-cookie"]
     http --> cache["chromulate-cache"]
     http --> proxy["chromulate-proxy"]
     tls --> profile["chromulate-profile"]
@@ -276,6 +281,9 @@ workspace — the fingerprint algebra is deliberately free-standing.
   specification, with the reasoning and the rejected alternatives.
 - [Roadmap](docs/architecture/03-roadmap.md) — what exists, what is next, what is
   speculative.
+- The numbered assessments — [HTTP/3](docs/architecture/04-http3-assessment.md) and
+  [network events](docs/architecture/05-network-events-assessment.md) — each answering one
+  "should we build this" question with a measurement rather than an opinion.
 - [Fidelity](docs/fidelity.md) — what a server actually sees, layer by layer, measured
   against a live capture of the browser being modelled. Read this before assuming the TLS
   fingerprint matches.

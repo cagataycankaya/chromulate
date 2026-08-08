@@ -10,7 +10,7 @@
   },
 
   "_finding_extension_order_is_randomised": {
-    "claim": "Chrome permutes the ClientHello extension order on every connection, so JA3 is not stable for a single browser build. The cipher suite order is stable. JA4 sorts extensions before hashing and is therefore stable across connections.",
+    "claim": "Chrome permutes the ClientHello extension order on every connection, so JA3 is not stable for a single browser build. The cipher suite order is stable. JA4 sorts extensions before hashing, so the permutation does not move it; the two samples below still carry different full JA4 strings because the second resumed a session and added pre_shared_key, which changes the extension count. Their JA4 cipher components are identical, and that is the component the permutation would have disturbed.",
     "evidence": "sample_navigate and sample_clean below were produced by the same browser process minutes apart. Their ja3_hash values differ; their ja4 cipher component (8daaf6152771) is identical.",
     "verified": true
   },

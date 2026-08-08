@@ -53,7 +53,7 @@
 //! controllers read what a server signals and stay *under* it. See the scope
 //! boundary in `CLAUDE.md`.
 
-#![doc(html_root_url = "https://docs.rs/chromulate-concurrency/0.2.0")]
+#![doc(html_root_url = "https://docs.rs/chromulate-concurrency/0.3.0")]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 

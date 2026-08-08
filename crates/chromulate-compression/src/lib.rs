@@ -30,7 +30,7 @@
 //! exactly what a given build supports, so a client can advertise only what it can
 //! actually decode.
 
-#![doc(html_root_url = "https://docs.rs/chromulate-compression/0.1.0")]
+#![doc(html_root_url = "https://docs.rs/chromulate-compression/0.3.0")]
 #![warn(missing_docs)]
 
 mod coding;

@@ -126,7 +126,7 @@ cannot reach the target shape, the documentation says so in the same place it de
 target (section 8). Streaming by default: buffering happens when a caller asks for it, with
 a limit, never as a side effect. Typed errors: no stringly-typed failure classification in
 any public signature. And no `unsafe` — `unsafe_code = "forbid"` workspace-wide
-(`Cargo.toml:91`), which has real costs, discussed in section 3.3 and priced in section 14.
+(`Cargo.toml:93`), which has real costs, discussed in section 3.3 and priced in section 14.
 
 ---
 
@@ -134,7 +134,7 @@ any public signature. And no `unsafe` — `unsafe_code = "forbid"` workspace-wid
 
 ### 2.1 The graph
 
-The workspace declares fifteen members (`Cargo.toml:3-19`): the fourteen published crates
+The workspace declares sixteen members (`Cargo.toml:3-20`): the fifteen published crates
 drawn below, plus `chromulate-bench`, which is `publish = false` and sits outside the graph
 because it depends on the others only in order to measure them. Dependencies point downward
 only; there are no cycles.
@@ -159,6 +159,9 @@ graph TD
     http --> profile
     http --> core
     http -.->|"cache feature"| cache["chromulate-cache"]
+
+    concurrency["chromulate-concurrency"] --> http
+    concurrency --> core
 
     tls --> fingerprint["chromulate-fingerprint"]
     tls --> core
@@ -348,7 +351,7 @@ unconditionally, and the facade re-exports them. Only one of the two is actually
 seam.
 
 **`chromulate-metrics` — `tracing` plus a middleware.** `tracing` is already a workspace
-dependency (`Cargo.toml:61`). A metrics crate would either wrap OpenTelemetry, forcing a
+dependency (`Cargo.toml:63`). A metrics crate would either wrap OpenTelemetry, forcing a
 fast-moving dependency on every user, or reimplement what `tracing` already does. The design
 instead emits `tracing` spans and leaves the bridge to the user's telemetry stack. Section
 9.7 lists the two spans that exist and is explicit that their names and fields are not yet
@@ -449,7 +452,7 @@ request costs two pointers, not a `Vec` clone. `HostPort` stores its host as `Ar
 (`traits.rs:29`) rather than `String`, because a resolution target is cloned into cache
 keys, pool keys and log fields far more often than it is constructed.
 
-`forbid(unsafe_code)` (`Cargo.toml:91`) has a concrete, visible cost in this codebase, and
+`forbid(unsafe_code)` (`Cargo.toml:93`) has a concrete, visible cost in this codebase, and
 the design pays it deliberately rather than pretending it is free. The idiomatic way to
 implement a streaming body in async Rust is `pin-project-lite`, whose expansion contains
 `unsafe`. Forbidding it means streams must be boxed and pinned at construction. `Body` does
@@ -887,7 +890,7 @@ The last row is the one that justifies `RequestOptions` existing in core. `Sec-F
 is computed from the initiator origin (`request.rs:139`) against the target: `none` when
 there is no initiator, `same-origin` on an exact origin match using `Origin`'s normalised
 comparison (`uri.rs:15-20`), `same-site` when the registrable domains match — which needs
-the `psl` crate already in the workspace (`Cargo.toml:81`) — and `cross-site` otherwise.
+the `psl` crate already in the workspace (`Cargo.toml:83`) — and `cross-site` otherwise.
 `Sec-Fetch-Mode` and `Sec-Fetch-Dest` come straight from the enums' `as_str`
 (`request.rs:40-48`, `request.rs:74-84`). The `Referer` comes from `referrer_for`
 (`uri.rs:89-107`), which already implements the `strict-origin-when-cross-origin` default,
@@ -1167,7 +1170,7 @@ on identity and proxy rather than on the address alone.
 ### 7.4 Lifecycle, limits and eviction
 
 Defaults as implemented in `PoolConfig::default()` (`pool.rs:239-249`) and `EngineConfig`
-(`engine.rs:121`), all adjustable:
+(`engine.rs:112-140`), all adjustable:
 
 | Parameter | Default | Why |
 |---|---|---|
@@ -1266,7 +1269,7 @@ capabilities is worse than no specification: it causes people to ship things tha
 work and to stop checking.
 
 All rustls citations are against **rustls 0.23.43** as vendored in the local registry, the
-version resolved by the workspace's `rustls = "0.23"` requirement (`Cargo.toml:71`). Paths
+version resolved by the workspace's `rustls = "0.23"` requirement (`Cargo.toml:73`). Paths
 are relative to the crate root. All claims below were read from that source, not recalled.
 
 ### 8.1 The division of labour
@@ -1363,7 +1366,7 @@ pin an extension's position, or to set the order seed. Everything rustls sends, 
 because rustls decided to.
 
 **The ring provider has no post-quantum group.** With the workspace's current feature
-selection — `rustls` with `ring` (`Cargo.toml:71`) — the available groups are X25519,
+selection — `rustls` with `ring` (`Cargo.toml:73`) — the available groups are X25519,
 secp256r1 and secp384r1 (`src/crypto/ring/mod.rs:179-180`). Chrome offers
 `X25519MLKEM768` first (`chrome-151-macos.json:84-85`). That group exists in rustls only
 under the `aws-lc-rs` provider. Switching providers is a real option and is discussed in
@@ -1480,8 +1483,9 @@ distinguishing property is `forbid(unsafe_code)` — a change of identity. The t
 middle path is to make the TLS backend a trait, so a BoringSSL backend can exist as an
 opt-in crate maintained by whoever needs it without the default build acquiring a C
 dependency. **That seam is built** — §9.8 describes it as it stands, not as a plan — but no
-backend other than rustls exists, so nothing about the emitted bytes has changed. A seam is
-permission to write the thing, not the thing.
+backend that puts bytes on a socket other than rustls exists (the mock and recording
+backends of §9.8 answer different questions), so nothing about the emitted bytes has
+changed. A seam is permission to write the thing, not the thing.
 
 Two of the four have therefore landed, and neither moved the numbers this section is about:
 the provider switch changed the supported groups and the key shares, and the backend seam
@@ -1492,9 +1496,16 @@ the rest of the capability statement in §8.4 stands as written.
 
 ## 9. Extensibility
 
-Seven seams. Each is a trait a third party can implement without forking anything, and each
-has a shipped implementation that uses only the public API — which is how we know the seam
-is actually sufficient.
+The seams below are, with one exception, traits a third party can implement without forking
+anything, and each has a shipped implementation that uses only the public API — which is
+how we know the seam is actually sufficient. The exception is §9.7, telemetry, which is
+`tracing` spans rather than a trait and says so where it starts.
+
+The subsections are the list. A count used to open this section and it drifted twice: §9.8
+was added beneath it without moving the number, and `ConcurrencyController` and
+`CacheStorage` were never in it at all. A number nobody can check in under a minute is
+exactly what the release rule says to rewrite as the thing that can be checked, so the
+headings are now that thing.
 
 ### 9.1 Profiles
 
@@ -1851,7 +1862,7 @@ should not hand-write any. Vectorisation helps in header parsing, HPACK, TLS rec
 processing and decompression, and all four already live inside `httparse`, `h2`, `rustls`
 and the compression backends, which have had far more optimisation attention than this
 project will give them — and the intrinsics are unavailable here anyway under
-`forbid(unsafe_code)` (`Cargo.toml:91`). The useful version of this requirement is to avoid
+`forbid(unsafe_code)` (`Cargo.toml:93`). The useful version of this requirement is to avoid
 byte-at-a-time copies *between* those crates. **Whether any such copy exists on the hot
 path is UNMEASURED.**
 
@@ -2045,7 +2056,7 @@ Miri: over `chromulate-core` only. It has no I/O (`lib.rs:3-6`), so it is tracta
 and not elsewhere.
 
 Platform matrix: Linux, macOS, Windows, on stable and on the MSRV of 1.88
-(`Cargo.toml:28`).
+(`Cargo.toml:29`).
 
 ---
 
@@ -2053,7 +2064,7 @@ Platform matrix: Linux, macOS, Windows, on stable and on the MSRV of 1.88
 
 ### 13.1 Certificate validation
 
-Always on. Verification uses `webpki-roots` (`Cargo.toml:75`) by default, with platform
+Always on. Verification uses `webpki-roots` (`Cargo.toml:77`) by default, with platform
 root store support as an option.
 
 There is no convenient way to turn verification off. The mechanism that exists —
@@ -2158,7 +2169,7 @@ a measurement now exists it names the figure or points at
 | 3 | Body representation | Three-shape enum (`body.rs:21-28`) | Always-boxed stream; `Vec<u8>` | Keeps empty and fixed bodies allocation-free at the cost of three match arms in every body operation. Memory: lower for the common case. |
 | 4 | Error type | Flat typed enum (`error.rs:63`) | `anyhow`; nested enums; `Box<dyn Error>` | Callers branch on failure class without string parsing. Seventeen variants is a lot to match exhaustively, mitigated by `#[non_exhaustive]` and the classifier methods. |
 | 5 | HTTP status errors | Not errors | `Error::Status` variant | Makes middleware composable — no unwrapping to inspect a 404. Costs a small surprise for users coming from clients that error on 4xx. |
-| 6 | TLS backend | rustls (`Cargo.toml:71`) | BoringSSL FFI; OpenSSL; native-tls | Pure Rust, no C toolchain, `forbid(unsafe_code)` stays honest. Costs byte-exact ClientHello fidelity — section 8. This is the project's largest single trade-off. |
+| 6 | TLS backend | rustls (`Cargo.toml:73`) | BoringSSL FFI; OpenSSL; native-tls | Pure Rust, no C toolchain, `forbid(unsafe_code)` stays honest. Costs byte-exact ClientHello fidelity — section 8. This is the project's largest single trade-off. |
 | 7 | Protocol implementations | hyper and h2 | Bespoke HTTP/1.1 and HTTP/2 | Correctness and maturity for free. Costs pseudo-header order and header order control on HTTP/2 (section 8.5). |
 | 8 | Pool key | scheme + host + port + proxy + identity + protocol (`pool.rs:134-147`) | Origin only; origin + proxy | Prevents a silent, load-dependent identity mix (section 7.2); `protocol` keeps the two populations, which obey opposite ownership rules, from matching each other. Costs connection reuse when rotating profiles — a legible, measurable cost. |
 | 9 | Fingerprint / profile split | Two crates | One crate | Keeps the golden test a genuine cross-check between algebra and data. Costs one crate boundary. |
@@ -2166,7 +2177,7 @@ a measurement now exists it names the figure or points at
 | 11 | Middleware trait location | `chromulate-core` | `chromulate-middleware` | Avoids a second core that everything depends on. Costs nothing identifiable. |
 | 12 | Shipped profile storage | Rust constants, JSON loader for user captures | Runtime file loading; build script | No runtime file dependency; a missing file cannot be a production failure. Costs a recompile to change a profile, which is correct — profile changes are reviewable code changes. |
 | 13 | Extension order model | Set plus permutation policy | Frozen wire order | Matches the verified capture finding (`chrome-151-macos.json:12-16`). A frozen order would be less faithful and trivially distinguishable. Costs a more complex type. |
-| 14 | `forbid(unsafe_code)` | Yes (`Cargo.toml:91`) | Allow with review | No `pin-project-lite`; streams are boxed (`body.rs:19`). One allocation per streaming body. Buys an auditable memory-safety story for a library pointed at untrusted input. |
+| 14 | `forbid(unsafe_code)` | Yes (`Cargo.toml:93`) | Allow with review | No `pin-project-lite`; streams are boxed (`body.rs:19`). One allocation per streaming body. Buys an auditable memory-safety story for a library pointed at untrusted input. |
 | 15 | HTTP cache | `chromulate-cache`, behind `chromulate-http`'s off-by-default `cache` feature (section 2.3) | No cache at all; a cache on by default | A cache is state a caller should opt into, and a wrong cache is worse than none. Costs a feature flag and a direct dependency to name the type; a default build still has no repeat-fetch parity with a browser. |
 | 16 | Pool concurrency | Single `Mutex<PoolState>` (`pool.rs:266`) | Sharded map; lock-free | Measured flat in origin count to 100 origins, at parity with `reqwest`, once the release sweep was amortised (§10.3). Costs a shared lock on every checkout and release; sharding needs a measurement showing that lock binding before it is worth a second data structure. |
 | 17 | Body default | Streaming (`body.rs:1-7`) | Buffer, opt into streaming | Constant memory for large downloads; `collect(limit)` (`body.rs:112`) is one call away when a caller wants bytes. Costs a slightly less convenient default for small JSON responses. |

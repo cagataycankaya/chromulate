@@ -54,7 +54,7 @@
 //! # }
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/chromulate-http/0.1.0")]
+#![doc(html_root_url = "https://docs.rs/chromulate-http/0.3.0")]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 

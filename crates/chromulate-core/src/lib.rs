@@ -15,7 +15,7 @@
 //! assert!(Error::Timeout(Phase::Connect).is_retryable());
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/chromulate-core/0.1.0")]
+#![doc(html_root_url = "https://docs.rs/chromulate-core/0.3.0")]
 #![warn(missing_docs)]
 
 pub mod body;

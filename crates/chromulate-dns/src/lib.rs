@@ -34,7 +34,7 @@
 //! # }
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/chromulate-dns/0.1.0")]
+#![doc(html_root_url = "https://docs.rs/chromulate-dns/0.3.0")]
 #![warn(missing_docs)]
 
 mod caching;

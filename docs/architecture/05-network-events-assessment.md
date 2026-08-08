@@ -22,11 +22,11 @@ would settle them.
 ## 1. What `Outcome` is, and what replacing it would cost
 
 `Outcome` is two observed facts — status code and response headers — and deliberately
-nothing concluded from them (`chromulate-http/src/concurrency.rs:183-207`). The seam is two
+nothing concluded from them (`chromulate-http/src/concurrency.rs:157-181`). The seam is two
 methods: `acquire` returns a `Lease`, `Lease::complete` reports the outcome
-(`concurrency.rs:148-175`). Latency is deliberately absent: a controller measures it
+(`concurrency.rs:122-149`). Latency is deliberately absent: a controller measures it
 between `acquire` and `complete` against its own clock, which is what keeps a controller
-with an injected clock testable without waiting (`concurrency.rs:198-202`).
+with an injected clock testable without waiting (`concurrency.rs:172-176`).
 
 That minimalism is not an accident to be outgrown; it is the property that makes a
 third-party controller a page of code. Replace `Outcome` with an event subscription and
@@ -43,7 +43,7 @@ Read the list again as a description of *where the information lives*:
 
 - `Connected` and `TlsHandshakeComplete` happen in the dialling path
   (`connect.rs:408`). A pooled connection skips both: the engine checks the pool first
-  (`engine.rs:851`), and a browser-grade client reuses aggressively, so for most requests
+  (`engine.rs:847`), and a browser-grade client reuses aggressively, so for most requests
   these events do not occur at all. Any consumer treating them as per-request phases must
   first model their absence.
 - `ConnectionClosed` is not a request event. Connections outlive and interleave requests
@@ -53,7 +53,7 @@ Read the list again as a description of *where the information lives*:
   path, which this crate drives but does not instrument. UNVERIFIED whether it can be
   observed without patching hyper; settled by attempting it.
 - `RequestStarted` and `BodyCompleted` are engine-visible today: the send path that
-  consults the concurrency seam (`engine.rs:680`, `engine.rs:690`) brackets exactly that
+  consults the concurrency seam (`engine.rs:677`, `engine.rs:686`) brackets exactly that
   span.
 
 So the event list describes a **request-lifecycle observability surface spanning four

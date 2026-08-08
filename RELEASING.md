@@ -88,7 +88,20 @@ so it gets a documentation pass of its own — before tagging, not after.
 3. **Check the version-shaped statements**: the README status banner, the feature
    tables, the roadmap's phase statuses, and any "not yet implemented" that has since
    been implemented.
-4. **Bump the workspace version**, update `CHANGELOG.md`'s section header and date.
+4. **Bump the workspace version**, update `CHANGELOG.md`'s section header and date, and
+   bump `html_root_url` in every crate that declares one:
+
+   ```
+   rg -n 'html_root_url' crates/ | rg -v "$NEW_VERSION"
+   ```
+
+   That grep must come back empty. It is called out separately because the attribute is
+   the one version-shaped statement that lives in nine `lib.rs` files rather than in
+   `Cargo.toml`, and step 3 missed it for the whole of 0.2.0 — every one of them still
+   said `0.1.0` when 0.3.0 was being prepared. Seven crates declare no `html_root_url` at
+   all, which is why nothing broke and why nobody noticed; if that inconsistency is ever
+   resolved, resolving it by deleting the attribute removes this step, since docs.rs sets
+   the value itself for published crates.
 5. **Tag only a commit whose CI is green** — all jobs, all platforms. A published tag is
    never moved afterwards; if the tagged commit turns out broken, the fix is a new
    release.

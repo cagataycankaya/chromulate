@@ -2,8 +2,8 @@
 
 Status: assessment with a working spike. Written 2026-08-04.
 
-`README.md:163` says HTTP/3 is assessed but not shipped, and `README.md:336` adds that Chrome
-upgrades where an origin offers it and Chromulate stays on HTTP/2. Both are still true after
+`README.md:168` says HTTP/3 is assessed but not shipped, and `README.md:360-361` adds that
+Chrome upgrades where an origin offers it and Chromulate stays on HTTP/2. Both are still true after
 this work, and this document argues
 it should stay true for the QUIC half for now. It also explains why the other half —
 learning that an origin *offers* HTTP/3 — has shipped.
@@ -82,14 +82,14 @@ This workspace's was too when this section was first written, checked rather tha
 `cargo +1.85.0 check -p chromulate-h3 --all-features` exited `0` with the whole QUIC stack in
 the graph. That check also turned up something this work did not cause and does not fix on
 its own: `cargo +1.85.0 check --workspace --all-features` failed on the branch this crate was
-written from, for two reasons that have nothing to do with HTTP/3 — `crates/chromulate-http/src/engine.rs:745`
-used a `let` chain, stable in 1.88 and not in 1.85, and `rcgen` pulls `time@0.3.47`, which
+written from, for two reasons that have nothing to do with HTTP/3 — a `let` chain in
+`crates/chromulate-http/src/engine.rs`, stable in 1.88 and not in 1.85, and `rcgen` pulls `time@0.3.47`, which
 requires 1.88. Both reach the workspace through crates this change does not touch.
 
 That made the declared MSRV of `1.85` wrong on the day this crate landed, and it is why
 the sentence above is past tense: commit `775bafe` ("The declared MSRV was wrong, and CI
 could not have caught it"), the same day, raised the workspace's `rust-version` to `1.88`
-(`Cargo.toml:28`) — the number the `let` chain and `rcgen` already required — rather than
+(`Cargo.toml:29`) — the number the `let` chain and `rcgen` already required — rather than
 removing either cause. `quinn`'s `1.85` did not move, so the margin this crate now sits on
 is three point-releases, not zero, and `cargo +1.85.0 check -p chromulate-h3 --all-features`
 now exits `101` (`chromulate-h3@0.1.0 requires rustc 1.88`), refused on the workspace's
@@ -268,7 +268,7 @@ identifiers are defined at `src/proto/frame.rs:445-446`. The public builder offe
 `enable_extended_connect`, and no reordering or omission.
 
 This is the HTTP/2 SETTINGS story again — the one this project reproduces *exactly* today,
-per `docs/fidelity.md:73` — except that here the ordering is not reachable. It has been read
+per `docs/fidelity.md:29` — except that here the ordering is not reachable. It has been read
 from source, not observed on the wire, because observing our own SETTINGS frame needs a
 server the spike does not stand up.
 
@@ -404,7 +404,7 @@ cache to live on the `Client` and survive across requests.
 **Files that would change**, none of which this wave touched: `crates/chromulate-http/src/pool.rs`
 (key and ownership model), `connect.rs` (a UDP dial path beside the TCP one), `engine.rs` (
 protocol selection and the upgrade decision), `crates/chromulate/src/client.rs` (builder
-surface and the cache's home), plus `docs/fidelity.md:31` and `README.md:163,336`, which all
+surface and the cache's home), plus `docs/fidelity.md:36` and `README.md:168,360-361`, which all
 state HTTP/3 is unsupported and would become wrong.
 
 **What would not change:** `chromulate-header` (HTTP/3 uses the same pseudo-headers in the

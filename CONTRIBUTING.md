@@ -53,7 +53,7 @@ target a short run — see `fuzz/README.md`. To run those two locally:
 `cargo install cargo-machete cargo-fuzz`, then `cargo machete` and
 `cargo +nightly fuzz build`.
 
-**Beware the shell pitfall that has bitten this project twice.** `cargo clippy … | tail -1`
+**Beware the shell pitfall that has bitten this project three times.** `cargo clippy … | tail -1`
 reports the exit status of `tail`, not of clippy, so a chained `&&` proceeds through a
 failure. Use `set -e` and let each command stand alone, or check `${PIPESTATUS[0]}`.
 

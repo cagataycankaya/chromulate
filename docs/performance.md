@@ -22,7 +22,7 @@ is inferred or unmeasured, it says so.
 | `HeaderEngine::apply`, per request | 80 allocs / 4.38 µs | **8 allocs / 1.46 µs** | `cargo bench -p chromulate-header` |
 | Cookie `store` into a full default jar | 21.9–22.7 µs | **1.32–1.85 µs** | `cargo bench -p chromulate-cookie` |
 | `Body::collect`, 16 MiB, length declared | 1.62 ms | **492 µs (31.7 GiB/s)** | `cargo bench -p chromulate-core` |
-| 512 pooled connections after 4 MiB bodies, with the 16 KiB buffer cap | ~381 MiB | **~217 MiB** | `--bin memory -- pool 512` |
+| 512 pooled connections after 4 MiB bodies, with the 16 KiB buffer cap | ~381 MiB | **~217 MiB** | `BENCH_POOL_BODY=4194304 BENCH_H1_MAX_BUF=16384 --bin memory -- pool 512`; the baseline is the same command without `BENCH_H1_MAX_BUF` |
 | Streaming a 256 MiB body, peak RSS delta | +1.45 MiB | **+1.39 MiB** | `--bin memory -- stream` |
 
 Two honesty notes. The throughput confirmation runs were taken on a noisier machine than
@@ -34,7 +34,7 @@ exists for (grown buffers); under 1 KiB bodies it saves nothing.
 ## What the wave changed, and what each change was worth
 
 Ranked as applied. Every mechanism below was verified by the named benchmark before and
-after the change; the test suite (577 tests), `clippy -D warnings`, and
+after the change; the test suite (577 tests at the time, 932 today), `clippy -D warnings`, and
 `tools/cookie-mutation-check.py` were green at every commit.
 
 ### 1. The header engine precomputes everything the profile fixes
@@ -158,7 +158,10 @@ values under hyper's 8 KiB floor are raised to it.
 
 **Measured, 512 pooled connections that each downloaded a 4 MiB body first:** default
 buffers 370–476 MiB resident (median ~381); capped at 16 KiB, 188–220 MiB (median ~217) —
-roughly 45% less, with no overlap between the run sets. With 1 KiB bodies the buffers
+43% less, with no overlap between the run sets. Both halves need
+`BENCH_POOL_BODY=4194304`, and the capped half needs `BENCH_H1_MAX_BUF=16384`: without the
+first, every connection downloads the default 1 KiB body and the retained-buffer cost this
+measurement exists to expose never appears. With 1 KiB bodies the buffers
 never grow and the cap saves nothing; that is the workload to size it against. For HTTP/2
 deployments, remember the advertised 15 MiB connection window — part of the Akamai
 fingerprint, so not tunable — is the number to plan per-connection memory against.
@@ -213,7 +216,7 @@ hashes measurably, and nothing regressed:
 | | Before | After |
 |---|---:|---:|
 | `fingerprint/ja4` | 4.39 µs | **3.52 µs** (−20%) |
-| `fingerprint/ja4_raw` | 3.38 µs | **3.19 µs** (−14%) |
+| `fingerprint/ja4_raw` | 3.38 µs | **3.19 µs** (−5.6%) |
 | `fingerprint/ja3_hash` | 373 ns | **350 ns** (−6%) |
 | `fingerprint/wire_extension_order` | 183 ns | **171 ns** (−6.5%) |
 | Allocations per request | 48 | 48 |
