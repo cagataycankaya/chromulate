@@ -36,12 +36,16 @@
 //! stack puts on the wire:
 //!
 //! ```no_run
+//! use chromulate::tls::TlsBackendConfig;
+//!
 //! # async fn run() -> chromulate::Result<()> {
 //! let client = chromulate::Client::chrome()?;
 //!
 //! // The handshake: rustls builds its own ClientHello and takes no
-//! // instruction on its shape.
-//! println!("{}", client.engine().tls().fidelity());
+//! // instruction on its shape. `fidelity` is a trait method, so the trait is
+//! // in scope — the default backend also has an inherent one, and relying on
+//! // that is what breaks a build whose `ActiveBackend` is something else.
+//! println!("{}", TlsBackendConfig::fidelity(client.engine().tls()));
 //!
 //! // The HTTP/2 preface: hyper accepts some of it and hard-codes the rest.
 //! for gap in &client.engine().http2_fidelity().unsupported {
@@ -160,8 +164,8 @@ pub mod dns {
 /// TLS configuration, and the fidelity report that goes with it.
 pub mod tls {
     pub use chromulate_tls::{
-        Fidelity, HandshakeInfo, RootSource, STRUCTURAL_LIMITS, SessionStore, TargetIdentity,
-        TlsEngine, TlsEngineBuilder, TrustPolicy,
+        ActiveBackend, Fidelity, HandshakeInfo, RootSource, STRUCTURAL_LIMITS, SessionStore,
+        TargetIdentity, TlsBackend, TlsBackendConfig, TlsEngine, TlsEngineBuilder, TrustPolicy,
     };
 }
 

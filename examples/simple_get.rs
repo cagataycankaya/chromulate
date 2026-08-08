@@ -6,6 +6,13 @@
 //! ```
 
 use chromulate::Client;
+// `target_identity` and `fidelity` are called through the trait rather than as
+// inherent methods. The rustls backend happens to have inherent methods of the
+// same name, so `engine.tls().fidelity()` compiles in a default build and stops
+// compiling the moment `ActiveBackend` names anything else — which is how the
+// facade came to be broken under `--cfg chromulate_mock_backend`. Naming the
+// trait keeps this example honest about which one it means.
+use chromulate::tls::TlsBackendConfig;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -31,8 +38,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // are worth printing together: the target alone would overstate what the
     // request actually looked like.
     let engine = client.engine();
-    println!("\ntarget identity: {}", engine.tls().target_identity());
-    println!("tls fidelity:    {}", engine.tls().fidelity());
+    println!(
+        "\ntarget identity: {}",
+        TlsBackendConfig::target_identity(engine.tls())
+    );
+    println!(
+        "tls fidelity:    {}",
+        TlsBackendConfig::fidelity(engine.tls())
+    );
     println!("http/2 target:   {}", engine.http2_fidelity().target);
     for gap in &engine.http2_fidelity().unsupported {
         println!("  http/2 gap: {gap}");

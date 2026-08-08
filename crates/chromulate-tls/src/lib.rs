@@ -169,9 +169,13 @@ pub type TlsStream<IO> = tokio_rustls::client::TlsStream<IO>;
 ///
 /// That claim is checked rather than asserted: the off-by-default
 /// `--cfg chromulate_mock_backend` flag points this alias at `mock::MockBackend`, which
-/// shares no code and no types with rustls, and the workspace still compiles
-/// and its tests still pass. See `mock` for the three trait members writing
-/// that second implementation turned out to be missing.
+/// shares no code and no types with rustls, and `chromulate-tls`, `chromulate-http`
+/// and the `chromulate` facade all still compile and pass their tests. Those
+/// three crates, named rather than "the workspace" — the claim said the latter
+/// until 2026-08-08 while the CI job built only the first two, and the facade
+/// had meanwhile stopped compiling under the flag entirely. See `mock` for the
+/// three trait members writing that second implementation turned out to be
+/// missing.
 ///
 /// `recording::RecordingBackend`, behind the same flag, answers the harder
 /// question the mock cannot: whether a backend handed nothing but wire code
