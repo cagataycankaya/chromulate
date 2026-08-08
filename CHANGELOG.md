@@ -5,6 +5,46 @@ All notable changes to this project are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) — with the usual pre-1.0 caveat
 that breaking changes may land in a minor release.
 
+## [Unreleased]
+
+### Documentation
+
+- **Two documents said HTTP/2 regular header order was unreachable. It has been reproduced
+  since before 0.1.0.** The premise was right and the conclusion was inverted: h2 does encode
+  header fields by iterating the `HeaderMap`, and `http` does decline to document an
+  iteration order — but iterating the map is exactly what makes the order controllable. The
+  engine rebuilds the outgoing map by appending in the profile's order
+  (`crates/chromulate-http/src/engine.rs:1146`) and h2 writes it out that way, which
+  `crates/chromulate/tests/live_identity.rs` asserts against the capture on the wire.
+
+  Because that rests on an undocumented property it carries its own guard,
+  `a_rebuilt_header_map_iterates_in_the_order_it_was_appended` (`engine.rs:1362`), which
+  fails if a future `http` release reorders. `docs/fidelity.md` and the README had it right
+  as an exact match throughout; §8.5 of the design document and Phase 6 of the roadmap
+  contradicted them, and both are corrected. This one was found in an audit before 0.2.0 was
+  tagged and was left out of the fix list by mistake, so it shipped in a released document.
+
+- **Phase 6 of the roadmap now costs its options in counted lines rather than adjectives.**
+  It previously weighed two routes as "the first is cheaper and slower; the second is a
+  significant amount of protocol code to own", which is not a basis for choosing. Measured:
+  an upstream h2 setter is ~90–110 lines, because a config value reaches the send path
+  through 13 sites in 5 files (traced via `initial_max_send_streams`). A published fork
+  costs the same ~100 lines plus re-owning hyper's HTTP/2 glue, because a library cannot ship
+  a `[patch.crates-io]`.
+
+  Of hyper's 2,388 lines of h2 glue about 676 are unreachable here — `ping.rs` is gated on
+  `is_enabled()`, false when neither adaptive window nor keep-alive is set, so 248 of its 515
+  lines never construct; CONNECT upgrade support is ~83; and 15 of `client/conn/http2.rs`'s 27
+  public functions are setters nothing calls. That leaves ~1,712 needed, but it does not lift
+  out: `proto/h2/client.rs` reaches into nine internal hyper modules. The empirical check
+  agrees — `wreq` took this route and carries a renamed h2 fork plus `wreq-proto`, a fork of
+  hyper's whole protocol layer at 10,836 lines whose h2 glue is 2,412 against hyper's 2,388.
+  Plan against ~10,800, not ~1,700.
+
+  The recommendation that falls out is to try upstream first: h2 issue #637 asked for a
+  `header_table_size` setter for fingerprinting reasons, closed as completed, and this crate
+  calls that setter today.
+
 ## [0.2.0] — 2026-08-05
 
 ### Added
