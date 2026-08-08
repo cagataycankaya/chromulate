@@ -56,7 +56,7 @@ reason is usually the useful part.
 | Is cancellation safe? | Yes, and structurally: dropping the response future drops the whole tree; there is no token to forget to check. A body dropped early takes its connection with it rather than pooling a socket at an unknown read position. | [4.4](#44-cancellation-and-deadlines), [7.4](#74-lifecycle-limits-and-eviction) |
 | Is there a Tower-like middleware layer? | Yes in shape, no in type: `Middleware` + `Next`, not `tower::Service`. Retry deliberately sits below the chain rather than in it. | [9.2](#92-middleware) |
 | What is the pool's ownership model? | HTTP/1.1 is exclusive and returns through the response body; HTTP/2 is shared and is registered when opened. Two protocols, two doors. | [7.4](#74-lifecycle-limits-and-eviction) |
-| How is backpressure applied? | Flow control and consumer polling bound bytes. In a default build nothing bounds concurrent requests or open sockets — that is the caller's job, and the table says so explicitly; the off-by-default `adaptive-concurrency` feature adds a learned per-origin limit, not a socket ceiling. | [10.4](#104-backpressure-and-streaming) |
+| How is backpressure applied? | Flow control and consumer polling bound bytes. In a default build nothing bounds concurrent requests or open sockets — that is the caller's job, and the table says so explicitly; a `ConcurrencyController` the caller installs adds a per-origin limit (the shipped laws live in `chromulate-concurrency`), not a socket ceiling. | [10.4](#104-backpressure-and-streaming) |
 | What is the task spawn strategy? | One driver task per connection, one per DNS resolution, none per request. | [10.3.1](#1031-task-spawning) |
 | How does lock contention behave under real load? | One mutex for the pool, measured flat to 100 origins at parity with `reqwest`; the sweep that used to make it bind is fixed and the fix is measured. | [10.3](#103-locks) |
 | Is there unsafe code? | None in any shipped crate — `forbid(unsafe_code)` throughout. One exception in `chromulate-bench`, which is `publish = false`: a counting global allocator cannot be written without it. | [3.3](#33-ownership-borrowing-and-the-cost-of-forbidding-unsafe) |
@@ -1188,12 +1188,14 @@ once. This is deliberate — blocking a request behind a connection permit turns
 setting into a latency cliff — but it means the caps are not a file-descriptor guarantee,
 and a caller that needs one has to bound its own concurrency.
 
-One thing does bound requests in flight, and it is off by default: with the
-`adaptive-concurrency` feature on, each hop takes a per-origin permit before it runs
-(`engine.rs:562-564`, `crates/chromulate-http/src/adaptive.rs`). That limit is *learned* from
-what the origin's latency and status codes say it is comfortable serving, so it is not a
-file-descriptor guarantee either — it is a politeness control that happens to cap
-concurrency. A caller that needs a hard socket ceiling still has to impose one itself.
+One thing does bound requests in flight, and by default it is absent: each hop asks
+whatever `ConcurrencyController` the caller installed for a per-origin lease before it runs
+(`engine.rs:677`, `crates/chromulate-http/src/concurrency.rs`), and no controller is
+installed unless the caller says so. The shipped `AdaptiveConcurrency` law, now in
+`chromulate-concurrency`, *learns* its limit from what the origin's latency and status
+codes say it is comfortable serving, so it is not a file-descriptor guarantee either — it
+is a politeness control that happens to cap concurrency. A caller that needs a hard socket
+ceiling still has to impose one itself.
 
 Eviction happens on idle expiry, on any protocol error, and when the total cap is reached —
 least-recently-used first among idle connections. A connection is also dropped rather than
@@ -1802,7 +1804,7 @@ mechanisms here and only one of them is a queue:
 | Response bytes in flight | HTTP/2 flow control windows, and the consumer's polling — see below | — |
 | Request bytes in flight | the transport draining `Body::stream` chunk by chunk | — |
 | Response body held in memory | the consumer: `bytes_stream` is constant-memory, `bytes` buffers whole | `bytes` is bounded only by `max_response_size` |
-| Concurrent requests | a per-origin permit per hop, under the off-by-default `adaptive-concurrency` feature (`engine.rs:562-564`) | in a default build, nothing — the caller must bound its own concurrency |
+| Concurrent requests | a per-origin lease per hop, from whatever `ConcurrencyController` the caller installs (`engine.rs:677`) | with none installed — the default — nothing: the caller must bound its own concurrency |
 | Sockets open at once | **nothing in this crate** | `max_per_host` / `max_total` bound *idle* connections only |
 | Request rate | `RateLimit` middleware, if the caller installs one | off by default |
 
@@ -1813,12 +1815,14 @@ behind a *connection* permit was rejected because it turns a pool setting into a
 cliff that is very hard to attribute from the outside — but it does mean a caller issuing
 10,000 concurrent requests gets 10,000 sockets, and that bounding it is the caller's job.
 
-`adaptive-concurrency` is the one exception and it is a different mechanism, not a
-reversal of that decision. Its permit is per *origin* and its limit is discovered from the
-origin's own latency and refusals rather than configured, so it never turns a static setting
-into a cliff. It is also off by default, which means the default build behaves exactly as the
-paragraph above describes. A cache hit takes no permit at all — nothing was asked of the
-origin — and a transport error drops the permit without teaching the controller anything,
+An installed concurrency controller is the one exception, and it is a different mechanism,
+not a reversal of that decision. Its lease is per *origin*, and the limit behind it is the
+caller's chosen law — `AdaptiveConcurrency` discovers one from the origin's own latency and
+refusals, `FixedConcurrency` enforces a number the caller wrote — so it never turns a
+setting nobody chose into a cliff nobody can attribute. No controller is installed by
+default, which means the default build behaves exactly as the
+paragraph above describes. A cache hit takes no lease at all — nothing was asked of the
+origin — and a transport error drops the lease without teaching the controller anything,
 because a failure to connect may be this host's network rather than the origin's load.
 
 HTTP/2 flow control is the backpressure mechanism, and it only works if the client releases

@@ -7,6 +7,69 @@ that breaking changes may land in a minor release.
 
 ## [Unreleased]
 
+### Added
+
+- **`chromulate-concurrency`, a new crate holding the two per-origin control laws.**
+  `AdaptiveConcurrency`, `FixedConcurrency`, `Ceiling`, `ConcurrencyConfig`, `Signal`,
+  `Permit`, `OriginSnapshot`, `retry_after_delay`, `DEFAULT_ORIGIN_CAPACITY` and
+  `DEFAULT_FIXED_CAPACITY` all moved here from `chromulate-http` unchanged — same
+  behaviour, same defaults, same tests, new paths. The dependency runs one way only:
+  this crate depends on `chromulate-http` for the trait, and `chromulate-http` depends
+  on it in no form, dev-dependencies included. That is what makes "the engine holds no
+  policy" checkable rather than asserted.
+
+- **`chromulate_http::concurrency::Unlimited`**, a controller that grants every lease on
+  the first poll and learns nothing from any outcome. Behaviourally identical to
+  installing no controller at all — and *not* the cheaper of the two, because an
+  installed controller pays the seam's erasure of one boxed future and one boxed lease
+  per hop. It exists for a configuration that picks a controller at run time and would
+  otherwise thread an `Option` through every layer to say "none", and as the thing a
+  delegating third-party controller wraps when its own policy is switched off. A caller
+  who simply wants no concurrency control should still install nothing.
+
+### Changed
+
+- **The `adaptive-concurrency` feature is gone from `chromulate-http` (breaking).**
+  It gated the `ConcurrencyController` seam *and* the laws behind it with one switch, so
+  the trait a third-party controller implements existed only when a feature nobody else
+  in the build had turned on. The seam — `ConcurrencyController`, `Lease`, `Outcome`,
+  `acquire_from`, `complete_from`, `authority_of`, `Unlimited`, and
+  `EngineBuilder::concurrency` — is now always compiled.
+
+  A manifest naming `chromulate-http/adaptive-concurrency` fails to resolve and should
+  drop the feature. Code reaching `chromulate_http::adaptive::*` or
+  `chromulate_http::concurrency::{Ceiling, FixedConcurrency, FixedLease,
+  DEFAULT_FIXED_CAPACITY}` moves to `chromulate_concurrency::*`; everything else in
+  `chromulate_http::concurrency` keeps its path.
+
+  Compiling the seam unconditionally is free for a caller who installs nothing.
+  Measured with `cargo run --release -p chromulate-bench --bin allocs`, three runs
+  before and three after: 48 allocations per pooled request in all six, and 48 was also
+  the figure when the module was gated away entirely. The erasure is charged per
+  installed controller, not per build.
+
+- **`authority_of` moved from `chromulate_http::adaptive` to
+  `chromulate_http::concurrency` (breaking).** It is the key convention the trait offers
+  every implementation, so it stayed with the trait rather than leaving with the laws —
+  a third-party controller that wants the same key must not have to depend on somebody
+  else's policy crate to get it. `chromulate_concurrency::adaptive::authority_of`
+  re-exports it, so callers of the old path change only the crate name.
+
+- **`chromulate`'s `adaptive-concurrency` feature now pulls in `chromulate-concurrency`**
+  rather than forwarding to `chromulate-http`, and re-exports it as
+  `chromulate::concurrency`. What it gates changed: `ClientBuilder::concurrency` and the
+  seam types are now available with the feature *off*, so a caller can install a
+  controller of their own without enabling anything. The feature buys the two shipped
+  laws and nothing else. Enabling it still changes no behaviour on its own — a
+  controller has to be installed.
+
+- **The concurrency suite now runs in a default `cargo test --workspace`.** It sat behind
+  an off-by-default feature, so the ordinary test command never compiled it; the new
+  crate is an unconditional workspace member. Default-feature run: 846 tests before,
+  930 after. The `--all-features` total went 1,148 to 1,154, and every one of those six
+  is new rather than moved — two doctests on the new crate root and on `Unlimited`, and
+  four tests covering `Unlimited` and the no-controller default path.
+
 ### Documentation
 
 - **Two documents said HTTP/2 regular header order was unreachable. It has been reproduced
@@ -44,6 +107,33 @@ that breaking changes may land in a minor release.
   The recommendation that falls out is to try upstream first: h2 issue #637 asked for a
   `header_table_size` setter for fingerprinting reasons, closed as completed, and this crate
   calls that setter today.
+
+- **Phase 6 of the roadmap gained a third route: depending on the published `http2` fork
+  rather than owning one.** The `http2` crate (crates.io, MIT, the renamed `h2` fork `wreq`
+  carries) already exposes `headers_pseudo_order`, `headers_stream_dependency` and
+  `settings_order`, and its encode path writes the stream dependency — the line stock `h2`
+  leaves as a no-op. Checked 2026-08-08, version 0.5.20 had merged upstream h2 0.4.15 in
+  full, CONTINUATION-flood protection included. The cost is an adapter — hyper links `h2`,
+  not `http2`, so the HTTP/2 path would drive it directly — estimated at 300–700 lines and
+  UNMEASURED, the one figure in that table that is not counted, plus trusting a single
+  maintainer for security fixes rather than hyperium.
+
+- **A new assessment, `docs/architecture/05-network-events-assessment.md`**, answers
+  whether the concurrency seam's `Outcome` should become a stream of lifecycle events
+  (`Connected`, `TlsHandshakeComplete`, `FirstByteReceived`, …). The recommendation is no
+  to replacing — the two-method seam is what keeps a third-party controller a page of code
+  — and yes to the events as a separate, additive observer seam, absent by default, whose
+  events carry observations and no judgment. Half the proposed events are not per-request
+  facts at all: a pooled connection skips `Connected` and the TLS handshake entirely, and
+  `ConnectionClosed` belongs to a connection's lifetime, not a request's.
+
+- **The design document and README now describe the concurrency layer as it is.** Four
+  sites in the design document still tied the seam to the removed
+  `chromulate-http/adaptive-concurrency` feature and cited engine lines that had moved.
+  The README's client-behaviour table gained the concurrency row it never had, the
+  workspace tables and dependency diagram gained `chromulate-concurrency`, and "What
+  Chromulate does not do" now states the boundary the seam enforces: the engine emits
+  signals — observed status and headers — and the caller decides what they mean.
 
 ## [0.2.0] — 2026-08-05
 

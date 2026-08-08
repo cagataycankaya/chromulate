@@ -183,7 +183,6 @@ pub struct EngineBuilder {
     cache: Option<Arc<chromulate_cache::HttpCache>>,
     #[cfg(feature = "validator-store")]
     validators: Option<Arc<crate::validators::ValidatorStore>>,
-    #[cfg(feature = "adaptive-concurrency")]
     concurrency: Option<Arc<dyn crate::concurrency::ConcurrencyController>>,
 }
 
@@ -215,7 +214,6 @@ impl EngineBuilder {
             cache: None,
             #[cfg(feature = "validator-store")]
             validators: None,
-            #[cfg(feature = "adaptive-concurrency")]
             concurrency: None,
         }
     }
@@ -361,23 +359,25 @@ impl EngineBuilder {
     ///
     /// The engine asks this for permission before each hop and reports the
     /// outcome against it afterwards; it holds no opinion of its own about what
-    /// a limit should be. Three things can go here:
+    /// a limit should be, and this crate ships no control law to hold one with.
+    /// Anything implementing
+    /// [`ConcurrencyController`](crate::concurrency::ConcurrencyController) goes
+    /// here; the `chromulate-concurrency` crate publishes two —
+    /// `AdaptiveConcurrency`, which learns a limit per origin from latency and
+    /// treats a `429` as a one-way ratchet, and `FixedConcurrency`, which bounds
+    /// in-flight requests per origin at a number and never moves it. Both take a
+    /// ceiling that cannot be defaulted away, so a caller's rate limit reaches
+    /// them by construction.
     ///
-    /// - [`AdaptiveConcurrency`](crate::adaptive::AdaptiveConcurrency), which
-    ///   learns a limit per origin from latency and treats a `429` as a one-way
-    ///   ratchet. Read its documentation for what it does with a `429` and why
-    ///   that differs from a `403`;
-    /// - [`FixedConcurrency`](crate::concurrency::FixedConcurrency), which
-    ///   bounds in-flight requests per origin at a number and never moves it;
-    /// - anything else implementing
-    ///   [`ConcurrencyController`](crate::concurrency::ConcurrencyController).
+    /// Leaving this unset is not the same as installing
+    /// [`Unlimited`](crate::concurrency::Unlimited): both send everything
+    /// immediately, but an installed controller pays the seam's erasure — one
+    /// boxed future and one boxed lease — on every hop.
     ///
     /// A controller runs *below* the middleware chain, so a
     /// [`RateLimiter`](crate::middleware::RateLimiter) the caller installed has
     /// already been paid before one is consulted, and no controller can send a
-    /// request the limiter has not released. The two shipped here also take a
-    /// [`Ceiling`](crate::concurrency::Ceiling) that cannot be defaulted away.
-    #[cfg(feature = "adaptive-concurrency")]
+    /// request the limiter has not released.
     #[must_use]
     pub fn concurrency(
         mut self,
@@ -459,7 +459,6 @@ impl EngineBuilder {
                 retry: self.retry,
                 #[cfg(feature = "cache")]
                 cache: self.cache,
-                #[cfg(feature = "adaptive-concurrency")]
                 concurrency: self.concurrency,
                 config: self.config,
                 connector,
@@ -517,7 +516,6 @@ struct EngineInner {
     retry: Option<Retry>,
     #[cfg(feature = "cache")]
     cache: Option<Arc<chromulate_cache::HttpCache>>,
-    #[cfg(feature = "adaptive-concurrency")]
     concurrency: Option<Arc<dyn crate::concurrency::ConcurrencyController>>,
 }
 
@@ -675,7 +673,6 @@ impl Engine {
                     // that crosses origins is charged to the origin it actually
                     // reaches. A cache hit takes no permit at all, which is
                     // correct: nothing was asked of the origin.
-                    #[cfg(feature = "adaptive-concurrency")]
                     let permit =
                         crate::concurrency::acquire_from(self.inner.concurrency.as_deref(), &url)
                             .await;
@@ -686,7 +683,6 @@ impl Engine {
                     // On a transport error the `?` above drops the lease, which
                     // returns the slot and teaches nothing — a failure to connect
                     // may be this host's network rather than the origin's load.
-                    #[cfg(feature = "adaptive-concurrency")]
                     crate::concurrency::complete_from(permit, &response);
                     self.cache_after(pending, &url, response)
                 }

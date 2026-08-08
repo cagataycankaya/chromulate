@@ -109,20 +109,19 @@ validator-store = []
 # accident. See `chromulate-cache`'s documentation for the subset implemented
 # and, more importantly, for the list of what it deliberately does not do.
 cache = ["dep:chromulate-cache"]
-# `adaptive::AdaptiveConcurrency`: learn, per origin, how many requests that
-# origin is comfortable serving at once, and stay under it.
+
+# There is no `adaptive-concurrency` feature here any more, and the absence is
+# deliberate rather than an oversight. That feature gated the
+# `ConcurrencyController` seam *and* the two control laws behind it with one
+# switch. The laws now live in `chromulate-concurrency`, which depends on this
+# crate; the seam stays here and is always compiled, because a trait that exists
+# only when a feature is on is a trait a third-party implementor cannot rely on.
 #
-# Off by default, and it should stay off for any caller who has not thought about
-# it. What it changes is *when* requests leave, which is a behaviour a caller
-# should choose rather than inherit — a crawler that issues eight requests and
-# expects eight to be in flight will find the first few queued while the
-# controller establishes a baseline. It also holds per-origin state that a build
-# without the feature does not allocate at all.
-#
-# Nothing in it varies a profile, a fingerprint, a header set or an identity in
-# response to a status code, and nothing in it retries a refusal. See the module
-# documentation and the scope boundary in `CLAUDE.md`.
-adaptive-concurrency = []
+# Compiling it unconditionally is free for a caller who installs nothing:
+# measured on `chromulate-bench --bin allocs`, a pooled request costs 48
+# allocations with the seam always present, which is what it cost when the whole
+# module was gated away. The erasure is paid per *installed* controller, not per
+# build.
 
 [lints]
 workspace = true

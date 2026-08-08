@@ -291,6 +291,7 @@ dependencies = [
  "base64 0.23.0",
  "bytes",
  "chromulate-compression",
+ "chromulate-concurrency",
  "chromulate-cookie",
  "chromulate-core",
  "chromulate-dns",
@@ -380,6 +381,19 @@ dependencies = [
  "http-body-util",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "chromulate-concurrency"
+version = "0.2.0"
+dependencies = [
+ "chromulate-core",
+ "chromulate-dns",
+ "chromulate-http",
+ "chromulate-profile",
+ "http",
+ "tokio",
+ "url",
 ]
 
 [[package]]

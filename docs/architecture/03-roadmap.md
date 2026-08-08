@@ -320,6 +320,7 @@ These are counted rather than estimated:
 |---|---|
 | Upstream setter in h2 | **~90–110 lines.** A config value reaches the send path through 13 sites in 5 files, measured by tracing `initial_max_send_streams`; pseudo-header order needs that path plus a rewrite of the `Iter::next` chain, and HEADERS priority needs it plus five bytes and a flag in `Headers::encode`. |
 | Renamed fork, published | The same ~100 lines, **plus re-owning hyper's HTTP/2 glue**. `[patch.crates-io]` cannot be shipped by a library — verified by experiment — so `chromulate-http` would have to stop using `hyper::client::conn::http2`. |
+| Depend on the published `http2` fork | **~300–700 lines, UNMEASURED** — the one figure in this table that is estimated rather than counted. hyper links `h2`, not `http2`, so the HTTP/2 path would drive `http2` directly while HTTP/1.1 stays on hyper; `h2`'s own client example is 52 lines and is the floor. |
 | Chromulate-owned HPACK path | Not re-costed. The route above dominates it and no longer needs deciding first. |
 
 **The glue is the expensive half, and it cannot be taken in part.** Of hyper's 2,388 lines of
@@ -336,6 +337,17 @@ this route and carries `http2` (a renamed h2 fork, 27,238 lines against h2's 26,
 `wreq-proto`, a fork of hyper's whole protocol layer at 10,836 lines, of which the h2 glue is
 2,412 — within a percent of hyper's 2,388. It re-owned the glue nearly line for line and
 keeps hyper only as a dev-dependency. **Plan against ~10,800, not ~1,700.**
+
+That figure prices *owning* a fork, and there is a third route that does not: depending on
+the fork that is already published. `http2` (crates.io, MIT, the renamed `h2` fork wreq
+carries) already exposes `headers_pseudo_order`, `headers_stream_dependency`, and
+`settings_order`, and its encode path writes the stream dependency — the exact line stock
+`h2` leaves as a no-op. Checked 2026-08-08: version 0.5.20 had merged upstream h2 0.4.15 in
+full — its changelog's top entry is h2's, verbatim — including the CONTINUATION-flood
+protection. What this route costs is the adapter in the table above, plus a trust decision:
+security fixes arrive from a single maintainer rather than from hyperium, so the fork's
+currency against upstream is a thing to re-verify at the moment of adoption, not a property
+to remember from this paragraph.
 
 **Try upstream first.** h2 has already accepted a fingerprint-motivated knob: issue #637,
 asking for a `header_table_size` setter for exactly this purpose, closed as completed, and

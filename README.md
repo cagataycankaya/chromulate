@@ -194,6 +194,7 @@ repository; the measured claims behind the fidelity rows are in
 | Timeouts | Yes: whole-request, response-head, and connect, separately. Connect and response-head default to 30s, so a silent server cannot hold a request open; whole-request has no default, because a large download or an SSE stream legitimately runs long. Long polling wants `no_head_timeout()` |
 | Retry with backoff and jitter | Yes, idempotent methods by default |
 | Rate limiting | Yes |
+| Concurrency control | A seam, not a policy. The engine asks a caller-installed `ConcurrencyController` for a lease before each hop and reports back what was observed — a status code and headers, never a conclusion drawn from them. The default is no controller at all. The two shipped laws, `FixedConcurrency` and `AdaptiveConcurrency`, are equals in the `chromulate-concurrency` crate behind the off-by-default `adaptive-concurrency` feature; a third-party controller needs neither the feature nor that crate |
 | Middleware | Yes — a `Middleware`/`Next` chain, plus six other extension seams |
 | `basic_auth` / `bearer_auth` | Yes, marked sensitive so credentials stay out of logs |
 | JSON, form and query helpers | Yes |
@@ -231,7 +232,8 @@ repository; the measured claims behind the fidelity rows are in
 | `chromulate-cache` | The RFC 9111 response cache, behind `chromulate-http`'s off-by-default `cache` feature. |
 | `chromulate-h3` | RFC 7838 `Alt-Svc` parsing and an alternative-service cache, plus the off-by-default `quic-spike`. Nothing in the workspace depends on it yet — the engine does not consume the parser. |
 | `chromulate-tls` | TLS configuration derived from a profile. |
-| `chromulate-http` | The engine: connection pool, HTTP/1.1 and HTTP/2, and the redirect loop. |
+| `chromulate-http` | The engine: connection pool, HTTP/1.1 and HTTP/2, and the redirect loop. Exposes the `ConcurrencyController` seam and holds no concurrency policy of its own. |
+| `chromulate-concurrency` | The two shipped concurrency laws, `FixedConcurrency` and `AdaptiveConcurrency`, behind the facade's off-by-default `adaptive-concurrency` feature. Depends on `chromulate-http` for the seam; the reverse edge does not exist in any form. |
 | `chromulate-cli` | A command-line client for inspecting behaviour. |
 
 How the crates depend on each other:
@@ -240,6 +242,8 @@ How the crates depend on each other:
 graph TD
     cli["chromulate-cli"] --> facade["chromulate"]
     facade --> http["chromulate-http"]
+    facade --> concurrency["chromulate-concurrency"]
+    concurrency --> http
     http --> tls["chromulate-tls"]
     http --> header["chromulate-header"]
     http --> cookie["chromulate-cookie"]
@@ -293,6 +297,15 @@ standards-compliant browser networking behaviour because that is what
 browser-compatible networking means, and because a crawler that misrepresents its
 protocol behaviour produces bad data. Contributions aimed at a specific defence are out of
 scope; see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+And it does not decide; it emits signals. How hard to drive an origin is the caller's
+judgment, so the engine hands a concurrency controller what was observed — a status code,
+the response headers — and never what to conclude from it. The two shipped laws in
+`chromulate-concurrency` are implementations a caller may install, not opinions the engine
+holds, and the default is none at all. The same boundary runs through the neighbouring
+layers: the rate limiter enforces the rate it was given, the proxy provider picks the exit
+the caller's policy names, and neither is overridden by anything the engine concludes on
+its own.
 
 ## Honest limitations
 

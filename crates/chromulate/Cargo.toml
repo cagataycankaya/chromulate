@@ -14,6 +14,7 @@ readme = "../../README.md"
 
 [dependencies]
 chromulate-compression.workspace = true
+chromulate-concurrency = { workspace = true, optional = true }
 chromulate-cookie.workspace = true
 chromulate-core.workspace = true
 chromulate-dns.workspace = true
@@ -73,10 +74,15 @@ cache = ["chromulate-http/cache"]
 validator-store = ["chromulate-http/validator-store"]
 # `Response::bytes_until`. The default read is the whole body either way.
 early-stop = ["chromulate-http/early-stop"]
-# Per-origin concurrency: `ConcurrencyController`, the adaptive law that ships
-# with it, and the fixed-limit one. Off by default, and a caller who enables it
-# still has to install a controller — nothing changes on its own.
-adaptive-concurrency = ["chromulate-http/adaptive-concurrency"]
+# The two per-origin concurrency laws in `chromulate-concurrency`, re-exported
+# as `chromulate::concurrency`. Off by default, and a caller who enables it still
+# has to install a controller — nothing changes on its own.
+#
+# What it no longer gates is the seam: `ConcurrencyController` comes from
+# `chromulate-http` and is always present, so `ClientBuilder::concurrency` works
+# with a controller of the caller's own whether or not this is on. The name is
+# kept for callers who already wrote it in a manifest.
+adaptive-concurrency = ["dep:chromulate-concurrency"]
 # Tests that reach the public internet. Off by default so `cargo test
 # --workspace` stays hermetic.
 network-tests = []

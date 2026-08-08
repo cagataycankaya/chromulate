@@ -58,10 +58,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-#[cfg(feature = "adaptive-concurrency")]
-pub mod adaptive;
 mod body;
-#[cfg(feature = "adaptive-concurrency")]
 pub mod concurrency;
 mod connect;
 mod deadline;
@@ -76,17 +73,9 @@ pub mod time;
 #[cfg(feature = "validator-store")]
 pub mod validators;
 
-#[cfg(feature = "adaptive-concurrency")]
-pub use adaptive::{
-    AdaptiveConcurrency, ConcurrencyConfig, DEFAULT_ORIGIN_CAPACITY, Permit, Signal,
-};
 #[cfg(feature = "early-stop")]
 pub use body::{Prefix, Stop, StopReason};
-#[cfg(feature = "adaptive-concurrency")]
-pub use concurrency::{
-    Ceiling, ConcurrencyController, DEFAULT_FIXED_CAPACITY, FixedConcurrency, FixedLease, Lease,
-    Outcome,
-};
+pub use concurrency::{ConcurrencyController, Lease, Outcome, Unlimited, authority_of};
 pub use engine::{Engine, EngineBuilder, EngineConfig, RequestUrl, ResponseInfo};
 pub use hsts::{DEFAULT_HOST_CAPACITY, HstsStore};
 pub use http2::{DEFAULT_CONNECTION_WINDOW, Http2Fidelity, UnsupportedSetting};

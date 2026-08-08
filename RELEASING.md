@@ -60,8 +60,14 @@ step the order does not matter.
    has no in-workspace consumer today, so its position is free — it sits here because it
    depends only on `chromulate-core` and `chromulate-fingerprint`.
 4. `chromulate-http`
-5. `chromulate`
-6. `chromulate-cli`
+5. `chromulate-concurrency`
+
+   It depends on `chromulate-http` for the `ConcurrencyController` seam, and the
+   dependency runs only that way — `chromulate-http` must never depend on it,
+   dev-dependencies included, or the trait and its implementations become a
+   cycle that cannot be published at all.
+6. `chromulate`
+7. `chromulate-cli`
 
 `chromulate-bench` is `publish = false` and is never published.
 

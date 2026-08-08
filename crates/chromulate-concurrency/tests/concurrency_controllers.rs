@@ -5,16 +5,17 @@
 //! is that there are now two implementations to drive, and the second one exists
 //! partly to show that the first did not shape the seam around itself.
 
-#![cfg(feature = "adaptive-concurrency")]
-
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use chromulate_concurrency::adaptive::{AdaptiveConcurrency, ConcurrencyConfig, Signal};
+use chromulate_concurrency::{Ceiling, FixedConcurrency, FixedLease};
 use chromulate_core::BoxFuture;
-use chromulate_http::adaptive::{AdaptiveConcurrency, ConcurrencyConfig, Signal, authority_of};
-use chromulate_http::concurrency::{
-    Ceiling, ConcurrencyController, FixedConcurrency, FixedLease, Lease, Outcome,
-};
+// The seam these two are reached through lives in the engine crate, and naming
+// it here rather than through this crate's re-export is deliberate: a test that
+// only ever saw `chromulate_concurrency::ConcurrencyController` would not notice
+// if the trait quietly moved back.
+use chromulate_http::concurrency::{ConcurrencyController, Lease, Outcome, authority_of};
 use chromulate_http::{Clock, RateLimit, RateLimiter, Sleeper, TimeSource};
 use http::{HeaderMap, StatusCode};
 use url::Url;
