@@ -216,7 +216,7 @@ jobs:
           done
       - name: Upload crash artefacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-artifacts
           path: fuzz/artifacts/
